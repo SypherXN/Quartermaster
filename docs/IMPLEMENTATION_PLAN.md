@@ -10,6 +10,8 @@ Build a native OpenCode V2 plugin usable through OpenChamber. Quartermaster assi
 
 **Sources:** [V2 plugins](https://opencode.ai/v2/docs/build/plugins/), [V2 RPC](https://opencode.ai/v2/docs/build/plugins/rpc/), [agents](https://opencode.ai/v2/docs/agents/), [opencode-usage `USAGE_RPC`](https://github.com/SypherXN/opencode-usage/blob/master/src/rpc.ts), [Slim's V2 fallback limitation](https://github.com/alvinunreal/oh-my-opencode-slim/blob/master/docs/configuration.md). Recheck signatures before coding. Usage exposes cached `status({})` with `availability`, `stale`, `nextAvailableAt`, windows and reset estimates. Map usage source IDs explicitly to OpenCode provider IDs. Go paid models share a quota; free models may be exempt. `models.go` estimates are not per-model hard quotas.
 
+**Verified upstream contract (opencode-usage master, 2026-09-27):** The complete private npm package source is in [SypherXN/opencode-usage](https://github.com/SypherXN/opencode-usage): `index.ts` loads the V2 plugin, `src/rpc.ts` exports `USAGE_RPC` (`id: "opencode-usage"`, one `status` method with strict `{ refresh?: boolean }` input), `src/status.ts` owns polling, and `src/types.ts` defines `schemaVersion: 1`. `package.json` exports `opencode-usage/rpc` and requires Node >=23.6. Plugin clients call `await ctx.rpc(USAGE_RPC).status({})`. **This is read-through**, not a guaranteed zero-poll read: when its cache is due, the usage plugin itself can coalesce an upstream poll; `refresh: true` requests a rate-limited immediate all-source refresh. Quartermaster must not add another provider poller or call `refresh: true` per assignment. The usage plugin also publishes an atomic JSON status file (`filePath` option -> `GO_MODEL_USAGE_FILE` -> project `opencode-usage.json`); prefer RPC, with file input only as a deliberately configured fallback. Its source IDs are `go`, `codex`, `cursor`; Go's host provider ID is `opencode-go`, not `go`. Stale (>5 min), auth and network errors give `unknown`; `nextAvailableAt` is the **latest** reset of concurrently limited windows when inferable. The usage plugin handles provider-reported reset gating and 15-minute no-reset backoff itself; Quartermaster should cache decisions, not duplicate those polling rules.
+
 **Proposed Quartermaster config** (design target only; #2 determines actual file/API; these are NOT assumed `opencode.json` fields):
 
 ```jsonc
@@ -145,7 +147,7 @@ Use deterministic selector tests with injected clock and synthetic usage, failur
 **Acceptance criteria:**
 - [ ] Synthetic available/limited/unknown/stale snapshots normalize correctly.
 - [ ] RPC failure/missing/schema mismatch is explicit, not falsely exhausted.
-- [ ] Tests show repeat selections reuse cached status without duplicate provider polling.
+- [ ] Tests show Quartermaster does not poll provider APIs directly or force refresh per selection; read-through polling/coalescing remains owned by opencode-usage.
 **Likely files:** `src/usage.ts`, `test/usage.test.ts`.
 **Depends on:** #3.
 

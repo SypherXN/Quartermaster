@@ -198,7 +198,7 @@ isProject: true
 **Acceptance criteria:**
 - [ ] Synthetic available/limited/unknown/stale snapshots normalize correctly.
 - [ ] RPC failure/missing/schema mismatch is explicit, not falsely exhausted.
-- [ ] Tests show repeat selections reuse cached status without duplicate provider polling.
+- [ ] Tests show Quartermaster does not poll provider APIs directly or force refresh per selection; read-through polling/coalescing remains owned by opencode-usage.
 **Likely files:** `src/usage.ts`, `test/usage.test.ts`.
 **Depends on:** #3.
 
