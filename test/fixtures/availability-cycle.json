@@ -1,0 +1,29 @@
+{
+  "models": ["fixture/primary-model", "fixture/backup-model"],
+  "assignments": [
+    {
+      "name": "primary available",
+      "availability": {
+        "fixture/primary-model": "available",
+        "fixture/backup-model": "available"
+      },
+      "selected": "fixture/primary-model"
+    },
+    {
+      "name": "primary limited",
+      "availability": {
+        "fixture/primary-model": "limited",
+        "fixture/backup-model": "available"
+      },
+      "selected": "fixture/backup-model"
+    },
+    {
+      "name": "primary recovered",
+      "availability": {
+        "fixture/primary-model": "available",
+        "fixture/backup-model": "available"
+      },
+      "selected": "fixture/primary-model"
+    }
+  ]
+}

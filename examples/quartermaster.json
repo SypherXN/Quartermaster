@@ -1,0 +1,26 @@
+{
+  "plans": {
+    "review": [
+      "provider-a/quality-model",
+      { "id": "provider-b/backup-model", "variant": "fast" },
+      "provider-b/free-model",
+      "ollama/llama3"
+    ]
+  },
+  "agents": {
+    "reviewer": "review"
+  },
+  "workTypes": {
+    "code-review": "review"
+  },
+  "usageSources": {
+    "provider-a": "codex",
+    "provider-b": "go"
+  },
+  "quotaExemptModels": ["provider-b/free-model"],
+  "providerCooldownMs": 300000,
+  "localHealthTimeoutMs": 2000,
+  "localEndpoints": {
+    "ollama": "http://127.0.0.1:11434"
+  }
+}

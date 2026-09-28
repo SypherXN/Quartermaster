@@ -1,0 +1,16 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [
+    {
+      "package": "../..",
+      "options": {
+        "plans": {
+          "test-agent": ["fixture/primary-model", "fixture/backup-model"]
+        },
+        "agents": {
+          "quartermaster-test": "test-agent"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "name": "quartermaster",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "OpenCode V2 agent model allocation plugin",
+  "engines": {
+    "node": ">=23.6.0"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./rpc": "./src/rpc.ts"
+  },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "test": "node --test test/*.test.ts test/integration/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@opencode/plugin": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "^24",
+    "typescript": "^5"
+  }
+}
