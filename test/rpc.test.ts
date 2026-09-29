@@ -55,8 +55,14 @@ test("unbound agent and absent service return explicit outcomes", async () => {
 })
 
 test("safe selection rejects invalid responses and bounds unavailable calls", async () => {
-  const invalid = await requestSelection({ rpc: () => ({ select: async () => ({ status: "anything" }) }) } as never, { agent: "reviewer" })
-  assert.equal(invalid.reasonCode, "invalid-response")
+  for (const response of [
+    { status: "anything" },
+    { status: "selected", apiVersion: 2, reasonCode: "ok", reason: "ok", selected: model, skipped: [] },
+    { status: "selected", apiVersion: 1, reasonCode: "ok", reason: "ok", selected: { ...model, variant: 42 }, skipped: [] },
+  ]) {
+    const invalid = await requestSelection({ rpc: () => ({ select: async () => response }) } as never, { agent: "reviewer" })
+    assert.equal(invalid.reasonCode, "invalid-response")
+  }
 
   let signal: AbortSignal | undefined
   const timedOut = await requestSelection({
@@ -67,6 +73,22 @@ test("safe selection rejects invalid responses and bounds unavailable calls", as
   } as never, { agent: "reviewer" }, 5)
   assert.equal(timedOut.reasonCode, "timeout")
   assert.equal(signal?.aborted, true)
+})
+
+test("non-selected outcomes pass through after one request without retry", async () => {
+  let requests = 0
+  const response = {
+    apiVersion: 1,
+    status: "no-eligible",
+    reasonCode: "no-eligible-model",
+    reason: "No registered candidate is eligible.",
+    skipped: [{ providerID: "provider-a", modelID: "primary" }],
+  }
+  const result = await requestSelection({
+    rpc: () => ({ select: async () => { requests += 1; return response } }),
+  } as never, { agent: "reviewer", workType: "review" })
+  assert.deepEqual(result, response)
+  assert.equal(requests, 1)
 })
 
 test("pin and failure methods validate against the enabled registry", async () => {

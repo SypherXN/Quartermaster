@@ -7,6 +7,8 @@ import type { UsageReadResult, UsageSourceID } from "./usage.ts"
 
 type AgentRouting = NonNullable<Awaited<ReturnType<typeof registerAgentRouting>>>
 
+export const QUARTERMASTER_API_VERSION = 1 as const
+
 const string = { type: "string" }
 const object = (properties: Record<string, unknown>, required: string[] = []) => ({
   type: "object", properties, required, additionalProperties: false,
@@ -45,21 +47,31 @@ export const QUARTERMASTER_RPC = Rpc.define({
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
 
+export type SelectionInput = { agent: string; workType?: string }
+
+type SelectionMetadata = {
+  apiVersion: typeof QUARTERMASTER_API_VERSION
+  reasonCode: string
+  reason: string
+  skipped: unknown[]
+  [key: string]: unknown
+}
+
 export type SafeSelectionResult =
-  | { status: "unavailable"; reasonCode: "service-unavailable" | "timeout" | "invalid-response"; reason: string }
+  | ({
+      status: "selected"
+      selected: { providerID: string; modelID: string; variant?: string }
+    } & SelectionMetadata)
+  | ({ status: "no-plan" | "no-eligible" } & SelectionMetadata)
   | {
-      status: "selected" | "no-plan" | "no-eligible"
-      apiVersion: number
-      reasonCode: string
+      status: "unavailable"
+      reasonCode: "service-unavailable" | "timeout" | "invalid-response"
       reason: string
-      selected?: { providerID: string; modelID: string; variant?: string }
-      skipped: unknown[]
-      [key: string]: unknown
     }
 
 export async function requestSelection(
   ctx: Pick<Context, "rpc">,
-  input: { agent: string; workType?: string },
+  input: SelectionInput,
   timeoutMs = 2_000,
 ): Promise<SafeSelectionResult> {
   const controller = new AbortController()
@@ -78,9 +90,14 @@ export async function requestSelection(
     ])
     const valid = isRecord(result) &&
       ["selected", "no-plan", "no-eligible"].includes(String(result.status)) &&
-      typeof result.apiVersion === "number" && typeof result.reasonCode === "string" &&
+      result.apiVersion === QUARTERMASTER_API_VERSION && typeof result.reasonCode === "string" &&
       typeof result.reason === "string" && Array.isArray(result.skipped) &&
-      (result.status !== "selected" || (isRecord(result.selected) && typeof result.selected.providerID === "string" && typeof result.selected.modelID === "string"))
+      (result.status !== "selected" || (
+        isRecord(result.selected) &&
+        typeof result.selected.providerID === "string" && result.selected.providerID.trim().length > 0 &&
+        typeof result.selected.modelID === "string" && result.selected.modelID.trim().length > 0 &&
+        (result.selected.variant === undefined || typeof result.selected.variant === "string")
+      ))
     return valid
       ? result as SafeSelectionResult
       : { status: "unavailable", reasonCode: "invalid-response", reason: "Quartermaster returned an invalid response." }
@@ -124,8 +141,8 @@ export async function registerQuartermasterRpc(
       if (!isRecord(input) || typeof input.agent !== "string" || !input.agent.trim()) throw call.error("invalid_input", "agent is required", { path: "agent", message: "expected a non-empty string" })
       const agent = input.agent
       if (input.workType !== undefined && (typeof input.workType !== "string" || !input.workType.trim())) throw call.error("invalid_input", "workType is invalid", { path: "workType", message: "expected a non-empty string" })
-      if (routing) return { apiVersion: 1, ...await routing.select(agent, input.workType as string | undefined) }
-      return { apiVersion: 1, status: "no-plan", reasonCode: "unbound-agent", reason: "No model plan is configured for this agent.", skipped: [] }
+      if (routing) return { apiVersion: QUARTERMASTER_API_VERSION, ...await routing.select(agent, input.workType as string | undefined) }
+      return { apiVersion: QUARTERMASTER_API_VERSION, status: "no-plan", reasonCode: "unbound-agent", reason: "No model plan is configured for this agent.", skipped: [] }
     },
     async explain(input, call) {
       if (!isRecord(input) || typeof input.agent !== "string" || !input.agent.trim()) throw call.error("invalid_input", "agent is required", { path: "agent", message: "expected a non-empty string" })

@@ -30,6 +30,56 @@ test("normalizes candidates, variants, bindings, and defaults", () => {
   assert.deepEqual(config.localEndpoints, { ollama: "http://127.0.0.1:11434/" })
 })
 
+test("parses opt-in token budgets without enabling them by default", () => {
+  assert.equal(parseConfig({}).budgets, undefined)
+  assert.deepEqual(parseConfig({ budgets: [
+    { id: "project-month", dimension: "project", limitTokens: 1_000_000, windowMs: 30 * 86_400_000 },
+    { id: "provider-day", dimension: "provider", target: "provider-a", limitTokens: 20_000, windowMs: 86_400_000 },
+    { id: "model-day", dimension: "model", target: "provider-a/model-a", limitTokens: 10_000, windowMs: 86_400_000 },
+    { id: "plugin-day", dimension: "plugin", target: "consumer", limitTokens: 5_000, windowMs: 86_400_000 },
+  ] }).budgets, [
+    { id: "project-month", dimension: "project", limitTokens: 1_000_000, windowMs: 30 * 86_400_000 },
+    { id: "provider-day", dimension: "provider", target: "provider-a", limitTokens: 20_000, windowMs: 86_400_000 },
+    { id: "model-day", dimension: "model", target: "provider-a/model-a", limitTokens: 10_000, windowMs: 86_400_000 },
+    { id: "plugin-day", dimension: "plugin", target: "consumer", limitTokens: 5_000, windowMs: 86_400_000 },
+  ])
+})
+
+test("rejects invalid budget dimensions, targets, windows, limits, and duplicate IDs", () => {
+  const budget = { id: "day", dimension: "project", limitTokens: 10, windowMs: 1_000 }
+  assert.throws(() => parseConfig({ budgets: [{ ...budget, dimension: "session" }] }), /budgets\[0\]\.dimension/)
+  assert.throws(() => parseConfig({ budgets: [{ ...budget, target: "project-a" }] }), /project budgets do not accept a target/)
+  assert.throws(() => parseConfig({ budgets: [{ ...budget, limitTokens: 0 }] }), /limitTokens: expected a positive safe integer/)
+  assert.throws(() => parseConfig({ budgets: [{ ...budget, windowMs: 1.5 }] }), /windowMs: expected a positive safe integer/)
+  assert.throws(() => parseConfig({ budgets: [{ ...budget, id: "day" }, { ...budget, id: "day" }] }), /duplicate budget ID/)
+  assert.throws(() => parseConfig({ budgets: [{ ...budget, dimension: "model", target: "unqualified" }] }), /target: expected providerID\/modelID/)
+})
+
+test("normalizes calendar budget windows and rejects invalid window definitions", () => {
+  assert.deepEqual(parseConfig({ budgets: [{
+    id: "calendar-day", dimension: "project", limitTokens: 10,
+    calendarWindow: { unit: "day" },
+  }] }).budgets, [{
+    id: "calendar-day", dimension: "project", limitTokens: 10,
+    calendarWindow: { unit: "day", timeZone: "UTC" },
+  }])
+  assert.throws(() => parseConfig({ budgets: [{
+    id: "bad-unit", dimension: "project", limitTokens: 10,
+    calendarWindow: { unit: "year" },
+  }] }), /calendarWindow\.unit/)
+  assert.throws(() => parseConfig({ budgets: [{
+    id: "bad-zone", dimension: "project", limitTokens: 10,
+    calendarWindow: { unit: "day", timeZone: "Mars\/Phobos" },
+  }] }), /calendarWindow\.timeZone/)
+  assert.throws(() => parseConfig({ budgets: [{
+    id: "both", dimension: "project", limitTokens: 10, windowMs: 1000,
+    calendarWindow: { unit: "day" },
+  }] }), /exactly one/)
+  assert.throws(() => parseConfig({ budgets: [{
+    id: "neither", dimension: "project", limitTokens: 10,
+  }] }), /exactly one/)
+})
+
 test("preserves slashes inside provider model IDs", () => {
   assert.deepEqual(parseConfig({ plans: { review: ["openrouter/vendor/model"] } }).plans.review[0], {
     providerID: "openrouter",

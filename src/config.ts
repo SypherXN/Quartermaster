@@ -4,11 +4,28 @@ export interface ModelRef {
   variant?: string
 }
 
+export type TokenBudgetDimension = "project" | "provider" | "model" | "plugin"
+
+export interface TokenBudgetCalendarWindow {
+  unit: "day" | "week" | "month"
+  timeZone: string
+}
+
+export interface TokenBudgetConfig {
+  id: string
+  dimension: TokenBudgetDimension
+  target?: string
+  limitTokens: number
+  windowMs?: number
+  calendarWindow?: TokenBudgetCalendarWindow
+}
+
 export interface QuartermasterConfig {
   plans: Record<string, ModelRef[]>
   agents: Record<string, string>
   workTypes: Record<string, string>
   usageSources: Record<string, string>
+  budgets?: TokenBudgetConfig[]
   quotaExemptModels: string[]
   providerCooldownMs: number
   localHealthTimeoutMs: number
@@ -94,6 +111,80 @@ function duration(value: unknown, path: string, fallback: number): number {
   return value
 }
 
+function budgetsFrom(value: unknown): TokenBudgetConfig[] {
+  if (!Array.isArray(value)) throw new Error("budgets: expected an array")
+  const seen = new Set<string>()
+  return value.map((item, index) => {
+    const path = `budgets[${index}]`
+    const budget = record(item, path)
+    for (const key of Object.keys(budget)) {
+      if (!["id", "dimension", "target", "limitTokens", "windowMs", "calendarWindow"].includes(key)) {
+        throw new Error(`${path}.${key}: unknown field`)
+      }
+    }
+    const id = string(budget.id, `${path}.id`)
+    if (seen.has(id)) throw new Error(`${path}.id: duplicate budget ID`)
+    seen.add(id)
+    const dimension = budget.dimension
+    if (!["project", "provider", "model", "plugin"].includes(String(dimension))) {
+      throw new Error(`${path}.dimension: expected project, provider, model, or plugin`)
+    }
+    const target = budget.target === undefined ? undefined : string(budget.target, `${path}.target`)
+    if (dimension === "project" && target !== undefined) {
+      throw new Error(`${path}.target: project budgets do not accept a target`)
+    }
+    if (dimension !== "project" && target === undefined) {
+      throw new Error(`${path}.target: required for ${String(dimension)} budgets`)
+    }
+    if (dimension === "model") {
+      const split = target!.indexOf("/")
+      if (split <= 0 || split === target!.length - 1 || /\s/.test(target!)) {
+        throw new Error(`${path}.target: expected providerID/modelID`)
+      }
+    }
+    const positiveInteger = (key: "limitTokens" | "windowMs") => {
+      const number = budget[key]
+      if (typeof number !== "number" || !Number.isSafeInteger(number) || number <= 0) {
+        throw new Error(`${path}.${key}: expected a positive safe integer`)
+      }
+      return number
+    }
+    if ((budget.windowMs === undefined) === (budget.calendarWindow === undefined)) {
+      throw new Error(`${path}: specify exactly one of windowMs or calendarWindow`)
+    }
+    let calendarWindow: TokenBudgetCalendarWindow | undefined
+    if (budget.calendarWindow !== undefined) {
+      const calendar = record(budget.calendarWindow, `${path}.calendarWindow`)
+      for (const key of Object.keys(calendar)) {
+        if (key !== "unit" && key !== "timeZone") {
+          throw new Error(`${path}.calendarWindow.${key}: unknown field`)
+        }
+      }
+      const unit = calendar.unit
+      if (unit !== "day" && unit !== "week" && unit !== "month") {
+        throw new Error(`${path}.calendarWindow.unit: expected day, week, or month`)
+      }
+      const timeZone = calendar.timeZone === undefined
+        ? "UTC"
+        : string(calendar.timeZone, `${path}.calendarWindow.timeZone`)
+      try {
+        new Intl.DateTimeFormat("en", { timeZone }).format(0)
+      } catch {
+        throw new Error(`${path}.calendarWindow.timeZone: expected an IANA timezone`)
+      }
+      calendarWindow = { unit, timeZone }
+    }
+    return {
+      id,
+      dimension: dimension as TokenBudgetDimension,
+      ...(target === undefined ? {} : { target }),
+      limitTokens: positiveInteger("limitTokens"),
+      ...(budget.windowMs === undefined ? {} : { windowMs: positiveInteger("windowMs") }),
+      ...(calendarWindow === undefined ? {} : { calendarWindow }),
+    }
+  })
+}
+
 function localEndpoints(value: unknown): Record<string, string> {
   return Object.fromEntries(Object.entries(record(value, "localEndpoints")).map(([provider, value]) => {
     const path = `localEndpoints.${provider}`
@@ -116,7 +207,7 @@ export function parseConfig(input: unknown = {}): QuartermasterConfig {
   const options = record(input, "options")
   const fields = new Set([
     "plans", "agents", "workTypes", "usageSources", "quotaExemptModels", "providerCooldownMs",
-    "localHealthTimeoutMs", "localEndpoints",
+    "localHealthTimeoutMs", "localEndpoints", "budgets",
   ])
   for (const key of Object.keys(options)) {
     if (!fields.has(key)) throw new Error(`options.${key}: unknown field`)
@@ -126,6 +217,7 @@ export function parseConfig(input: unknown = {}): QuartermasterConfig {
   const agents = options.agents === undefined ? {} : stringMap(options.agents, "agents")
   const workTypes = options.workTypes === undefined ? {} : stringMap(options.workTypes, "workTypes")
   const usageSources = options.usageSources === undefined ? {} : stringMap(options.usageSources, "usageSources")
+  const budgets = options.budgets === undefined ? undefined : budgetsFrom(options.budgets)
   for (const [provider, source] of Object.entries(usageSources)) {
     if (!["go", "codex", "cursor"].includes(source)) {
       throw new Error(`usageSources.${provider}: expected one of go, codex, cursor`)
@@ -146,6 +238,7 @@ export function parseConfig(input: unknown = {}): QuartermasterConfig {
     agents,
     workTypes,
     usageSources,
+    ...(budgets === undefined ? {} : { budgets }),
     quotaExemptModels: exemptModels,
     providerCooldownMs: duration(options.providerCooldownMs, "providerCooldownMs", DEFAULTS.providerCooldownMs),
     localHealthTimeoutMs: duration(options.localHealthTimeoutMs, "localHealthTimeoutMs", DEFAULTS.localHealthTimeoutMs),
