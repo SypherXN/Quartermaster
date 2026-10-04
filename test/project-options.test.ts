@@ -518,7 +518,7 @@ test("matches only this Quartermaster package", async () => {
     await writeFile(join(decoy, "package.json"), JSON.stringify({ name: "unrelated-plugin" }))
     await writeFile(join(decoy, "index.js"), "")
     const untouched = { plans: { p: ["fixture/old"] } }
-    for (const pkg of ["not-quartermaster", "C:/workspace/Quartermaster/unrelated-plugin/index.js", decoy]) {
+    for (const pkg of ["not-quartermaster", "quartermaster-extra", "github:SypherXN/other", "github:SypherXN/quartermaster-extra", "C:/workspace/Quartermaster/unrelated-plugin/index.js", decoy]) {
       const text = JSON.stringify({ plugins: [{ package: pkg, options: untouched }] })
       const path = await writeProject(root, text, "opencode.json")
       const revision = (await stat(path)).mtimeMs
@@ -534,7 +534,7 @@ test("matches only this Quartermaster package", async () => {
 
     const relativeSpec = relative(root, packageRoot)
     assert.match(relativeSpec, /^\.\.[\\/]/)
-    for (const pkg of ["quartermaster", relativeSpec, packageRoot, pathToFileURL(packageRoot).href]) {
+    for (const pkg of ["quartermaster", "quartermaster@0.1.0", "github:SypherXN/quartermaster#main", "github:SypherXN/quartermaster.git#main", "https://github.com/SypherXN/quartermaster", "git+https://github.com/SypherXN/quartermaster.git", relativeSpec, packageRoot, pathToFileURL(packageRoot).href]) {
       const text = JSON.stringify({
         plugins: [
           { package: "not-quartermaster", options: untouched },

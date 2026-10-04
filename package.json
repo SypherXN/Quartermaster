@@ -4,6 +4,10 @@
   "private": true,
   "type": "module",
   "description": "OpenCode V2 agent model allocation plugin",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SypherXN/quartermaster.git"
+  },
   "engines": {
     "node": ">=23.6.0"
   },

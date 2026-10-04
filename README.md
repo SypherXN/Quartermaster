@@ -1,34 +1,21 @@
 # Quartermaster
 
-Native OpenCode V2 plugin for assigning agent models using preference plans and provider availability. Standalone routing comes first, followed by OMO Slim integration and an optional GUI.
+OpenCode V2 plugin that assigns agent models from named plans and provider availability.
 
-See [implementation plan](docs/IMPLEMENTATION_PLAN.md) and [ID tracker](plans/quartermaster.plan.md). Native routing, cached usage, quota eligibility, work-type routing, failure cooldowns, local endpoint health, availability refresh, pins, and selection explanations are implemented; the Slim bridge is still pending.
+## Install
 
-## Development
+Requires Node.js 23.6 or newer. Add one plugin entry to the OpenCode project that should use it. The package value must be one of:
 
-Requires Node.js 23.6 or newer.
-
-```sh
-npm install
-npm run build
-npm test
-npm run typecheck
-```
-
-`build` checks TypeScript without emitting files; Node 23.6+ runs the TypeScript plugin entrypoint directly, so no transpilation step is needed.
-
-The local `opencode-usage.json` snapshot is live account state and is intentionally excluded from Git.
-
-## Configuration
-
-Quartermaster reads its settings from the plugin entry's `options` object in OpenCode V2 `opencode.json(c)`. The example [`examples/quartermaster.json`](examples/quartermaster.json) is that options object—not an OpenCode config file—so adding Quartermaster settings does not replace or rewrite unrelated OpenCode settings. In the snippet, replace `quartermaster` with the installed package name or a local plugin directory.
+- `github:SypherXN/quartermaster` to install this repository
+- a local directory path to a checkout
+- `quartermaster` when that package name is already installed
 
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
     {
-      "package": "quartermaster",
+      "package": "github:SypherXN/quartermaster",
       "options": {
         "plans": { "review": ["provider-a/quality-model", "provider-b/backup-model"] },
         "agents": { "reviewer": "review" }
@@ -37,6 +24,26 @@ Quartermaster reads its settings from the plugin entry's `options` object in Ope
   ]
 }
 ```
+
+Replace the model ids with enabled `providerID/modelID` values from `opencode models`. Settings live only in that entry's `options` object. [`examples/quartermaster.json`](examples/quartermaster.json) is the options object alone, not a full OpenCode config, so it does not replace unrelated settings.
+
+On an OpenChamber build that includes the Quartermaster panel, allow `quartermaster` to read reports and `quartermaster-options` to save. The read grant cannot save. The panel is part of OpenChamber, not this package. See [the bridge](docs/OPENCHAMBER_BRIDGE.md).
+
+A checkout can also start the optional local page with `npm run local-ui`. See [`web/README.md`](web/README.md).
+
+## Development
+
+Maintainer checks, not part of install:
+
+```sh
+npm install
+npm test
+npm run typecheck
+```
+
+`npm run build` typechecks without emitting files. Node runs the TypeScript entry directly. The root `opencode.json` and `opencode-usage.json` are local state and are not part of the plugin.
+
+## Configuration
 
 Candidates are ordered `providerID/modelID` strings or `{ "id": "providerID/modelID", "variant": "..." }` objects. Bindings must reference a configured plan; each plan must have unique, non-empty candidates. `usageSources` maps actual provider IDs to `go`, `codex`, or `cursor` usage sources. A confirmed limited source skips every mapped model; `quotaExemptModels` lists fully qualified models (all variants) that do not use that quota. Unknown or stale usage is not treated as exhausted, and estimated reset times alone do not restore eligibility. Durations are positive integer milliseconds (`providerCooldownMs` defaults to 300000; `localHealthTimeoutMs` to 2000). `localEndpoints` accepts loopback HTTP(S) URLs only and explicitly opts those providers into a bodyless GET health check with credentials omitted. Results are cached for five seconds; a failed check skips only models from that local provider.
 
@@ -63,15 +70,13 @@ RPC responses carry `apiVersion: 1`; selection returns the model reference and s
 
 `requestReport` reads bounded usage, budget, and observed retry-error summaries for the plugin's active project context. It never accepts caller-supplied ownership; requesting another project returns `unsupported` because this plugin API exposes no caller identity/authorization mechanism. Reports label unknown attribution and incomplete live-event coverage, and `refresh` only rereads the durable ledgers—it does not poll providers or replay events. See [telemetry reporting limits](docs/TOKEN_TELEMETRY.md).
 
-OpenChamber currently has no documented authenticated bridge to the active OpenCode server, so Quartermaster does not ship an OpenChamber panel. See the [bridge feasibility findings](docs/OPENCHAMBER_BRIDGE.md). The example below only exposes OpenCode's `quartermaster-test` agent in OpenChamber; it is not a Quartermaster GUI.
-
 ## Native routing boundaries
 
 Quartermaster preloads enabled models, cached usage status, and configured local endpoint health before applying bound choices through OpenCode V2's synchronous agent transform. It edits only the agent's model field; prompts, permissions, and other agent settings are retained. The client reads `opencode-usage.status({})` with a bounded timeout and normalizes its versioned snapshot; it never forces refresh or polls provider APIs. Configured mapped models with unknown usage are skipped as unknown, not classified as exhausted; unmapped models are unaffected by quota status, and remote providers are never health-probed. A changed eligibility snapshot takes effect after the router refreshes and calls the supported agent reload, for the next assignment only.
 
 OpenCode keeps a session's selected model separate from its selected primary agent, so Quartermaster never changes an existing or explicitly selected session model. Configured subagents use their agent model by default. Agent transforms replay in registration order: Quartermaster overrides earlier model edits for bound agents, but a later transform may override Quartermaster. Load it after transforms it should take precedence over. No active-turn `switchModel` is used.
 
-Structured provider outages cool down every model from that provider; model outages and model-scoped temporary rate limits affect only that model. Quota exhaustion, auth failures, cancellation, and generic errors do not create outage cooldowns. A matching success clears only that scope. Active cooldowns persist in plugin storage and are restored after restart. Every 60 seconds, Quartermaster reads cached usage and checks configured local endpoints; changed eligibility is debounced and applied at the next agent assignment. The routing handle accepts failure reports internally; cross-plugin reporting is added in #13.
+Structured provider outages cool down every model from that provider; model outages and model-scoped temporary rate limits affect only that model. Quota exhaustion, auth failures, cancellation, and generic errors do not create outage cooldowns. A matching success clears only that scope. Active cooldowns persist in plugin storage and are restored after restart. Every 60 seconds, Quartermaster reads cached usage and checks configured local endpoints; changed eligibility is debounced and applied at the next agent assignment. The routing handle accepts failure reports internally. Other plugins can report through the cross-plugin RPC.
 
 ## Dynamic test agent
 

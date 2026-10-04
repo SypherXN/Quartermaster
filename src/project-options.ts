@@ -187,8 +187,17 @@ const localPackageSpec = (value: string) => {
   return spec.startsWith("file:") || spec.startsWith("./") || spec.startsWith("../") || spec.startsWith("/") || /^[A-Za-z]:\//.test(spec)
 }
 
+const namedPackage = (value: string) => value === "quartermaster" || value.startsWith("quartermaster@")
+
+const githubPackage = (value: string) => {
+  const spec = value.replace(/#.*$/, "").replace(/\.git$/, "")
+  return spec === "github:SypherXN/quartermaster"
+    || spec === "https://github.com/SypherXN/quartermaster"
+    || spec === "git+https://github.com/SypherXN/quartermaster"
+}
+
 const isThisPackage = async (value: string, configFile: string, root: string) => {
-  if (!localPackageSpec(value)) return value === "quartermaster"
+  if (!localPackageSpec(value)) return namedPackage(value) || githubPackage(value)
   let target: string
   try {
     target = value.replaceAll("\\", "/").startsWith("file:") ? fileURLToPath(value) : resolve(dirname(configFile), value)

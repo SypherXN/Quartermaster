@@ -5,8 +5,8 @@ boundary. Consumers should use this RPC, not import Quartermaster internals
 or read its private state.
 
 The canonical descriptor and helper are exported from `quartermaster/rpc`.
-Quartermaster is currently a private package, so consumers need a workspace
-link or another resolver that makes this subpath available.
+Install Quartermaster from `github:SypherXN/quartermaster` or from a local
+checkout, then import that same installed copy.
 
 ## Assignment-time selection
 
@@ -55,9 +55,11 @@ settings the editor does not change. Authorized V2 plugin callers use
 The reader and writer require exactly one matching project Quartermaster entry
 across `opencode.json`, `opencode.jsonc`, `.opencode/opencode.json`, and
 `.opencode/opencode.jsonc` in that directory. A match is the package name
-`quartermaster`, or a `file:`, relative, or absolute path that resolves to this
-package. Another name or path is left unchanged, including one that only
-contains that word. They do not edit global or ancestor
+`quartermaster` with an optional `@version`, `github:SypherXN/quartermaster`
+with an optional `#ref` or `.git` suffix, that same repository as an
+`https://github.com/` or `git+https://github.com/` URL, or a `file:`, relative,
+or absolute path that resolves to this install. Another name or path is left
+unchanged, including one that only contains that word. They do not edit global or ancestor
 configuration. The writer validates options, checks the file revision, creates a
 `.quartermaster.bak` backup, and replaces only the entry's `options` object,
 preserving unrelated configuration and JSONC comments outside that object.
