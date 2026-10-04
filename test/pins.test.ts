@@ -70,6 +70,38 @@ test("unknown models and unbound agents fail clearly; invalid stored pins are ig
   await assert.rejects(disabled.pin("reviewer", primary), /not enabled/)
 })
 
+for (const action of ["pin", "unpin"] as const) {
+  test(`${action} rejects an unbound toString agent without changing pins or storage`, async () => {
+    const initial = { reviewer: backup, toString: primary }
+    const store = storedPins(initial)
+    const pins = await AgentPins.load(config, registry, store.storage)
+    assert.equal(pins.get("toString"), undefined)
+    await assert.rejects(
+      action === "pin" ? pins.pin("toString", primary) : pins.unpin("toString"),
+      /agents\.toString: agent has no configured plan/,
+    )
+    assert.deepEqual([...pins.snapshot()], [["reviewer", backup]])
+    assert.equal(store.read(), initial)
+    assert.equal(store.key(), undefined)
+  })
+}
+
+test("explicit toString agent and plan bindings can be pinned, restored, and unpinned", async () => {
+  const namedConfig = parseConfig({
+    plans: { toString: ["provider-a/primary"] },
+    agents: { toString: "toString" },
+  })
+  const store = storedPins()
+  const pins = await AgentPins.load(namedConfig, registry, store.storage)
+  assert.deepEqual(await pins.pin("toString", primary), primary)
+  assert.deepEqual(store.read(), { toString: primary })
+  const restored = await AgentPins.load(namedConfig, registry, store.storage)
+  assert.deepEqual(restored.get("toString"), primary)
+  assert.equal(await restored.unpin("toString"), true)
+  assert.equal(restored.get("toString"), undefined)
+  assert.deepEqual(store.read(), {})
+})
+
 test("unavailable pins are skipped with structured reasons", async () => {
   const pins = await AgentPins.load(config, registry, storedPins().storage)
   await pins.pin("reviewer", backup)

@@ -8,12 +8,34 @@ function fakeRpc(status = async () => ({})) {
   })
 }
 
+async function* noEvents() {}
+
+const storage = {
+  get: async () => undefined,
+  set: async () => {},
+  remove: async () => {},
+  scan: async () => ({ entries: [] }),
+}
+
+function fakeContext(extra: Record<string, unknown> = {}) {
+  return {
+    location: { project: { id: "project-test" } },
+    event: { subscribe: () => noEvents() },
+    session: {
+      get: async () => { throw new Error("not used") },
+      hook: async () => ({ dispose() {} }),
+    },
+    storage,
+    ...extra,
+  }
+}
+
 test("plugin loads and disposes without changing agent configuration", async () => {
   assert.equal(plugin.id, "quartermaster")
   assert.equal(typeof plugin.setup, "function")
 
-  const cleanup = await plugin.setup({ rpc: fakeRpc() } as never)
-  if (typeof cleanup === "function") cleanup()
+  const cleanup = await plugin.setup(fakeContext({ rpc: fakeRpc() }) as never)
+  if (typeof cleanup === "function") await cleanup()
 })
 
 test("plugin rejects invalid configured options during setup", async () => {
@@ -25,9 +47,10 @@ test("plugin rejects invalid configured options during setup", async () => {
 
 test("missing usage RPC does not prevent plugin startup", async () => {
   const ctx = {
+    ...fakeContext(),
     options: { usageSources: { "provider-a": "codex" } },
     rpc: fakeRpc(async () => { throw new Error("RPC not found") }),
   }
   const cleanup = await plugin.setup(ctx as never)
-  if (typeof cleanup === "function") cleanup()
+  if (typeof cleanup === "function") await cleanup()
 })

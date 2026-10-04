@@ -17,10 +17,22 @@
     "provider-a": "codex",
     "provider-b": "go"
   },
+  "tokenRates": [
+    {
+      "providerID": "provider-a",
+      "modelID": "quality-model",
+      "inputPerMillion": 2.0,
+      "outputPerMillion": 8.0,
+      "currency": "USD",
+      "source": "illustrative user-entered rate",
+      "asOf": 1780272000000
+    }
+  ],
   "budgets": [
     {
       "id": "project-month",
       "dimension": "project",
+      "mode": "advisory",
       "limitTokens": 1000000,
       "calendarWindow": { "unit": "month", "timeZone": "UTC" }
     }

@@ -1,18 +1,22 @@
 import assert from "node:assert/strict"
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import test from "node:test"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import { parseConfig } from "../src/config.ts"
-import { QUARTERMASTER_RPC, registerQuartermasterRpc, requestSelection } from "../src/rpc.ts"
+import { QUARTERMASTER_RPC, registerQuartermasterRpc, requestReport, requestSelection } from "../src/rpc.ts"
 
 const config = parseConfig({ plans: { p: ["provider-a/primary"] }, agents: { reviewer: "p" }, workTypes: { review: "p" }, usageSources: { "provider-a": "codex" } })
 const model = { providerID: "provider-a", modelID: "primary", variant: "thinking" }
 
-function context(routing?: unknown) {
+function context(routing?: unknown, reporting?: unknown, optionsDirectory?: string) {
   let handlers: Record<string, (input: unknown, call: never) => unknown> | undefined
   let disposed = false
   const rpc = Object.assign((definition: { id: string }) => {
     if (!handlers || definition.id !== QUARTERMASTER_RPC.id) throw new Error("RPC service missing")
-    return new Proxy({}, { get: (_target, name: string) => (input: unknown) => handlers?.[name](input, {
+    return new Proxy({}, { get: (_target, name: string) => (input: unknown, options?: { signal?: AbortSignal }) => handlers?.[name](input, {
+      signal: options?.signal ?? new AbortController().signal,
       error: (code: string, message: string, data: unknown) => { throw Object.assign(new Error(message), { code, data }) },
     } as never) })
   }, {
@@ -25,10 +29,146 @@ function context(routing?: unknown) {
   return {
     ctx,
     disposed: () => disposed,
-    register: () => registerQuartermasterRpc(ctx as unknown as Pick<Context, "rpc" | "model">, config, routing as never),
-    client: () => ctx.rpc(QUARTERMASTER_RPC) as Record<string, (input: unknown) => Promise<Record<string, unknown>>>,
+    register: () => registerQuartermasterRpc(ctx as unknown as Pick<Context, "rpc" | "model">, config, routing as never, undefined, reporting as never, optionsDirectory),
+    client: () => ctx.rpc(QUARTERMASTER_RPC) as Record<string, (input: unknown, options?: { signal?: AbortSignal }) => Promise<Record<string, unknown>>>,
   }
 }
+
+test("plugin integration docs describe the project-options RPC contract", async () => {
+  const docs = await readFile(new URL("../docs/PLUGIN_INTEGRATION.md", import.meta.url), "utf8")
+  const section = docs.split("## Configuration editing capability\n")[1]?.split("\n## ")[0]
+  assert.ok(section)
+  assert.match(section, /`readOptions\(\{\}\)`/)
+  assert.match(section, /`applyOptions\(\{ options, revision \}\)`/)
+  assert.match(section, /`apiVersion: 1`/)
+  assert.match(section, /`status: "ok"`/)
+  assert.match(section, /`status: "saved"`/)
+  assert.match(section, /`stale-revision`/)
+  assert.match(section, /`quartermaster-options`/)
+  assert.match(section, /`quartermaster` grant remains read-only/)
+  assert.doesNotMatch(docs, /has no project-configuration write RPC|not an RPC, writes/)
+})
+
+test("project-options plan specs agree with the live writer documentation", async () => {
+  const sections: string[] = []
+  for (const file of ["plans/quartermaster.plan.md", "docs/IMPLEMENTATION_PLAN.md"]) {
+    const docs = await readFile(new URL(`../${file}`, import.meta.url), "utf8")
+    const section = docs.split("### [#33] [plan-config-rpc] ")[1]?.split("\n### ")[0]
+    assert.ok(section, file)
+    assert.match(section, /`readOptions` and `applyOptions`/)
+    assert.match(section, /`quartermaster-options`/)
+    assert.match(section, /offline.*syntax-only/)
+    assert.doesNotMatch(section, /no (?:host write|config) RPC|remain blocked|still needs|Keep this pending/i)
+    sections.push(section.trim())
+  }
+  assert.equal(sections[0], sections[1])
+  const readme = await readFile(new URL("../web/README.md", import.meta.url), "utf8")
+  assert.match(readme, /`quartermaster-options`/)
+  assert.doesNotMatch(readme, /no live project-config writer|no general proxy or write route|bridge is likewise not implemented|still needs the OpenChamber bridge/i)
+})
+
+test("project-options RPC uses its bound directory and never returns a path", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "qm-rpc-options-"))
+  const otherDirectory = await mkdtemp(join(tmpdir(), "qm-rpc-options-other-"))
+  const text = JSON.stringify({ plugins: [{ package: "quartermaster", options: { plans: { review: ["provider-a/old"] } } }] })
+  try {
+    const path = join(directory, "opencode.json")
+    const otherPath = join(otherDirectory, "opencode.json")
+    await writeFile(path, text)
+    await writeFile(otherPath, text)
+    const originalOther = await readFile(otherPath, "utf8")
+    const testContext = context(undefined, undefined, directory)
+    await testContext.register()
+    const client = testContext.client()
+    const current = await client.readOptions({})
+    assert.deepEqual(current, { apiVersion: 1, status: "ok", options: JSON.parse(text).plugins[0].options, revision: (await stat(path)).mtimeMs })
+    assert.equal("path" in current, false)
+    assert.equal("directory" in current, false)
+
+    const nextOptions = { plans: { review: ["provider-a/new"] } }
+    const saved = await client.applyOptions({ options: nextOptions, revision: current.revision })
+    assert.deepEqual(saved, { apiVersion: 1, status: "saved", options: nextOptions, revision: (await stat(path)).mtimeMs })
+    assert.deepEqual(JSON.parse((await readFile(path, "utf8")).replace(/\/\/[^\n]*/g, "" )).plugins[0].options, nextOptions)
+    assert.equal(await readFile(otherPath, "utf8"), originalOther)
+    assert.equal("path" in current, false)
+
+    const stale = await client.readOptions({})
+    await writeFile(path, text + "\n")
+    await assert.rejects(client.applyOptions({ options: nextOptions, revision: stale.revision }), (error: Error & { code?: string }) => error.code === "unavailable")
+    await assert.rejects(client.applyOptions({ options: nextOptions, revision: 0, extra: true }), (error: Error & { code?: string }) => error.code === "invalid_input")
+
+    const beforeCancelledWrite = await readFile(path, "utf8")
+    const controller = new AbortController()
+    controller.abort()
+    await assert.rejects(client.applyOptions({ options: nextOptions, revision: (await stat(path)).mtimeMs }, { signal: controller.signal }))
+    assert.equal(await readFile(path, "utf8"), beforeCancelledWrite)
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+    await rm(otherDirectory, { recursive: true, force: true })
+  }
+})
+
+test("report RPC rejects unbounded and cross-project requests without leaking data", async () => {
+  const reporting = {
+    projectID: "project-a",
+    tokenLedger: { list: async () => [] },
+    errorLedger: { list: async () => [] },
+    attributionLedger: { list: async () => [] },
+    budgets: [],
+    tokenRates: undefined,
+    now: () => 123,
+  }
+  const testContext = context(undefined, reporting)
+  await testContext.register()
+  const client = testContext.client()
+  const report = await client.report({ refresh: true })
+  assert.equal(report.status, "ok")
+  assert.equal(report.apiVersion, 1)
+  assert.equal(report.projectID, "project-a")
+  assert.equal(report.generatedAt, 123)
+  assert.equal(report.refresh, "reread")
+  const denied = await client.report({ projectID: "project-b" })
+  assert.equal(denied.status, "unsupported")
+  assert.equal(denied.reasonCode, "cross-project-authorization-unavailable")
+  assert.equal(denied.projectID, undefined)
+  await assert.rejects(client.report({ limit: 101 }), (error: Error & { code?: string }) => error.code === "invalid_input")
+  await assert.rejects(client.report({ since: 200, until: 100 }), (error: Error & { code?: string }) => error.code === "invalid_input")
+})
+
+test("report helper returns explicit missing-service outcome", async () => {
+  const result = await requestReport({ rpc: () => { throw new Error("missing") } } as never)
+  assert.equal(result.status, "unavailable")
+  assert.equal(result.reasonCode, "service-unavailable")
+
+  const timedOut = await requestReport({
+    rpc: () => ({ report: async () => new Promise(() => {}) }),
+  } as never, {}, 5)
+  assert.equal(timedOut.status, "unavailable")
+  assert.equal(timedOut.reasonCode, "timeout")
+})
+
+test("plugin usage claims are opt-in, bounded, and scoped to the active project", async () => {
+  const claims: unknown[][] = []
+  const testContext = context(undefined, {
+    projectID: "project-a",
+    tokenLedger: { list: async () => [] },
+    errorLedger: { list: async () => [] },
+    attributionLedger: { claim: async (...args: unknown[]) => { claims.push(args) }, list: async () => [] },
+    budgets: [],
+    tokenRates: undefined,
+  })
+  await testContext.register()
+  const client = testContext.client()
+  const accepted = await client.reportPluginUsage({ pluginID: "plugin-a", pluginName: "Plugin A", sessionIDs: ["session-1", "session-1", "child-1"] })
+  assert.deepEqual(accepted, {
+    apiVersion: 1, status: "accepted", attribution: "self-reported-unverified", acceptedSessions: 2,
+  })
+  assert.deepEqual(claims, [["project-a", "plugin-a", "Plugin A", ["session-1", "child-1"]]])
+  await assert.rejects(client.reportPluginUsage({ pluginName: "name only", sessionIDs: ["session-1"] }), (error: Error & { code?: string }) => error.code === "invalid_input")
+  await assert.rejects(client.reportPluginUsage({ pluginID: "plugin-a", pluginName: "Plugin A", sessionIDs: [] }), (error: Error & { code?: string }) => error.code === "invalid_input")
+  await assert.rejects(client.reportPluginUsage({ pluginID: "plugin-a", pluginName: "Plugin A", projectID: "project-b", sessionIDs: ["session-1"] }), (error: Error & { code?: string }) => error.code === "invalid_input")
+  await assert.rejects(client.reportPluginUsage({ pluginID: "plugin-a", pluginName: "Plugin A", sessionIDs: Array.from({ length: 101 }, (_, index) => `session-${index}`) }), (error: Error & { code?: string }) => error.code === "invalid_input")
+})
 
 test("separate RPC client receives versioned selection and explanation", async () => {
   const routing = {

@@ -1,8 +1,8 @@
 # Token budgets
 
-Budgets are opt-in Quartermaster configuration for reporting observed token
-usage over rolling or calendar windows. They do not change routing or switch
-the active session model.
+Budgets are opt-in Quartermaster configuration for warnings about observed
+token usage over rolling or calendar windows. They do not filter or reorder
+models, enforce a hard cap, or switch the active session model.
 
 ```json
 {
@@ -18,7 +18,8 @@ the active session model.
 ```
 
 Each budget needs a unique `id`, a `dimension`, a positive integer
-`limitTokens`, and exactly one window:
+`limitTokens`, and exactly one window. `mode` is optional and defaults to
+`advisory`; `strict` is accepted as a request but does not enable enforcement.
 
 - `windowMs`: a positive integer rolling duration in milliseconds.
 - `calendarWindow`: `{ "unit": "day" | "week" | "month", "timeZone": "…" }`.
@@ -55,6 +56,24 @@ event stream has no replay/completeness watermark, so readings always report
 `remainingTokens` is always `null`; `limitReached` is true only when the
 observed lower bound alone reaches the configured limit. Do not present these
 readings as complete usage or remaining capacity.
+
+## Assignment warnings
+
+At Quartermaster-owned agent assignment boundaries, advisory budgets log
+structured `budget-limit-reached` reasons when observed usage alone reaches a
+limit, and `budget-usage-unknown` when in-window records cannot be attributed
+or counted. Known usage below the limit does not produce a warning. These
+reasons accompany normal candidate selection; they never exclude a candidate,
+change plan order, or alter quota, pin, or explicit-choice precedence.
+
+A `strict` budget reports `cannot-guarantee-hard-cap` instead of claiming
+enforcement. The event stream has no trustworthy request bound or complete
+replay watermark, and concurrent assignments cannot reserve future token
+usage atomically. Unknown or late-arriving usage can therefore make the
+observed total incomplete. New telemetry may refresh warnings for subsequent
+assignments, but cannot affect an active session or retroactively guarantee a
+cap. Consumer-plugin requests are outside this Quartermaster-owned warning
+boundary.
 
 Project is usable when the host session lookup supplies a project ID. A model
 budget is valid configuration, but is meaningful only for records with exact

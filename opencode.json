@@ -1,0 +1,12 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [
+    {
+      "package": "C:/Users/mattg/projects/Quartermaster",
+      "options": {
+        "plans": { "review": ["opencode/space-bunny-free"] },
+        "agents": { "reviewer": "review" }
+      }
+    }
+  ]
+}

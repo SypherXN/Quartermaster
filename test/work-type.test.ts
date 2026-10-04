@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import { parseConfig } from "../src/config.ts"
-import { modelKey, resolvePlan, selectModel } from "../src/select.ts"
+import { modelKey, resolvePlan, selectAgentModel, selectModel } from "../src/select.ts"
 import type { ModelRef } from "../src/config.ts"
 
 const config = parseConfig({
@@ -58,6 +58,54 @@ test("unknown work types fall back to the agent binding with an explanation", ()
     status: "no-plan",
     reason: { code: "unknown-work-type", workType: "typo" },
   })
+})
+
+test("inherited toString properties are not work-type or agent bindings", () => {
+  assert.deepEqual(resolvePlan(config, "reviewer", { workType: "toString" }), {
+    status: "plan",
+    planID: "review",
+    plan: config.plans.review,
+    source: "agent",
+    reason: { code: "unknown-work-type-agent-fallback", workType: "toString" },
+  })
+  assert.deepEqual(resolvePlan(config, "toString", { workType: "toString" }), {
+    status: "no-plan",
+    reason: { code: "unknown-work-type", workType: "toString" },
+  })
+  assert.deepEqual(resolvePlan(config, "toString"), {
+    status: "no-plan",
+    reason: { code: "unbound-agent" },
+  })
+  assert.deepEqual(selectAgentModel(config, "toString", registry, eligibility, 0), {
+    status: "no-plan",
+    reason: { code: "no-plan" },
+    skipped: [],
+  })
+})
+
+test("explicit toString bindings still resolve and select their configured plan", () => {
+  const mapped = parseConfig({
+    plans: { toString: ["provider/fast-model"] },
+    agents: { toString: "toString" },
+    workTypes: { toString: "toString" },
+  })
+  assert.deepEqual(resolvePlan(mapped, "unbound", { workType: "toString" }), {
+    status: "plan",
+    planID: "toString",
+    plan: mapped.plans.toString,
+    source: "work-type",
+    reason: { code: "work-type-binding" },
+  })
+  assert.deepEqual(resolvePlan(mapped, "toString"), {
+    status: "plan",
+    planID: "toString",
+    plan: mapped.plans.toString,
+    source: "agent",
+    reason: { code: "agent-binding" },
+  })
+  const selected = selectAgentModel(mapped, "toString", registry, eligibility, 0)
+  assert.equal(selected.status, "selected")
+  if (selected.status === "selected") assert.equal(selected.model.modelID, "fast-model")
 })
 
 test("explicit user model takes precedence over work type and agent binding", () => {

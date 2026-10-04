@@ -64,6 +64,21 @@ test("a limited shared source excludes every mapped model except explicit exempt
   }
 })
 
+test("unmapped toString providers stay available; explicit mappings still apply", () => {
+  const model: ModelRef = { providerID: "toString", modelID: "model" }
+  const snapshots: (UsageReadResult | undefined)[] = [
+    undefined,
+    { status: "unavailable", reason: "rpc-error" },
+    usage("limited", "unknown"),
+  ]
+  for (const snapshot of snapshots) {
+    const eligibility = buildQuotaEligibility([model], {}, [], snapshot)
+    assert.equal(eligibility.get(modelKey(model))?.status, "available")
+  }
+  const mapped = buildQuotaEligibility([model], { toString: "go" }, [], usage("limited", "unknown"))
+  assert.equal(mapped.get(modelKey(model))?.status, "limited")
+})
+
 test("estimated reset does not unblock a source, but a fresh available status does", () => {
   const limited = buildQuotaEligibility(registry, { "opencode-go": "go" }, [], usage("limited", "available", 500))
   assert.equal(limited.get(modelKey(registry[0]))?.status, "limited")

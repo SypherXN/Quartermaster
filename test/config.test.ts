@@ -33,16 +33,30 @@ test("normalizes candidates, variants, bindings, and defaults", () => {
 test("parses opt-in token budgets without enabling them by default", () => {
   assert.equal(parseConfig({}).budgets, undefined)
   assert.deepEqual(parseConfig({ budgets: [
-    { id: "project-month", dimension: "project", limitTokens: 1_000_000, windowMs: 30 * 86_400_000 },
-    { id: "provider-day", dimension: "provider", target: "provider-a", limitTokens: 20_000, windowMs: 86_400_000 },
-    { id: "model-day", dimension: "model", target: "provider-a/model-a", limitTokens: 10_000, windowMs: 86_400_000 },
-    { id: "plugin-day", dimension: "plugin", target: "consumer", limitTokens: 5_000, windowMs: 86_400_000 },
+    { id: "project-month", dimension: "project", mode: "advisory", limitTokens: 1_000_000, windowMs: 30 * 86_400_000 },
+    { id: "provider-day", dimension: "provider", mode: "advisory", target: "provider-a", limitTokens: 20_000, windowMs: 86_400_000 },
+    { id: "model-day", dimension: "model", mode: "advisory", target: "provider-a/model-a", limitTokens: 10_000, windowMs: 86_400_000 },
+    { id: "plugin-day", dimension: "plugin", mode: "advisory", target: "consumer", limitTokens: 5_000, windowMs: 86_400_000 },
   ] }).budgets, [
-    { id: "project-month", dimension: "project", limitTokens: 1_000_000, windowMs: 30 * 86_400_000 },
-    { id: "provider-day", dimension: "provider", target: "provider-a", limitTokens: 20_000, windowMs: 86_400_000 },
-    { id: "model-day", dimension: "model", target: "provider-a/model-a", limitTokens: 10_000, windowMs: 86_400_000 },
-    { id: "plugin-day", dimension: "plugin", target: "consumer", limitTokens: 5_000, windowMs: 86_400_000 },
+    { id: "project-month", dimension: "project", mode: "advisory", limitTokens: 1_000_000, windowMs: 30 * 86_400_000 },
+    { id: "provider-day", dimension: "provider", mode: "advisory", target: "provider-a", limitTokens: 20_000, windowMs: 86_400_000 },
+    { id: "model-day", dimension: "model", mode: "advisory", target: "provider-a/model-a", limitTokens: 10_000, windowMs: 86_400_000 },
+    { id: "plugin-day", dimension: "plugin", mode: "advisory", target: "consumer", limitTokens: 5_000, windowMs: 86_400_000 },
   ])
+})
+
+test("validates optional token cost rates and exact model variants", () => {
+  const rate = { providerID: "provider-a", modelID: "model-a", variant: "fast", inputPerMillion: 0.5, outputPerMillion: 1.25, currency: "USD", source: "provider rate page", asOf: 1_700_000_000_000 }
+  assert.deepEqual(parseConfig({ tokenRates: [rate] }).tokenRates, [rate])
+  for (const rates of [
+    [{ ...rate, inputPerMillion: -1 }],
+    [{ ...rate, outputPerMillion: Number.POSITIVE_INFINITY }],
+    [{ ...rate, currency: "usd" }],
+    [{ ...rate, asOf: 1.5 }],
+    [{ ...rate, extra: true }],
+    [rate, rate],
+  ]) assert.throws(() => parseConfig({ tokenRates: rates }), /tokenRates/)
+  assert.throws(() => parseConfig({ tokenRates: Array.from({ length: 101 }, (_, i) => ({ ...rate, modelID: `model-${i}` })) }), /at most 100/)
 })
 
 test("rejects invalid budget dimensions, targets, windows, limits, and duplicate IDs", () => {
@@ -53,14 +67,15 @@ test("rejects invalid budget dimensions, targets, windows, limits, and duplicate
   assert.throws(() => parseConfig({ budgets: [{ ...budget, windowMs: 1.5 }] }), /windowMs: expected a positive safe integer/)
   assert.throws(() => parseConfig({ budgets: [{ ...budget, id: "day" }, { ...budget, id: "day" }] }), /duplicate budget ID/)
   assert.throws(() => parseConfig({ budgets: [{ ...budget, dimension: "model", target: "unqualified" }] }), /target: expected providerID\/modelID/)
+  assert.throws(() => parseConfig({ budgets: [{ ...budget, mode: "enforce" }] }), /mode: expected advisory or strict/)
 })
 
 test("normalizes calendar budget windows and rejects invalid window definitions", () => {
   assert.deepEqual(parseConfig({ budgets: [{
-    id: "calendar-day", dimension: "project", limitTokens: 10,
+    id: "calendar-day", dimension: "project", mode: "advisory", limitTokens: 10,
     calendarWindow: { unit: "day" },
   }] }).budgets, [{
-    id: "calendar-day", dimension: "project", limitTokens: 10,
+    id: "calendar-day", dimension: "project", mode: "advisory", limitTokens: 10,
     calendarWindow: { unit: "day", timeZone: "UTC" },
   }])
   assert.throws(() => parseConfig({ budgets: [{

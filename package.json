@@ -13,7 +13,8 @@
   },
   "scripts": {
     "build": "tsc --noEmit",
-    "test": "node --test test/*.test.ts test/integration/*.test.ts",
+    "local-ui": "node src/local-ui.mjs",
+    "test": "node --test test/*.test.ts test/*.test.mjs test/integration/*.test.ts test/telemetry/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

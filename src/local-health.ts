@@ -29,6 +29,7 @@ export class LocalHealth {
     providerID: string,
     { now = Date.now(), force = false }: { now?: number; force?: boolean } = {},
   ): Promise<LocalHealthStatus | undefined> {
+    if (!Object.hasOwn(this.endpoints, providerID)) return undefined
     const endpoint = this.endpoints[providerID]
     if (endpoint === undefined) return undefined
 

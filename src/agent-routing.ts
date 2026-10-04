@@ -7,8 +7,10 @@ import { FailureCooldowns, type FailureReport, type SuccessReport } from "./fail
 import { applyLocalHealth, LocalHealth } from "./local-health.ts"
 import { explainSelection, type SelectionExplanation } from "./explain.ts"
 import { AgentPins } from "./pins.ts"
+import { adoptProjectQuartermasterOptions } from "./project-options.ts"
 import { modelKey, resolvePlan, selectAgentModel, selectModel, type ModelEligibility } from "./select.ts"
 import { readUsageStatus, type UsageReadResult, type UsageSourceID } from "./usage.ts"
+import type { TokenBudgetGate, TokenBudgetReason } from "./telemetry/budget-gate.ts"
 
 const COOLDOWN_STORAGE_KEY = "availability/cooldowns-v1"
 const AVAILABILITY_REFRESH_MS = 60_000
@@ -28,11 +30,14 @@ export function applyAgentRouting(
   eligibility: ReadonlyMap<string, ModelEligibility>,
   now: number,
   pins: ReadonlyMap<string, ModelRef> = new Map(),
+  budgetReasons: readonly TokenBudgetReason[] = [],
+  onBudgetWarning?: (agentID: string, selection: ReturnType<typeof selectAgentModel>, reasons: readonly TokenBudgetReason[]) => void,
 ): void {
   for (const agentID of Object.keys(config.agents)) {
     if (!editor.get(agentID)) continue
 
     const selection = selectAgentModel(config, agentID, registry, eligibility, now, pins.get(agentID))
+    if (budgetReasons.length > 0) onBudgetWarning?.(agentID, selection, budgetReasons)
     if (selection.status !== "selected") continue
 
     editor.update(agentID, (agent) => {
@@ -48,9 +53,10 @@ export function applyAgentRouting(
 }
 
 export async function registerAgentRouting(
-  ctx: Pick<Context, "agent" | "model" | "rpc" | "storage">,
+  ctx: Pick<Context, "agent" | "model" | "rpc" | "storage"> & { location?: { directory?: string } },
   config: QuartermasterConfig,
   usage?: UsageReadResult,
+  budgetGate?: TokenBudgetGate,
 ) {
   if (Object.keys(config.agents).length === 0 && Object.keys(config.workTypes).length === 0) return undefined
 
@@ -72,9 +78,18 @@ export async function registerAgentRouting(
     pins.get(agentID),
   )
   const registration = Object.keys(config.agents).length > 0
-    ? await ctx.agent.transform((editor) => {
+      ? await ctx.agent.transform((editor) => {
         const now = Date.now()
-        applyAgentRouting(editor, config, registry, failures.apply(eligibility, registry, now), now, pins.snapshot())
+        applyAgentRouting(
+          editor,
+          config,
+          registry,
+          failures.apply(eligibility, registry, now),
+          now,
+          pins.snapshot(),
+          budgetGate?.reasons(now),
+          (agentID, selection, reasons) => console.warn("[quartermaster] token budget advisory", JSON.stringify({ agentID, selection, reasons })),
+        )
       })
     : undefined
   if (registration) {
@@ -154,7 +169,12 @@ export async function registerAgentRouting(
   }, AVAILABILITY_REFRESH_MS)
   interval.unref?.()
 
+  const ensureProjectOptions = async () => {
+    if (ctx.location?.directory) await adoptProjectQuartermasterOptions(config, ctx.location.directory).catch(() => undefined)
+  }
+
   const select = async (agentID: string, workType?: string) => {
+    await ensureProjectOptions()
     const resolution = resolvePlan(config, agentID, { workType })
     if (resolution.status === "explicit-model") {
       return { status: "explicit-model", model: resolution.model, reasonCode: resolution.reason.code }
@@ -178,12 +198,16 @@ export async function registerAgentRouting(
     return { ...explainSelection(selection), plan: { id: resolution.planID, source: resolution.source, reasonCode: resolution.reason.code } }
   }
 
-  const status = () => {
+  const plans = () => ({ plans: config.plans, agents: config.agents, workTypes: config.workTypes })
+  const status = async () => {
+    await ensureProjectOptions()
+    const currentPlans = plans()
     const currentUsage = usage
-    if (!currentUsage) return { apiVersion: 1, status: Object.keys(config.usageSources).length > 0 ? "unavailable" : "unconfigured", ...(Object.keys(config.usageSources).length > 0 ? { reason: "not-read" } : {}), sources: {} }
-    if (currentUsage.status === "unavailable") return { apiVersion: 1, status: "unavailable", reason: currentUsage.reason, sources: {} }
+    if (!currentUsage) return { apiVersion: 1, ...currentPlans, status: Object.keys(config.usageSources).length > 0 ? "unavailable" : "unconfigured", ...(Object.keys(config.usageSources).length > 0 ? { reason: "not-read" } : {}), sources: {} }
+    if (currentUsage.status === "unavailable") return { apiVersion: 1, ...currentPlans, status: "unavailable", reason: currentUsage.reason, sources: {} }
     return {
       apiVersion: 1,
+      ...currentPlans,
       status: "ok",
       updatedAt: currentUsage.snapshot.updatedAt,
       sources: Object.fromEntries(Object.entries(config.usageSources).map(([providerID, sourceID]) => {
@@ -214,12 +238,16 @@ export async function registerAgentRouting(
       if (changed) await requestReload()
       return changed
     },
-    explain(agentID: string): SelectionExplanation {
+    async explain(agentID: string): Promise<SelectionExplanation> {
+      await ensureProjectOptions()
       return explainSelection(selectedFor(agentID))
     },
     select,
     status,
     refresh,
+    async refreshBudgets() {
+      await requestReload()
+    },
     async dispose() {
       clearInterval(interval)
       if (refreshPromise) await refreshPromise.catch(() => {})

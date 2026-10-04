@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quartermaster local config draft</title>
+<style>
+  body{font:16px system-ui,sans-serif;max-width:900px;margin:2rem auto;padding:0 1rem;color:#17202a}
+  textarea,button{font:inherit} textarea{box-sizing:border-box;width:100%;min-height:24rem;font-family:ui-monospace,monospace}
+  button{margin:.75rem 0;padding:.5rem 1rem} :focus-visible{outline:3px solid #2874a6}
+  .warning{border-left:4px solid #b03a2e;padding:.75rem;background:#fdf2f2}
+</style>
+<h1>Quartermaster config draft</h1>
+<p class="warning"><strong>Opt-in, offline tool.</strong> This page does not connect to OpenCode or write files. It only validates JSON syntax and downloads a draft for manual review and paste. It does not validate Quartermaster semantics or preserve JSONC comments.</p>
+<label for="options">Quartermaster plugin options JSON</label>
+<textarea id="options" spellcheck="false" aria-describedby="help"></textarea>
+<p id="help">Paste only the contents of Quartermaster's <code>plugins[].options</code>.</p>
+<button id="download" type="button">Validate JSON and download draft</button>
+<p id="status" role="status" aria-live="polite">No draft downloaded.</p>
+<script>
+const editor=document.querySelector('#options'),status=document.querySelector('#status')
+document.querySelector('#download').addEventListener('click',()=>{
+  try {
+    const options=JSON.parse(editor.value)
+    if(!options||typeof options!=='object'||Array.isArray(options))throw Error()
+    const blob=new Blob([JSON.stringify(options,null,2)+'\n'],{type:'application/json'})
+    const link=document.createElement('a');link.href=URL.createObjectURL(blob);link.download='quartermaster-options.json';link.click()
+    setTimeout(()=>URL.revokeObjectURL(link.href),0)
+    status.textContent='JSON syntax is valid. Review the downloaded draft; semantic validation and applying it are your responsibility.'
+  } catch {
+    status.textContent='Invalid JSON object. No file was downloaded.'
+  }
+})
+</script>
+</html>

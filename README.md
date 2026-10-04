@@ -2,7 +2,7 @@
 
 Native OpenCode V2 plugin for assigning agent models using preference plans and provider availability. Standalone routing comes first, followed by OMO Slim integration and an optional GUI.
 
-See [implementation plan](docs/IMPLEMENTATION_PLAN.md) and [ID tracker](.cursor/plans/quartermaster.plan.md). Native routing, cached usage, quota eligibility, work-type routing, failure cooldowns, local endpoint health, availability refresh, pins, and selection explanations are implemented; the Slim bridge is still pending.
+See [implementation plan](docs/IMPLEMENTATION_PLAN.md) and [ID tracker](plans/quartermaster.plan.md). Native routing, cached usage, quota eligibility, work-type routing, failure cooldowns, local endpoint health, availability refresh, pins, and selection explanations are implemented; the Slim bridge is still pending.
 
 ## Development
 
@@ -51,14 +51,19 @@ The internal plan resolver accepts a caller-supplied work-type alias before the 
 Import the versioned RPC contract from the `quartermaster/rpc` package subpath and call it from another V2 plugin:
 
 ```ts
-import { QUARTERMASTER_RPC, requestSelection } from "quartermaster/rpc"
+import { QUARTERMASTER_RPC, requestReport, requestSelection } from "quartermaster/rpc"
 
 const selection = await requestSelection(ctx, { agent: "reviewer", workType: "review" })
 // `selected`, `no-plan`, `no-eligible`, or safe `unavailable` fallback
 const status = await ctx.rpc(QUARTERMASTER_RPC).status({})
+const report = await requestReport(ctx, { since: Date.now() - 86_400_000, limit: 50 })
 ```
 
 RPC responses carry `apiVersion: 1`; selection returns the model reference and structured selected/skipped reason codes. The API also exposes `explain`, `pin`, `unpin`, `reportFailure`, and `reportSuccess`. Invalid inputs and unavailable routing have typed errors. Status contains sanitized usage windows and reset metadata, never upstream error text or credentials. `select` only recommends a model; it does not switch an active session model. Consumers should handle `unavailable` by keeping their host-selected model.
+
+`requestReport` reads bounded usage, budget, and observed retry-error summaries for the plugin's active project context. It never accepts caller-supplied ownership; requesting another project returns `unsupported` because this plugin API exposes no caller identity/authorization mechanism. Reports label unknown attribution and incomplete live-event coverage, and `refresh` only rereads the durable ledgers—it does not poll providers or replay events. See [telemetry reporting limits](docs/TOKEN_TELEMETRY.md).
+
+OpenChamber currently has no documented authenticated bridge to the active OpenCode server, so Quartermaster does not ship an OpenChamber panel. See the [bridge feasibility findings](docs/OPENCHAMBER_BRIDGE.md). The example below only exposes OpenCode's `quartermaster-test` agent in OpenChamber; it is not a Quartermaster GUI.
 
 ## Native routing boundaries
 

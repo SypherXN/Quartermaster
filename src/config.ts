@@ -14,10 +14,22 @@ export interface TokenBudgetCalendarWindow {
 export interface TokenBudgetConfig {
   id: string
   dimension: TokenBudgetDimension
+  mode?: "advisory" | "strict"
   target?: string
   limitTokens: number
   windowMs?: number
   calendarWindow?: TokenBudgetCalendarWindow
+}
+
+export interface TokenRateConfig {
+  providerID: string
+  modelID: string
+  variant?: string
+  inputPerMillion: number
+  outputPerMillion: number
+  currency: string
+  source: string
+  asOf: number
 }
 
 export interface QuartermasterConfig {
@@ -26,6 +38,7 @@ export interface QuartermasterConfig {
   workTypes: Record<string, string>
   usageSources: Record<string, string>
   budgets?: TokenBudgetConfig[]
+  tokenRates?: TokenRateConfig[]
   quotaExemptModels: string[]
   providerCooldownMs: number
   localHealthTimeoutMs: number
@@ -118,7 +131,7 @@ function budgetsFrom(value: unknown): TokenBudgetConfig[] {
     const path = `budgets[${index}]`
     const budget = record(item, path)
     for (const key of Object.keys(budget)) {
-      if (!["id", "dimension", "target", "limitTokens", "windowMs", "calendarWindow"].includes(key)) {
+      if (!["id", "dimension", "mode", "target", "limitTokens", "windowMs", "calendarWindow"].includes(key)) {
         throw new Error(`${path}.${key}: unknown field`)
       }
     }
@@ -128,6 +141,10 @@ function budgetsFrom(value: unknown): TokenBudgetConfig[] {
     const dimension = budget.dimension
     if (!["project", "provider", "model", "plugin"].includes(String(dimension))) {
       throw new Error(`${path}.dimension: expected project, provider, model, or plugin`)
+    }
+    const mode = budget.mode === undefined ? "advisory" : budget.mode
+    if (mode !== "advisory" && mode !== "strict") {
+      throw new Error(`${path}.mode: expected advisory or strict`)
     }
     const target = budget.target === undefined ? undefined : string(budget.target, `${path}.target`)
     if (dimension === "project" && target !== undefined) {
@@ -177,10 +194,52 @@ function budgetsFrom(value: unknown): TokenBudgetConfig[] {
     return {
       id,
       dimension: dimension as TokenBudgetDimension,
+      mode,
       ...(target === undefined ? {} : { target }),
       limitTokens: positiveInteger("limitTokens"),
       ...(budget.windowMs === undefined ? {} : { windowMs: positiveInteger("windowMs") }),
       ...(calendarWindow === undefined ? {} : { calendarWindow }),
+    }
+  })
+}
+
+function tokenRatesFrom(value: unknown): TokenRateConfig[] {
+  if (!Array.isArray(value) || value.length > 100) throw new Error("tokenRates: expected an array of at most 100 rates")
+  const seen = new Set<string>()
+  return value.map((item, index) => {
+    const path = `tokenRates[${index}]`
+    const rate = record(item, path)
+    for (const key of Object.keys(rate)) {
+      if (![
+        "providerID", "modelID", "variant", "inputPerMillion", "outputPerMillion", "currency", "source", "asOf",
+      ].includes(key)) throw new Error(`${path}.${key}: unknown field`)
+    }
+    const providerID = string(rate.providerID, `${path}.providerID`)
+    const modelID = string(rate.modelID, `${path}.modelID`)
+    const variant = rate.variant === undefined ? undefined : string(rate.variant, `${path}.variant`)
+    const key = JSON.stringify([providerID, modelID, variant ?? null])
+    if (seen.has(key)) throw new Error(`${path}: duplicate provider/model/variant rate`)
+    seen.add(key)
+    const price = (field: "inputPerMillion" | "outputPerMillion") => {
+      const value = rate[field]
+      if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+        throw new Error(`${path}.${field}: expected a finite non-negative rate`)
+      }
+      return value
+    }
+    const currency = string(rate.currency, `${path}.currency`)
+    if (!/^[A-Z]{3}$/.test(currency)) throw new Error(`${path}.currency: expected a three-letter uppercase currency code`)
+    if (typeof rate.asOf !== "number" || !Number.isSafeInteger(rate.asOf) || rate.asOf < 0) {
+      throw new Error(`${path}.asOf: expected a non-negative safe integer timestamp`)
+    }
+    return {
+      providerID, modelID,
+      ...(variant === undefined ? {} : { variant }),
+      inputPerMillion: price("inputPerMillion"),
+      outputPerMillion: price("outputPerMillion"),
+      currency,
+      source: string(rate.source, `${path}.source`),
+      asOf: rate.asOf,
     }
   })
 }
@@ -207,7 +266,7 @@ export function parseConfig(input: unknown = {}): QuartermasterConfig {
   const options = record(input, "options")
   const fields = new Set([
     "plans", "agents", "workTypes", "usageSources", "quotaExemptModels", "providerCooldownMs",
-    "localHealthTimeoutMs", "localEndpoints", "budgets",
+    "localHealthTimeoutMs", "localEndpoints", "budgets", "tokenRates",
   ])
   for (const key of Object.keys(options)) {
     if (!fields.has(key)) throw new Error(`options.${key}: unknown field`)
@@ -218,6 +277,7 @@ export function parseConfig(input: unknown = {}): QuartermasterConfig {
   const workTypes = options.workTypes === undefined ? {} : stringMap(options.workTypes, "workTypes")
   const usageSources = options.usageSources === undefined ? {} : stringMap(options.usageSources, "usageSources")
   const budgets = options.budgets === undefined ? undefined : budgetsFrom(options.budgets)
+  const tokenRates = options.tokenRates === undefined ? undefined : tokenRatesFrom(options.tokenRates)
   for (const [provider, source] of Object.entries(usageSources)) {
     if (!["go", "codex", "cursor"].includes(source)) {
       throw new Error(`usageSources.${provider}: expected one of go, codex, cursor`)
@@ -239,6 +299,7 @@ export function parseConfig(input: unknown = {}): QuartermasterConfig {
     workTypes,
     usageSources,
     ...(budgets === undefined ? {} : { budgets }),
+    ...(tokenRates === undefined ? {} : { tokenRates }),
     quotaExemptModels: exemptModels,
     providerCooldownMs: duration(options.providerCooldownMs, "providerCooldownMs", DEFAULTS.providerCooldownMs),
     localHealthTimeoutMs: duration(options.localHealthTimeoutMs, "localHealthTimeoutMs", DEFAULTS.localHealthTimeoutMs),

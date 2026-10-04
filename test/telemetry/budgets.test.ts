@@ -11,6 +11,7 @@ const baseRecord = (overrides: Partial<TokenTelemetryRecord> = {}): TokenTelemet
   hostMessageID: "message",
   hostProjectID: "project-a",
   parentSessionID: null,
+  hostAgentID: null,
   providerID: "provider-a",
   modelID: "model-a",
   variant: null,

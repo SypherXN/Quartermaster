@@ -73,7 +73,7 @@ export class AgentPins {
   }
 
   private assertBoundAgent(agentID: string): readonly ModelRef[] {
-    const planID = this.config.agents[agentID]
+    const planID = Object.hasOwn(this.config.agents, agentID) ? this.config.agents[agentID] : undefined
     if (planID === undefined) throw new Error(`agents.${agentID}: agent has no configured plan`)
     return this.config.plans[planID]
   }

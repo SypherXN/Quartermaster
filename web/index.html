@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quartermaster local report viewer</title>
+<style>
+  body{font:16px system-ui,sans-serif;max-width:900px;margin:2rem auto;padding:0 1rem;color:#17202a}
+  button,input,textarea{font:inherit} section{margin:1rem 0;padding:1rem;border:1px solid #ccd1d1;border-radius:.5rem} label,textarea{display:block;width:100%} textarea{margin:.4rem 0 1rem}
+  pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f4f6f7;padding:1rem} :focus-visible{outline:3px solid #2874a6}
+</style>
+<h1>Quartermaster local report viewer</h1>
+<p>Choose a report file, or start the separately opted-in local gateway and load a live report. The gateway keeps the OpenCode token server-side.</p>
+<section><label for="file">Report JSON</label> <input id="file" type="file" accept="application/json,.json"> <button id="live" type="button">Load live report</button>
+<p id="status" role="status" aria-live="polite">No report loaded.</p></section>
+<main id="report" aria-live="polite"></main>
+<section id="editor">
+  <h2>Assignment editor</h2>
+  <p>Load the project options, edit plans and bindings, then apply. Apply uses the project writer. Cancel discards unsaved edits. The current session stays unchanged, and the next assignment reads the saved file.</p>
+  <label for="plans">Plans. One model per line: plan provider/model variant</label>
+  <textarea id="plans" rows="4" spellcheck="false"></textarea>
+  <label for="agents">Agent bindings. One per line: agent plan</label>
+  <textarea id="agents" rows="3" spellcheck="false"></textarea>
+  <label for="work-types">Work types. One per line: workType plan</label>
+  <textarea id="work-types" rows="3" spellcheck="false"></textarea>
+  <p><button id="load-options" type="button">Load project options</button> <button id="apply-options" type="button">Apply project options</button> <button id="cancel-options" type="button">Cancel edits</button></p>
+  <p id="options-status" role="status" aria-live="polite">Project options are not loaded. The editor cannot apply until they load.</p>
+</section>
+<script>
+const input=document.querySelector('#file'), live=document.querySelector('#live'), status=document.querySelector('#status'), output=document.querySelector('#report')
+function render(data){if(data.apiVersion!==1||data.status!=='ok'||!data.totals||!data.costs)throw Error('Unsupported report')
+  status.textContent=`Report for project ${data.projectID} · generated ${new Date(data.generatedAt).toLocaleString()}`
+  for(const [title,value] of [['Plans',data.plans],['Agent bindings',data.agents],['Work types',data.workTypes],['Availability',data.availability],['Usage totals',data.totals],['Partial cost estimates',data.costs],['Agent attribution',data.agentAttribution],['Plan attribution',data.planAttribution],['Budgets',data.budgets],['Provider errors',data.errors]]){
+    if(value===undefined)continue
+    const section=document.createElement('section'),heading=document.createElement('h2'),pre=document.createElement('pre');heading.textContent=title;pre.textContent=JSON.stringify(value,null,2);section.append(heading,pre);output.append(section)
+  }
+}
+let loadID=0
+async function loadReport(read){const mine=++loadID;output.replaceChildren();live.disabled=true;input.disabled=true;status.textContent='Loading report…'
+  try{const data=await read();if(mine!==loadID)return;render(data)}catch{if(mine===loadID)status.textContent='Could not load the Quartermaster report.'}finally{if(mine===loadID){live.disabled=false;input.disabled=false}}
+}
+input.addEventListener('change',()=>{const file=input.files?.[0];if(file)void loadReport(async()=>JSON.parse(await file.text()))})
+live.addEventListener('click',()=>void loadReport(async()=>{const response=await fetch('/api/report',{cache:'no-store',credentials:'same-origin'});if(!response.ok)throw Error('Gateway unavailable');return response.json()}))
+const plansInput=document.querySelector('#plans'), agentsInput=document.querySelector('#agents'), workTypesInput=document.querySelector('#work-types'), optionsStatus=document.querySelector('#options-status')
+let revision, saved
+const lines=value=>value.split('\n').map(line=>line.trim()).filter(Boolean)
+const modelText=model=>typeof model==='string'?model:`${model.id}${model.variant?` ${model.variant}`:''}`
+function show(options){
+  plansInput.value=Object.entries(options.plans??{}).flatMap(([plan,models])=>models.map(model=>`${plan} ${modelText(model)}`)).join('\n')
+  agentsInput.value=Object.entries(options.agents??{}).map(([agent,plan])=>`${agent} ${plan}`).join('\n')
+  workTypesInput.value=Object.entries(options.workTypes??{}).map(([workType,plan])=>`${workType} ${plan}`).join('\n')
+}
+function modelFrom(text){const [id,variant]=text.split(/\s+/);if(!id?.includes('/'))throw Error('Each model must be provider/model');return variant?{id,variant}:id}
+function editedOptions(){
+  const plans=Object.create(null);for(const line of lines(plansInput.value)){const gap=line.indexOf(' ');if(gap<1)throw Error('Each plan line needs a name and provider/model');const plan=line.slice(0,gap),model=modelFrom(line.slice(gap+1));(plans[plan]??=[]).push(model)}
+  const pair=(value,label)=>{const out=Object.create(null);for(const line of lines(value)){const [name,plan]=line.split(/\s+/);if(!name||!plan)throw Error(`Each ${label} line needs two names`);out[name]=plan}return out}
+  return {...saved,...{plans,agents:pair(agentsInput.value,'agent'),workTypes:pair(workTypesInput.value,'work type')}}
+}
+document.querySelector('#load-options').addEventListener('click',async()=>{
+  optionsStatus.textContent='Loading project options…'
+  try{const response=await fetch('/api/options',{cache:'no-store',credentials:'same-origin'});const body=await response.json();if(!response.ok)throw Error(body.error||'unavailable');revision=body.revision;saved=body.options;show(saved);optionsStatus.textContent='Loaded project options. Review them, then apply.'}
+  catch(error){revision=undefined;saved=undefined;optionsStatus.textContent=error.message||'Could not load project options.'}
+})
+document.querySelector('#cancel-options').addEventListener('click',()=>{if(!saved){optionsStatus.textContent='Nothing to cancel.';return}show(saved);optionsStatus.textContent='Cancelled. Unsaved edits were discarded.'})
+document.querySelector('#apply-options').addEventListener('click',async()=>{
+  optionsStatus.textContent='Applying project options…'
+  try{if(typeof revision!=='number'||!saved)throw Error('Load project options before applying');const options=editedOptions();const response=await fetch('/api/options',{method:'POST',cache:'no-store',credentials:'same-origin',headers:{'content-type':'application/json'},body:JSON.stringify({options,revision})});const body=await response.json();if(!response.ok)throw Error(body.error||'apply failed');revision=body.revision;saved=body.options;show(saved);optionsStatus.textContent='Applied. The current session is unchanged. The next assignment uses these options.'}
+  catch(error){optionsStatus.textContent=error.message||'Could not apply project options.'}
+})
+</script>
+</html>

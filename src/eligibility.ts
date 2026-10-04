@@ -18,7 +18,9 @@ export function buildQuotaEligibility(
       continue
     }
 
-    const sourceID = usageSources[model.providerID] as UsageSourceID | undefined
+    const sourceID = Object.hasOwn(usageSources, model.providerID)
+      ? usageSources[model.providerID] as UsageSourceID
+      : undefined
     const status = sourceID === undefined
       ? "available"
       : usage?.status === "ok"

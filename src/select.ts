@@ -57,7 +57,7 @@ export function resolvePlan(
   }
 
   if (options.workType !== undefined) {
-    const planID = config.workTypes[options.workType]
+    const planID = Object.hasOwn(config.workTypes, options.workType) ? config.workTypes[options.workType] : undefined
     if (planID !== undefined) {
       return {
         status: "plan",
@@ -68,7 +68,7 @@ export function resolvePlan(
       }
     }
 
-    const agentPlanID = config.agents[agentID]
+    const agentPlanID = Object.hasOwn(config.agents, agentID) ? config.agents[agentID] : undefined
     if (agentPlanID !== undefined) {
       return {
         status: "plan",
@@ -82,7 +82,7 @@ export function resolvePlan(
     return { status: "no-plan", reason: { code: "unknown-work-type", workType: options.workType } }
   }
 
-  const planID = config.agents[agentID]
+  const planID = Object.hasOwn(config.agents, agentID) ? config.agents[agentID] : undefined
   if (planID === undefined) return { status: "no-plan", reason: { code: "unbound-agent" } }
   return {
     status: "plan",
@@ -149,7 +149,7 @@ export function selectAgentModel(
   now: number,
   pin?: ModelRef,
 ): SelectionResult {
-  const planID = config.agents[agentID]
+  const planID = Object.hasOwn(config.agents, agentID) ? config.agents[agentID] : undefined
   const plan = planID === undefined ? undefined : config.plans[planID]
   if (!plan) return { status: "no-plan", reason: { code: "no-plan" }, skipped: [] }
 

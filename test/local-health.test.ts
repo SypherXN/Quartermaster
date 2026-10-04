@@ -79,6 +79,24 @@ test("a timed-out configured endpoint is marked offline", async (t) => {
   assert.equal(requests, 1)
 })
 
+test("toString is probed only when explicitly configured", async () => {
+  const endpoint = "http://127.0.0.1:12345/health"
+  const requests: Parameters<typeof fetch>[0][] = []
+  const fetcher: typeof fetch = async (input) => {
+    requests.push(input)
+    return new Response(null, { status: 200 })
+  }
+  const unconfigured = new LocalHealth({}, 10, fetcher)
+  assert.equal(await unconfigured.check("toString"), undefined)
+  assert.equal((await unconfigured.checkAll(["toString"])).size, 0)
+  assert.equal(requests.length, 0)
+
+  const configured = new LocalHealth({ toString: endpoint }, 10, fetcher)
+  assert.equal(await configured.check("toString", { now: 0 }), "online")
+  assert.equal((await configured.checkAll(["toString"], { now: 1 })).get("toString"), "online")
+  assert.deepEqual(requests, [endpoint])
+})
+
 test("unconfigured remote providers are never probed or filtered", async () => {
   const remote: ModelRef = { providerID: "remote", modelID: "hosted" }
   const eligibility = applyLocalHealth(

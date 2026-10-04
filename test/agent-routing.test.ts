@@ -4,6 +4,8 @@ import type { AgentEditor } from "@opencode/plugin/promise/agent"
 import { applyAgentRouting, registerAgentRouting } from "../src/agent-routing.ts"
 import { parseConfig } from "../src/config.ts"
 import { modelKey, type ModelEligibility } from "../src/select.ts"
+import { TokenBudgetGate } from "../src/telemetry/budget-gate.ts"
+import type { TokenTelemetryRecord } from "../src/telemetry/types.ts"
 
 const config = parseConfig({
   plans: { review: ["provider-a/primary", { id: "provider-b/backup", variant: "fast" }] },
@@ -64,6 +66,45 @@ test("no eligible candidate leaves the host model unchanged", () => {
   assert.deepEqual(agents.reviewer.model, { providerID: "host", id: "original" })
 })
 
+test("budget warnings are reported without changing candidate selection", () => {
+  const budgetConfig = parseConfig({
+    plans: { review: ["provider-a/primary", "provider-b/backup"] },
+    agents: { reviewer: "review" },
+    budgets: [{ id: "project", dimension: "project", mode: "strict", limitTokens: 10, windowMs: 10_000 }],
+  })
+  const record: TokenTelemetryRecord = {
+    hostContractVersion: "2.0.18",
+    hostEventID: "event",
+    sourceEvent: "session.step.ended",
+    hostSessionID: "session",
+    hostMessageID: "message",
+    hostProjectID: "project-a",
+    parentSessionID: null,
+    hostAgentID: null,
+    providerID: null,
+    modelID: null,
+    variant: null,
+    completedAt: 9_500,
+    counts: { input: 8, output: 5, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+    usageStatus: "reported",
+  }
+  const reasons = new TokenBudgetGate(budgetConfig.budgets, "project-a", [record]).reasons(10_000)
+  const plain = editorWith({ reviewer: { id: "reviewer", model: { providerID: "host", id: "current" } } })
+  const warned = editorWith({ reviewer: { id: "reviewer", model: { providerID: "host", id: "current" } } })
+  const warnings: unknown[] = []
+
+  applyAgentRouting(plain.editor, budgetConfig, registry, availability("available"), 10_000)
+  applyAgentRouting(warned.editor, budgetConfig, registry, availability("available"), 10_000, new Map(), reasons,
+    (agentID, selection, budgetReasons) => warnings.push({ agentID, selection, budgetReasons }))
+  applyAgentRouting(warned.editor, budgetConfig, registry, availability("available"), 10_000, new Map(), reasons,
+    (agentID, selection, budgetReasons) => warnings.push({ agentID, selection, budgetReasons }))
+
+  assert.deepEqual(warned.agents.reviewer.model, plain.agents.reviewer.model)
+  assert.deepEqual(warned.agents.reviewer.model, { providerID: "provider-a", id: "primary" })
+  assert.equal(warnings.length, 2)
+  assert.equal((warnings[0] as { budgetReasons: typeof reasons }).budgetReasons[0].code, "cannot-guarantee-hard-cap")
+})
+
 test("agent transforms are order-sensitive but edit only the model field", () => {
   const { editor, agents } = editorWith({ reviewer: { id: "reviewer", system: "keep" } })
   agents.reviewer.model = { providerID: "earlier", id: "model" }
@@ -119,13 +160,13 @@ test("routing preloads registry before transform and reloads at the next assignm
   assert.deepEqual(agents.reviewer.model, { providerID: "provider-b", id: "backup", variant: "fast" })
   await routing?.pin("reviewer", primary)
   assert.deepEqual(agents.reviewer.model, { providerID: "provider-b", id: "backup", variant: "fast" })
-  assert.deepEqual(routing?.explain("reviewer").skipped.map(({ code }) => code), ["limited"])
+  assert.deepEqual((await routing?.explain("reviewer"))?.skipped.map(({ code }) => code), ["limited"])
 
   await routing?.refresh(availability("available"))
   assert.deepEqual(agents.reviewer.model, { providerID: "provider-a", id: "primary" })
-  assert.equal(routing?.explain("reviewer").reason, "Selected because this model is pinned for the agent.")
+  assert.equal((await routing?.explain("reviewer"))?.reason, "Selected because this model is pinned for the agent.")
   assert.equal(await routing?.unpin("reviewer"), true)
-  assert.equal(routing?.explain("reviewer").reason, "Selected as the highest-priority eligible candidate.")
+  assert.equal((await routing?.explain("reviewer"))?.reason, "Selected as the highest-priority eligible candidate.")
   assert.deepEqual(calls, [
     "models", "transform", "reload", "reload", "reload", "models", "reload", "reload", "models", "reload", "reload",
   ])
