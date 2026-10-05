@@ -174,3 +174,120 @@ test("routing preloads registry before transform and reloads at the next assignm
   await routing?.dispose()
   assert.equal(calls.at(-1), "dispose")
 })
+
+test("a held exclusive model stays with its agent and reloads only when the slot changes", async () => {
+  const exclusiveConfig = parseConfig({
+    plans: { review: ["provider-a/primary", { id: "provider-b/backup", variant: "fast" }] },
+    agents: { reviewer: "review", builder: "review" },
+    exclusiveModels: ["provider-a/primary"],
+  })
+  const calls: string[] = []
+  const { editor, agents } = editorWith({ reviewer: { id: "reviewer" }, builder: { id: "builder" } })
+  let transform: ((editor: AgentEditor) => void) | undefined
+  let request: (input: { sessionID: string; agent: string; kind: string; model: { providerID: string; id: string } }) => Promise<void> = async () => {}
+  const queued: Array<{ event: unknown; done: () => void }> = []
+  let waiting: ((item: { event: unknown; done: () => void } | undefined) => void) | undefined
+  let signal: AbortSignal | undefined
+  const reloads = () => calls.filter((call) => call === "reload").length
+  const routing = await registerAgentRouting({
+    model: { list: async () => ({ data: registry.map((model) => ({ providerID: model.providerID, id: model.modelID, enabled: true })) }) },
+    storage: { get: async () => undefined, set: async () => {}, remove: async () => {}, scan: async () => ({ entries: [] }) },
+    rpc: () => ({ status: async () => { throw new Error("not configured") } }),
+    agent: {
+      transform: async (callback: (editor: AgentEditor) => void) => {
+        calls.push("transform")
+        transform = callback
+        return { dispose: async () => { calls.push("dispose") } }
+      },
+      reload: async () => {
+        calls.push("reload")
+        transform?.(editor as AgentEditor)
+      },
+    },
+    session: {
+      hook: async (_name: string, callback: typeof request) => {
+        request = callback
+        return { dispose: async () => { calls.push("dispose-hook") } }
+      },
+    },
+    event: {
+      subscribe(input: { signal?: AbortSignal }) {
+        signal = input.signal
+        return (async function* () {
+          while (!signal?.aborted) {
+            const item = queued.shift() ?? await new Promise<typeof queued[number] | undefined>((resolve) => {
+              let settled = false
+              const finish = (value?: typeof queued[number]) => {
+                if (settled) return
+                settled = true
+                waiting = undefined
+                resolve(value)
+              }
+              waiting = finish
+              signal?.addEventListener("abort", () => finish(), { once: true })
+            })
+            if (!item || signal?.aborted) return
+            yield item.event
+            item.done()
+          }
+        })()
+      },
+    },
+  } as never, exclusiveConfig)
+  const push = (event: unknown) => new Promise<void>((done) => {
+    const item = { event, done }
+    if (waiting) waiting(item)
+    else queued.push(item)
+  })
+
+  assert.deepEqual(agents.reviewer.model, { providerID: "provider-a", id: "primary" })
+  assert.deepEqual(agents.builder.model, { providerID: "provider-a", id: "primary" })
+  const before = reloads()
+  const requested = { providerID: "provider-a", id: "primary" }
+  await request({ sessionID: "a", agent: "reviewer", kind: "compaction", model: requested })
+  await request({ sessionID: "a", agent: "reviewer", kind: "primary", model: { providerID: "provider-a", id: "other" } })
+  assert.equal(reloads(), before)
+  await request({ sessionID: "a", agent: "reviewer", kind: "primary", model: requested })
+  assert.deepEqual(requested, { providerID: "provider-a", id: "primary" })
+  assert.equal(reloads(), before + 1)
+  assert.deepEqual(agents.reviewer.model, { providerID: "provider-a", id: "primary" })
+  assert.deepEqual(agents.builder.model, { providerID: "provider-b", id: "backup", variant: "fast" })
+  assert.deepEqual((await routing?.explain("builder"))?.skipped.map(({ code }) => code), ["exclusive-busy"])
+  await routing?.pin("builder", primary)
+  assert.deepEqual(agents.builder.model, { providerID: "provider-b", id: "backup", variant: "fast" })
+  const pinned = reloads()
+  await request({ sessionID: "a", agent: "reviewer", kind: "primary", model: requested })
+  assert.equal(reloads(), pinned)
+  await push({ type: "session.step.ended", data: { sessionID: "a" } })
+  assert.equal(reloads(), pinned)
+  await push({ type: "session.step.failed", data: { sessionID: "a" } })
+  assert.equal(reloads(), pinned + 1)
+  assert.deepEqual(agents.reviewer.model, { providerID: "provider-a", id: "primary" })
+  assert.deepEqual(agents.builder.model, { providerID: "provider-a", id: "primary" })
+  await routing?.dispose()
+  assert.ok(calls.includes("dispose-hook"))
+  assert.equal(calls.at(-1), "dispose")
+})
+
+test("an exclusive model installs the request gate when no agent is bound", async () => {
+  const exclusiveConfig = parseConfig({ exclusiveModels: ["ninfer/qwen3.8-27b"] })
+  let hooked = false
+  const routing = await registerAgentRouting({
+    model: { list: async () => ({ data: [] }) },
+    storage: { get: async () => undefined, set: async () => {}, remove: async () => {}, scan: async () => ({ entries: [] }) },
+    rpc: () => ({ status: async () => { throw new Error("not configured") } }),
+    agent: {
+      transform: async () => { throw new Error("no agents to transform") },
+      reload: async () => {},
+    },
+    session: {
+      hook: async () => {
+        hooked = true
+        return { dispose: async () => {} }
+      },
+    },
+    event: { subscribe: () => (async function* () {})() },
+  } as never, exclusiveConfig)
+  assert.equal(hooked, true)
+  await routing?.dispose()
+})

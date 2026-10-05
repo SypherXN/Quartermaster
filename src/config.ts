@@ -40,6 +40,7 @@ export interface QuartermasterConfig {
   budgets?: TokenBudgetConfig[]
   tokenRates?: TokenRateConfig[]
   quotaExemptModels: string[]
+  exclusiveModels: ModelRef[]
   providerCooldownMs: number
   localHealthTimeoutMs: number
   localEndpoints: Record<string, string>
@@ -113,6 +114,22 @@ function quotaExemptModels(value: unknown): string[] {
     if (seen.has(key)) throw new Error(`${path}: duplicate model exemption`)
     seen.add(key)
     return id
+  })
+}
+
+function exclusiveModels(value: unknown): ModelRef[] {
+  if (!Array.isArray(value)) throw new Error("exclusiveModels: expected an array of providerID/modelID strings")
+  const seen = new Set<string>()
+  return value.map((item, index) => {
+    const path = `exclusiveModels[${index}]`
+    const id = string(item, path)
+    const split = id.indexOf("/")
+    if (split <= 0 || split === id.length - 1 || /\s/.test(id)) throw new Error(`${path}: expected providerID/modelID`)
+    const ref = { providerID: id.slice(0, split), modelID: id.slice(split + 1) }
+    const key = JSON.stringify([ref.providerID, ref.modelID])
+    if (seen.has(key)) throw new Error(`${path}: duplicate exclusive model`)
+    seen.add(key)
+    return ref
   })
 }
 
@@ -265,7 +282,7 @@ function localEndpoints(value: unknown): Record<string, string> {
 export function parseConfig(input: unknown = {}): QuartermasterConfig {
   const options = record(input, "options")
   const fields = new Set([
-    "plans", "agents", "workTypes", "usageSources", "quotaExemptModels", "providerCooldownMs",
+    "plans", "agents", "workTypes", "usageSources", "quotaExemptModels", "exclusiveModels", "providerCooldownMs",
     "localHealthTimeoutMs", "localEndpoints", "budgets", "tokenRates",
   ])
   for (const key of Object.keys(options)) {
@@ -284,6 +301,7 @@ export function parseConfig(input: unknown = {}): QuartermasterConfig {
     }
   }
   const exemptModels = options.quotaExemptModels === undefined ? [] : quotaExemptModels(options.quotaExemptModels)
+  const exclusive = options.exclusiveModels === undefined ? [] : exclusiveModels(options.exclusiveModels)
   const local = options.localEndpoints === undefined ? {} : localEndpoints(options.localEndpoints)
 
   for (const [agent, plan] of Object.entries(agents)) {
@@ -301,6 +319,7 @@ export function parseConfig(input: unknown = {}): QuartermasterConfig {
     ...(budgets === undefined ? {} : { budgets }),
     ...(tokenRates === undefined ? {} : { tokenRates }),
     quotaExemptModels: exemptModels,
+    exclusiveModels: exclusive,
     providerCooldownMs: duration(options.providerCooldownMs, "providerCooldownMs", DEFAULTS.providerCooldownMs),
     localHealthTimeoutMs: duration(options.localHealthTimeoutMs, "localHealthTimeoutMs", DEFAULTS.localHealthTimeoutMs),
     localEndpoints: local,

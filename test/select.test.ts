@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { modelKey, selectModel } from "../src/select.ts"
+import { modelKey, selectAgentModel, selectModel } from "../src/select.ts"
 import type { ModelEligibility } from "../src/select.ts"
 import type { ModelRef } from "../src/config.ts"
 
@@ -93,4 +93,32 @@ test("reports no plan and no eligible candidates explicitly", () => {
     reason: { code: "no-eligible" },
     skipped: [{ model: primary, reason: { code: "status-missing" } }],
   })
+})
+
+test("a busy exclusive model is skipped, including a pin, unless this agent holds it", () => {
+  const eligible = new Map<string, ModelEligibility>([
+    [modelKey(primary), { status: "available" }],
+    [modelKey(backup), { status: "available" }],
+  ])
+  const busy = (model: ModelRef) => model.modelID === primary.modelID
+  const skipped = selectModel([primary, backup], registry, eligible, 100, busy)
+  assert.equal(skipped.status, "selected")
+  if (skipped.status === "selected") {
+    assert.equal(skipped.model, backup)
+    assert.deepEqual(skipped.skipped, [{ model: primary, reason: { code: "exclusive-busy" } }])
+  }
+  const open = selectModel([primary, backup], registry, eligible, 100)
+  assert.equal(open.status, "selected")
+  if (open.status === "selected") assert.equal(open.model, primary)
+
+  const config = { plans: { review: [primary, backup] }, agents: { reviewer: "review", builder: "review" } }
+  const held = selectAgentModel(config, "reviewer", registry, eligible, 100, primary, () => false)
+  assert.equal(held.status, "selected")
+  if (held.status === "selected") assert.equal(held.reason.code, "manual-pin")
+  const pinned = selectAgentModel(config, "builder", registry, eligible, 100, primary, busy)
+  assert.equal(pinned.status, "selected")
+  if (pinned.status === "selected") {
+    assert.equal(pinned.model, backup)
+    assert.equal(pinned.skipped[0]?.reason.code, "exclusive-busy")
+  }
 })

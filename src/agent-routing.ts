@@ -5,6 +5,7 @@ import type { ModelRef, QuartermasterConfig } from "./config.ts"
 import { buildQuotaEligibility } from "./eligibility.ts"
 import { FailureCooldowns, type FailureReport, type SuccessReport } from "./failures.ts"
 import { applyLocalHealth, LocalHealth } from "./local-health.ts"
+import { bindExclusive, ExclusiveLeases } from "./exclusive.ts"
 import { explainSelection, type SelectionExplanation } from "./explain.ts"
 import { AgentPins } from "./pins.ts"
 import { adoptProjectQuartermasterOptions } from "./project-options.ts"
@@ -32,11 +33,20 @@ export function applyAgentRouting(
   pins: ReadonlyMap<string, ModelRef> = new Map(),
   budgetReasons: readonly TokenBudgetReason[] = [],
   onBudgetWarning?: (agentID: string, selection: ReturnType<typeof selectAgentModel>, reasons: readonly TokenBudgetReason[]) => void,
+  exclusive?: { blocks(agentID: string, model: ModelRef): boolean },
 ): void {
   for (const agentID of Object.keys(config.agents)) {
     if (!editor.get(agentID)) continue
 
-    const selection = selectAgentModel(config, agentID, registry, eligibility, now, pins.get(agentID))
+    const selection = selectAgentModel(
+      config,
+      agentID,
+      registry,
+      eligibility,
+      now,
+      pins.get(agentID),
+      exclusive && ((model) => exclusive.blocks(agentID, model)),
+    )
     if (budgetReasons.length > 0) onBudgetWarning?.(agentID, selection, budgetReasons)
     if (selection.status !== "selected") continue
 
@@ -53,12 +63,16 @@ export function applyAgentRouting(
 }
 
 export async function registerAgentRouting(
-  ctx: Pick<Context, "agent" | "model" | "rpc" | "storage"> & { location?: { directory?: string } },
+  ctx: Pick<Context, "agent" | "model" | "rpc" | "storage"> & Partial<Pick<Context, "session" | "event">> & { location?: { directory?: string } },
   config: QuartermasterConfig,
   usage?: UsageReadResult,
   budgetGate?: TokenBudgetGate,
 ) {
-  if (Object.keys(config.agents).length === 0 && Object.keys(config.workTypes).length === 0) return undefined
+  if (
+    config.exclusiveModels.length === 0 &&
+    Object.keys(config.agents).length === 0 &&
+    Object.keys(config.workTypes).length === 0
+  ) return undefined
 
   let registry = (await ctx.model.list()).data.filter((model) => model.enabled).map(modelRef)
   const localHealth = new LocalHealth(config.localEndpoints, config.localHealthTimeoutMs)
@@ -69,6 +83,8 @@ export async function registerAgentRouting(
   failures.restore(await ctx.storage.get(COOLDOWN_STORAGE_KEY), Date.now())
   eligibility = failures.apply(eligibility, registry, Date.now())
   const pins = await AgentPins.load(config, registry, ctx.storage)
+  const leases = new ExclusiveLeases()
+  const busyFor = (agentID: string) => (model: ModelRef) => leases.blocks(agentID, model)
   const selectedFor = (agentID: string) => selectAgentModel(
     config,
     agentID,
@@ -76,6 +92,7 @@ export async function registerAgentRouting(
     failures.apply(baseSnapshot(), registry, Date.now()),
     Date.now(),
     pins.get(agentID),
+    busyFor(agentID),
   )
   const registration = Object.keys(config.agents).length > 0
       ? await ctx.agent.transform((editor) => {
@@ -89,6 +106,7 @@ export async function registerAgentRouting(
           pins.snapshot(),
           budgetGate?.reasons(now),
           (agentID, selection, reasons) => console.warn("[quartermaster] token budget advisory", JSON.stringify({ agentID, selection, reasons })),
+          leases,
         )
       })
     : undefined
@@ -168,6 +186,9 @@ export async function registerAgentRouting(
     void refresh().catch(() => console.warn("[quartermaster] availability refresh failed"))
   }, AVAILABILITY_REFRESH_MS)
   interval.unref?.()
+  const exclusiveGate = await bindExclusive(ctx, leases, config.exclusiveModels, async (changed) => {
+    if (changed) await requestReload()
+  })
 
   const ensureProjectOptions = async () => {
     if (ctx.location?.directory) await adoptProjectQuartermasterOptions(config, ctx.location.directory).catch(() => undefined)
@@ -193,7 +214,7 @@ export async function registerAgentRouting(
     const currentEligibility = failures.apply(base, currentRegistry, Date.now())
     const pin = pins.get(agentID)
     const candidates = pin ? [pin, ...resolution.plan.filter((candidate) => modelKey(candidate) !== modelKey(pin))] : resolution.plan
-    let selection = selectModel(candidates, currentRegistry, currentEligibility, Date.now())
+    let selection = selectModel(candidates, currentRegistry, currentEligibility, Date.now(), busyFor(agentID))
     if (selection.status === "selected" && pin && modelKey(selection.model) === modelKey(pin)) selection = { ...selection, reason: { code: "manual-pin" } }
     return { ...explainSelection(selection), plan: { id: resolution.planID, source: resolution.source, reasonCode: resolution.reason.code } }
   }
@@ -250,6 +271,7 @@ export async function registerAgentRouting(
     },
     async dispose() {
       clearInterval(interval)
+      await exclusiveGate.dispose()
       if (refreshPromise) await refreshPromise.catch(() => {})
       if (reloadPromise) await reloadPromise
       await registration?.dispose()

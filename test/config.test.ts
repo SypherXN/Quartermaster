@@ -104,7 +104,7 @@ test("preserves slashes inside provider model IDs", () => {
 
 test("allows no bindings and accepts custom durations", () => {
   assert.deepEqual(parseConfig({}), {
-    plans: {}, agents: {}, workTypes: {}, usageSources: {}, quotaExemptModels: [],
+    plans: {}, agents: {}, workTypes: {}, usageSources: {}, quotaExemptModels: [], exclusiveModels: [],
     providerCooldownMs: 300_000, localHealthTimeoutMs: 2_000, localEndpoints: {},
   })
   assert.equal(parseConfig({ providerCooldownMs: 30, localHealthTimeoutMs: 50 }).providerCooldownMs, 30)
@@ -131,4 +131,15 @@ test("rejects invalid durations and non-loopback local endpoints", () => {
   assert.throws(() => parseConfig({ localHealthTimeoutMs: 1.5 }), /localHealthTimeoutMs: expected a positive safe integer/)
   assert.throws(() => parseConfig({ localEndpoints: { ollama: "https://example.com" } }), /localEndpoints\.ollama: expected a loopback HTTP\(S\) URL/)
   assert.throws(() => parseConfig({ localEndpoints: { ollama: "http://user:secret@localhost:11434" } }), /localEndpoints\.ollama: expected a loopback HTTP\(S\) URL/)
+})
+
+test("parses an optional exclusive model list", () => {
+  assert.deepEqual(parseConfig({ exclusiveModels: ["ninfer/qwen3-27b"] }).exclusiveModels, [
+    { providerID: "ninfer", modelID: "qwen3-27b" },
+  ])
+  assert.deepEqual(parseConfig({ exclusiveModels: [] }).exclusiveModels, [])
+  assert.throws(() => parseConfig({ exclusiveModels: ["bad"] }), /exclusiveModels\[0\]: expected providerID\/modelID/)
+  assert.throws(() => parseConfig({ exclusiveModels: [" p/m"] }), /without surrounding whitespace/)
+  assert.throws(() => parseConfig({ exclusiveModels: ["p/m", "p/m"] }), /duplicate exclusive model/)
+  assert.throws(() => parseConfig({ exclusiveModels: "p/m" }), /exclusiveModels: expected an array/)
 })

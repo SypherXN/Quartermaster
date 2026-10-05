@@ -9,6 +9,7 @@ const skipMessages: Record<SkipReason, string> = {
   stale: "provider availability is stale",
   limited: "provider quota is confirmed limited",
   cooldown: "provider or model is in a temporary cooldown",
+  "exclusive-busy": "another session is using this exclusive model",
 }
 
 function modelName(model: ModelRef): string {

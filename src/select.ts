@@ -17,6 +17,7 @@ export type SkipReason =
   | "stale"
   | "limited"
   | "cooldown"
+  | "exclusive-busy"
 
 export interface SkippedCandidate {
   model: ModelRef
@@ -102,6 +103,7 @@ export function selectModel(
   registry: readonly ModelRef[],
   eligibility: ReadonlyMap<string, ModelEligibility>,
   now: number,
+  busy?: (model: ModelRef) => boolean,
 ): SelectionResult {
   if (!plan) return { status: "no-plan", reason: { code: "no-plan" }, skipped: [] }
 
@@ -122,7 +124,7 @@ export function selectModel(
           : status.staleAt !== undefined && now >= status.staleAt
           ? "stale"
           : status.status === "available"
-            ? undefined
+            ? busy?.(model) ? "exclusive-busy" : undefined
             : status.status
 
     if (reason) {
@@ -148,6 +150,7 @@ export function selectAgentModel(
   eligibility: ReadonlyMap<string, ModelEligibility>,
   now: number,
   pin?: ModelRef,
+  busy?: (model: ModelRef) => boolean,
 ): SelectionResult {
   const planID = Object.hasOwn(config.agents, agentID) ? config.agents[agentID] : undefined
   const plan = planID === undefined ? undefined : config.plans[planID]
@@ -156,7 +159,7 @@ export function selectAgentModel(
   const candidates = pin
     ? [pin, ...plan.filter((candidate) => modelKey(candidate) !== modelKey(pin))]
     : plan
-  const selection = selectModel(candidates, registry, eligibility, now)
+  const selection = selectModel(candidates, registry, eligibility, now, busy)
   if (selection.status !== "selected" || !pin || modelKey(selection.model) !== modelKey(pin)) return selection
   return { ...selection, reason: { code: "manual-pin" } }
 }
