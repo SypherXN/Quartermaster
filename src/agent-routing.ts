@@ -24,6 +24,30 @@ function modelRef(model: { providerID: string; id: string }): ModelRef {
   return { providerID: model.providerID, modelID: model.id }
 }
 
+interface SessionModel {
+  providerID: string
+  id: string
+  variant?: string
+}
+
+function sessionView(value: unknown): { agent?: string; model?: SessionModel } {
+  const record = value && typeof value === "object" && "data" in value && typeof (value as { data?: unknown }).data === "object"
+    ? (value as { data: unknown }).data
+    : value
+  if (!record || typeof record !== "object") return {}
+  const info = record as { agent?: unknown; model?: unknown }
+  const agent = typeof info.agent === "string" && info.agent ? info.agent : undefined
+  const raw = info.model && typeof info.model === "object" ? info.model as { providerID?: unknown; id?: unknown; variant?: string } : undefined
+  const model = raw && typeof raw.providerID === "string" && typeof raw.id === "string"
+    ? { providerID: raw.providerID, id: raw.id, ...(typeof raw.variant === "string" ? { variant: raw.variant } : {}) }
+    : undefined
+  return { ...(agent ? { agent } : {}), ...(model ? { model } : {}) }
+}
+
+function sameSessionModel(model: ModelRef, current?: SessionModel) {
+  return current?.providerID === model.providerID && current.id === model.modelID && (current.variant ?? undefined) === (model.variant ?? undefined)
+}
+
 export function applyAgentRouting(
   editor: MutableAgentEditor,
   config: QuartermasterConfig,
@@ -33,7 +57,6 @@ export function applyAgentRouting(
   pins: ReadonlyMap<string, ModelRef> = new Map(),
   budgetReasons: readonly TokenBudgetReason[] = [],
   onBudgetWarning?: (agentID: string, selection: ReturnType<typeof selectAgentModel>, reasons: readonly TokenBudgetReason[]) => void,
-  exclusive?: { blocks(agentID: string, model: ModelRef): boolean },
 ): void {
   for (const agentID of Object.keys(config.agents)) {
     if (!editor.get(agentID)) continue
@@ -45,7 +68,6 @@ export function applyAgentRouting(
       eligibility,
       now,
       pins.get(agentID),
-      exclusive && ((model) => exclusive.blocks(agentID, model)),
     )
     if (budgetReasons.length > 0) onBudgetWarning?.(agentID, selection, budgetReasons)
     if (selection.status !== "selected") continue
@@ -84,15 +106,16 @@ export async function registerAgentRouting(
   eligibility = failures.apply(eligibility, registry, Date.now())
   const pins = await AgentPins.load(config, registry, ctx.storage)
   const leases = new ExclusiveLeases()
-  const busyFor = (agentID: string) => (model: ModelRef) => leases.blocks(agentID, model)
-  const selectedFor = (agentID: string) => selectAgentModel(
+  const busyFor = (sessionID?: string) => (model: ModelRef) =>
+    sessionID === undefined ? leases.taken(model) : leases.blocks(sessionID, model)
+  const selectedFor = (agentID: string, sessionID?: string) => selectAgentModel(
     config,
     agentID,
     registry,
     failures.apply(baseSnapshot(), registry, Date.now()),
     Date.now(),
     pins.get(agentID),
-    busyFor(agentID),
+    busyFor(sessionID),
   )
   const registration = Object.keys(config.agents).length > 0
       ? await ctx.agent.transform((editor) => {
@@ -106,7 +129,6 @@ export async function registerAgentRouting(
           pins.snapshot(),
           budgetGate?.reasons(now),
           (agentID, selection, reasons) => console.warn("[quartermaster] token budget advisory", JSON.stringify({ agentID, selection, reasons })),
-          leases,
         )
       })
     : undefined
@@ -186,15 +208,82 @@ export async function registerAgentRouting(
     void refresh().catch(() => console.warn("[quartermaster] availability refresh failed"))
   }, AVAILABILITY_REFRESH_MS)
   interval.unref?.()
-  const exclusiveGate = await bindExclusive(ctx, leases, config.exclusiveModels, async (changed) => {
-    if (changed) await requestReload()
+  const running = new Set<string>()
+  let promptHook: { dispose: () => Promise<void> } | undefined
+  let runningHook: { dispose: () => Promise<void> } | undefined
+  const exclusiveGate = await bindExclusive(ctx, leases, config.exclusiveModels, async () => {}, (step) => {
+    if (step.kind === "finish") running.delete(step.sessionID)
   })
+  const exclusiveKeys = new Set(config.exclusiveModels.map((model) => modelKey(model)))
 
   const ensureProjectOptions = async () => {
     if (ctx.location?.directory) await adoptProjectQuartermasterOptions(config, ctx.location.directory).catch(() => undefined)
   }
 
-  const select = async (agentID: string, workType?: string) => {
+  const choose = (agentID: string, sessionID: string) => selectAgentModel(
+    config,
+    agentID,
+    registry,
+    failures.apply(baseSnapshot(), registry, Date.now()),
+    Date.now(),
+    pins.get(agentID),
+    busyFor(sessionID),
+  )
+
+  const assignPrompt = async (sessionID: string) => {
+    if (running.has(sessionID) || !ctx.session?.get || !ctx.session.switchModel) return
+    await ensureProjectOptions()
+    let view: ReturnType<typeof sessionView>
+    try {
+      view = sessionView(await ctx.session.get({ sessionID } as never))
+    } catch {
+      return
+    }
+    const agentID = view.agent
+    if (!agentID || !Object.hasOwn(config.agents, agentID)) return
+    const plan = config.plans[config.agents[agentID] ?? ""]
+    if (view.model && !plan?.some((candidate) => candidate.providerID === view.model?.providerID && candidate.modelID === view.model.id)) {
+      leases.releaseReservation(sessionID)
+      return
+    }
+    let selection = choose(agentID, sessionID)
+    if (selection.status !== "selected") {
+      leases.releaseReservation(sessionID)
+      return
+    }
+    if (exclusiveKeys.has(modelKey(selection.model))) {
+      leases.releaseReservation(sessionID)
+      if (leases.reserve(selection.model, sessionID, agentID) === "busy") {
+        selection = choose(agentID, sessionID)
+        if (selection.status !== "selected" || exclusiveKeys.has(modelKey(selection.model))) return
+      }
+    } else leases.releaseReservation(sessionID)
+    if (selection.status !== "selected" || sameSessionModel(selection.model, view.model)) return
+    try {
+      await ctx.session.switchModel({
+        sessionID,
+        model: {
+          providerID: selection.model.providerID,
+          id: selection.model.modelID,
+          ...(selection.model.variant === undefined ? {} : { variant: selection.model.variant }),
+        },
+      } as never)
+    } catch {
+      console.warn("[quartermaster] session model selection failed")
+      if (exclusiveKeys.has(modelKey(selection.model))) leases.releaseReservation(sessionID)
+    }
+  }
+
+  if (ctx.session && Object.keys(config.agents).length > 0) {
+    runningHook = await ctx.session.hook("model.request", async (input) => {
+      if (input.kind === "primary") running.add(input.sessionID)
+    })
+    promptHook = await ctx.session.hook("prompt", async (input) => {
+      await assignPrompt(input.sessionID)
+    })
+  }
+
+  const select = async (agentID: string, workType?: string, sessionID?: string) => {
     await ensureProjectOptions()
     const resolution = resolvePlan(config, agentID, { workType })
     if (resolution.status === "explicit-model") {
@@ -214,7 +303,7 @@ export async function registerAgentRouting(
     const currentEligibility = failures.apply(base, currentRegistry, Date.now())
     const pin = pins.get(agentID)
     const candidates = pin ? [pin, ...resolution.plan.filter((candidate) => modelKey(candidate) !== modelKey(pin))] : resolution.plan
-    let selection = selectModel(candidates, currentRegistry, currentEligibility, Date.now(), busyFor(agentID))
+    let selection = selectModel(candidates, currentRegistry, currentEligibility, Date.now(), busyFor(sessionID))
     if (selection.status === "selected" && pin && modelKey(selection.model) === modelKey(pin)) selection = { ...selection, reason: { code: "manual-pin" } }
     return { ...explainSelection(selection), plan: { id: resolution.planID, source: resolution.source, reasonCode: resolution.reason.code } }
   }
@@ -259,9 +348,9 @@ export async function registerAgentRouting(
       if (changed) await requestReload()
       return changed
     },
-    async explain(agentID: string): Promise<SelectionExplanation> {
+    async explain(agentID: string, sessionID?: string): Promise<SelectionExplanation> {
       await ensureProjectOptions()
-      return explainSelection(selectedFor(agentID))
+      return explainSelection(selectedFor(agentID, sessionID))
     },
     select,
     status,
@@ -271,6 +360,8 @@ export async function registerAgentRouting(
     },
     async dispose() {
       clearInterval(interval)
+      await runningHook?.dispose()
+      await promptHook?.dispose()
       await exclusiveGate.dispose()
       if (refreshPromise) await refreshPromise.catch(() => {})
       if (reloadPromise) await reloadPromise

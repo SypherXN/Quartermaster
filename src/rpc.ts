@@ -247,12 +247,14 @@ export async function registerQuartermasterRpc(
       if (!isRecord(input) || typeof input.agent !== "string" || !input.agent.trim()) throw call.error("invalid_input", "agent is required", { path: "agent", message: "expected a non-empty string" })
       const agent = input.agent
       if (input.workType !== undefined && (typeof input.workType !== "string" || !input.workType.trim())) throw call.error("invalid_input", "workType is invalid", { path: "workType", message: "expected a non-empty string" })
-      if (routing) return { apiVersion: QUARTERMASTER_API_VERSION, ...await routing.select(agent, input.workType as string | undefined) }
+      if (input.sessionID !== undefined && (typeof input.sessionID !== "string" || !input.sessionID.trim())) throw call.error("invalid_input", "sessionID is invalid", { path: "sessionID", message: "expected a non-empty string" })
+      if (routing) return { apiVersion: QUARTERMASTER_API_VERSION, ...await routing.select(agent, input.workType as string | undefined, input.sessionID as string | undefined) }
       return { apiVersion: QUARTERMASTER_API_VERSION, status: "no-plan", reasonCode: "unbound-agent", reason: "No model plan is configured for this agent.", skipped: [] }
     },
     async explain(input, call) {
       if (!isRecord(input) || typeof input.agent !== "string" || !input.agent.trim()) throw call.error("invalid_input", "agent is required", { path: "agent", message: "expected a non-empty string" })
-      return { apiVersion: 1, ...(routing ? await routing.explain(input.agent) : { status: "no-plan", reasonCode: "unbound-agent", reason: "No model plan is configured for this agent.", skipped: [] }) }
+      if (input.sessionID !== undefined && (typeof input.sessionID !== "string" || !input.sessionID.trim())) throw call.error("invalid_input", "sessionID is invalid", { path: "sessionID", message: "expected a non-empty string" })
+      return { apiVersion: 1, ...(routing ? await routing.explain(input.agent, typeof input.sessionID === "string" ? input.sessionID : undefined) : { status: "no-plan", reasonCode: "unbound-agent", reason: "No model plan is configured for this agent.", skipped: [] }) }
     },
     async status() {
       return routing ? await routing.status() : statusFallback(config, usage)

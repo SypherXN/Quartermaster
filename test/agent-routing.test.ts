@@ -175,7 +175,7 @@ test("routing preloads registry before transform and reloads at the next assignm
   assert.equal(calls.at(-1), "dispose")
 })
 
-test("a held exclusive model stays with its agent and reloads only when the slot changes", async () => {
+test("a held exclusive model is skipped per session and does not reload the agent catalog", async () => {
   const exclusiveConfig = parseConfig({
     plans: { review: ["provider-a/primary", { id: "provider-b/backup", variant: "fast" }] },
     agents: { reviewer: "review", builder: "review" },
@@ -184,7 +184,10 @@ test("a held exclusive model stays with its agent and reloads only when the slot
   const calls: string[] = []
   const { editor, agents } = editorWith({ reviewer: { id: "reviewer" }, builder: { id: "builder" } })
   let transform: ((editor: AgentEditor) => void) | undefined
-  let request: (input: { sessionID: string; agent: string; kind: string; model: { providerID: string; id: string } }) => Promise<void> = async () => {}
+  const modelRequests: Array<(input: { sessionID: string; agent: string; kind: string; model: { providerID: string; id: string } }) => Promise<void>> = []
+  const request = async (input: { sessionID: string; agent: string; kind: string; model: { providerID: string; id: string } }) => {
+    for (const callback of modelRequests) await callback(input)
+  }
   const queued: Array<{ event: unknown; done: () => void }> = []
   let waiting: ((item: { event: unknown; done: () => void } | undefined) => void) | undefined
   let signal: AbortSignal | undefined
@@ -205,8 +208,8 @@ test("a held exclusive model stays with its agent and reloads only when the slot
       },
     },
     session: {
-      hook: async (_name: string, callback: typeof request) => {
-        request = callback
+      hook: async (name: string, callback: (input: { sessionID: string; agent: string; kind: string; model: { providerID: string; id: string } }) => Promise<void>) => {
+        if (name === "model.request") modelRequests.push(callback)
         return { dispose: async () => { calls.push("dispose-hook") } }
       },
     },
@@ -249,19 +252,20 @@ test("a held exclusive model stays with its agent and reloads only when the slot
   assert.equal(reloads(), before)
   await request({ sessionID: "a", agent: "reviewer", kind: "primary", model: requested })
   assert.deepEqual(requested, { providerID: "provider-a", id: "primary" })
-  assert.equal(reloads(), before + 1)
+  assert.equal(reloads(), before)
   assert.deepEqual(agents.reviewer.model, { providerID: "provider-a", id: "primary" })
-  assert.deepEqual(agents.builder.model, { providerID: "provider-b", id: "backup", variant: "fast" })
+  assert.deepEqual(agents.builder.model, { providerID: "provider-a", id: "primary" })
   assert.deepEqual((await routing?.explain("builder"))?.skipped.map(({ code }) => code), ["exclusive-busy"])
   await routing?.pin("builder", primary)
-  assert.deepEqual(agents.builder.model, { providerID: "provider-b", id: "backup", variant: "fast" })
+  assert.equal((await routing?.explain("builder", "b"))?.selected?.modelID, "backup")
+  assert.deepEqual((await routing?.explain("builder", "b"))?.skipped.map(({ code }) => code), ["exclusive-busy"])
   const pinned = reloads()
   await request({ sessionID: "a", agent: "reviewer", kind: "primary", model: requested })
   assert.equal(reloads(), pinned)
   await push({ type: "session.step.ended", data: { sessionID: "a" } })
   assert.equal(reloads(), pinned)
   await push({ type: "session.step.failed", data: { sessionID: "a" } })
-  assert.equal(reloads(), pinned + 1)
+  assert.equal(reloads(), pinned)
   assert.deepEqual(agents.reviewer.model, { providerID: "provider-a", id: "primary" })
   assert.deepEqual(agents.builder.model, { providerID: "provider-a", id: "primary" })
   await routing?.dispose()
@@ -289,5 +293,95 @@ test("an exclusive model installs the request gate when no agent is bound", asyn
     event: { subscribe: () => (async function* () {})() },
   } as never, exclusiveConfig)
   assert.equal(hooked, true)
+  await routing?.dispose()
+})
+
+test("each new prompt chooses for that session and chooses again after the turn", async () => {
+  const promptConfig = parseConfig({
+    plans: { review: ["provider-a/primary", { id: "provider-b/backup", variant: "fast" }] },
+    agents: { reviewer: "review" },
+    exclusiveModels: ["provider-a/primary"],
+  })
+  const sessions: Record<string, { agent: string; model: { providerID: string; id: string; variant?: string } }> = {
+    a: { agent: "reviewer", model: { providerID: "provider-a", id: "primary" } },
+    b: { agent: "reviewer", model: { providerID: "provider-a", id: "primary" } },
+    c: { agent: "reviewer", model: { providerID: "user", id: "picked" } },
+  }
+  const switches: string[] = []
+  const hooks: Record<string, Array<(input: { sessionID: string; kind?: string; model?: { providerID: string; id: string } }) => Promise<void>>> = {}
+  const queued: Array<{ event: unknown; done: () => void }> = []
+  let waiting: ((item: { event: unknown; done: () => void } | undefined) => void) | undefined
+  let signal: AbortSignal | undefined
+  const routing = await registerAgentRouting({
+    model: { list: async () => ({ data: registry.map((model) => ({ providerID: model.providerID, id: model.modelID, enabled: true })) }) },
+    storage: { get: async () => undefined, set: async () => {}, remove: async () => {}, scan: async () => ({ entries: [] }) },
+    rpc: () => ({ status: async () => { throw new Error("not configured") } }),
+    agent: {
+      transform: async () => ({ dispose: async () => {} }),
+      reload: async () => {},
+    },
+    session: {
+      hook: async (name: string, callback: (input: { sessionID: string }) => Promise<void>) => {
+        hooks[name] ??= []
+        hooks[name].push(callback)
+        return { dispose: async () => {} }
+      },
+      get: async (input: { sessionID: string }) => ({ data: sessions[input.sessionID] }),
+      switchModel: async (input: { sessionID: string; model: { providerID: string; id: string; variant?: string } }) => {
+        switches.push(input.sessionID)
+        sessions[input.sessionID].model = input.model
+      },
+    },
+    event: {
+      subscribe(input: { signal?: AbortSignal }) {
+        signal = input.signal
+        return (async function* () {
+          while (!signal?.aborted) {
+            const item = queued.shift() ?? await new Promise<typeof queued[number] | undefined>((resolve) => {
+              let settled = false
+              const finish = (value?: typeof queued[number]) => {
+                if (settled) return
+                settled = true
+                waiting = undefined
+                resolve(value)
+              }
+              waiting = finish
+              signal?.addEventListener("abort", () => finish(), { once: true })
+            })
+            if (!item || signal?.aborted) return
+            yield item.event
+            item.done()
+          }
+        })()
+      },
+    },
+  } as never, promptConfig)
+  const prompt = (sessionID: string) => hooks.prompt[0]({ sessionID })
+  const push = (event: unknown) => new Promise<void>((done) => {
+    const item = { event, done }
+    if (waiting) waiting(item)
+    else queued.push(item)
+  })
+
+  await prompt("a")
+  assert.deepEqual(switches, [])
+  assert.equal((await routing?.explain("reviewer", "b"))?.selected?.modelID, "backup")
+  await prompt("b")
+  assert.deepEqual(sessions.b.model, { providerID: "provider-b", id: "backup", variant: "fast" })
+  await prompt("c")
+  assert.equal(sessions.c.model.id, "picked")
+  assert.deepEqual(switches, ["b"])
+  for (const callback of hooks["model.request"]) {
+    await callback({ sessionID: "a", kind: "primary", model: { providerID: "provider-a", id: "primary" } })
+  }
+  sessions.a.model = { providerID: "provider-b", id: "backup", variant: "fast" }
+  await prompt("a")
+  assert.deepEqual(switches, ["b"])
+  await push({ type: "session.step.ended", data: { sessionID: "a" } })
+  await prompt("b")
+  assert.equal(sessions.b.model.id, "backup")
+  await push({ type: "session.execution.succeeded", data: { sessionID: "a" } })
+  await prompt("b")
+  assert.equal(sessions.b.model.id, "primary")
   await routing?.dispose()
 })

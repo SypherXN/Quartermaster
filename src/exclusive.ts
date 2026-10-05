@@ -8,6 +8,7 @@ interface Hold {
   sessionID: string
   agentID: string
   count: number
+  reserved: boolean
   expiresAt: number
 }
 
@@ -35,9 +36,32 @@ export class ExclusiveLeases {
     this.sleep = sleep
   }
 
-  blocks(agentID: string, model: Pick<ModelRef, "providerID" | "modelID">): boolean {
+  blocks(sessionID: string, model: Pick<ModelRef, "providerID" | "modelID">): boolean {
     const hold = this.live(modelKey(model))
-    return hold !== undefined && hold.agentID !== agentID
+    return hold !== undefined && hold.sessionID !== sessionID
+  }
+
+  taken(model: Pick<ModelRef, "providerID" | "modelID">): boolean {
+    return this.live(modelKey(model)) !== undefined
+  }
+
+  claim(model: Pick<ModelRef, "providerID" | "modelID">, sessionID: string, agentID: string): "acquired" | "nested" | "busy" {
+    return this.tryAcquire(modelKey(model), sessionID, agentID)
+  }
+
+  reserve(model: Pick<ModelRef, "providerID" | "modelID">, sessionID: string, agentID: string): "acquired" | "nested" | "busy" {
+    const key = modelKey(model)
+    const hold = this.live(key)
+    const expiresAt = this.now() + EXCLUSIVE_TTL_MS
+    if (!hold) {
+      this.holds.set(key, { sessionID, agentID, count: 0, reserved: true, expiresAt })
+      return "acquired"
+    }
+    if (hold.sessionID !== sessionID) return "busy"
+    hold.reserved = true
+    hold.expiresAt = expiresAt
+    hold.agentID = agentID
+    return "nested"
   }
 
   async acquire(
@@ -66,8 +90,44 @@ export class ExclusiveLeases {
         continue
       }
       if (hold.sessionID !== sessionID) continue
-      hold.count -= 1
+      if (hold.count > 0) hold.count -= 1
+      if (hold.count > 0 || hold.reserved) continue
+      this.holds.delete(key)
+      this.wake(key)
+      freed = true
+    }
+    return freed
+  }
+
+  releaseReservation(sessionID: string): boolean {
+    let freed = false
+    for (const [key, hold] of [...this.holds]) {
+      if (this.now() >= hold.expiresAt) {
+        this.holds.delete(key)
+        this.wake(key)
+        freed = true
+        continue
+      }
+      if (hold.sessionID !== sessionID) continue
+      hold.reserved = false
       if (hold.count > 0) continue
+      this.holds.delete(key)
+      this.wake(key)
+      freed = true
+    }
+    return freed
+  }
+
+  finish(sessionID: string): boolean {
+    let freed = false
+    for (const [key, hold] of [...this.holds]) {
+      if (this.now() >= hold.expiresAt) {
+        this.holds.delete(key)
+        this.wake(key)
+        freed = true
+        continue
+      }
+      if (hold.sessionID !== sessionID) continue
       this.holds.delete(key)
       this.wake(key)
       freed = true
@@ -91,7 +151,7 @@ export class ExclusiveLeases {
     const hold = this.live(key)
     const expiresAt = this.now() + EXCLUSIVE_TTL_MS
     if (!hold) {
-      this.holds.set(key, { sessionID, agentID, count: 1, expiresAt })
+      this.holds.set(key, { sessionID, agentID, count: 1, reserved: false, expiresAt })
       return "acquired"
     }
     if (hold.sessionID !== sessionID) return "busy"
@@ -143,7 +203,7 @@ export class ExclusiveLeases {
   }
 }
 
-function readStep(event: unknown): { kind: "touch" | "release"; sessionID: string } | undefined {
+function readStep(event: unknown): { kind: "touch" | "release" | "finish"; sessionID: string } | undefined {
   if (typeof event !== "object" || event === null) return undefined
   const record = event as { type?: unknown; data?: unknown }
   if (typeof record.data !== "object" || record.data === null) return undefined
@@ -151,6 +211,11 @@ function readStep(event: unknown): { kind: "touch" | "release"; sessionID: strin
   if (typeof sessionID !== "string" || sessionID.length === 0) return undefined
   if (record.type === "session.step.streamed") return { kind: "touch", sessionID }
   if (record.type === "session.step.ended" || record.type === "session.step.failed") return { kind: "release", sessionID }
+  if (
+    record.type === "session.execution.succeeded"
+    || record.type === "session.execution.failed"
+    || record.type === "session.execution.interrupted"
+  ) return { kind: "finish", sessionID }
   return undefined
 }
 
@@ -162,8 +227,9 @@ export async function bindExclusive(
   leases: ExclusiveLeases,
   models: readonly ModelRef[],
   onChange: (changed: boolean) => void | Promise<void>,
+  onStep?: (step: { kind: "touch" | "release" | "finish"; sessionID: string }) => void,
 ) {
-  if (models.length === 0 || !ctx.session || !ctx.event) return { dispose: async () => {} }
+  if (!ctx.session || !ctx.event || (models.length === 0 && !onStep)) return { dispose: async () => {} }
   const listed = new Set(models.map((model) => modelKey(model)))
   const controller = new AbortController()
   const hooks: Array<{ dispose: () => Promise<void> }> = []
@@ -186,7 +252,9 @@ export async function bindExclusive(
         if (controller.signal.aborted) return
         const step = readStep(event)
         if (!step) continue
+        onStep?.(step)
         if (step.kind === "touch") leases.touch(step.sessionID)
+        else if (step.kind === "finish") await onChange(leases.finish(step.sessionID))
         else await onChange(leases.release(step.sessionID))
       }
     } catch {

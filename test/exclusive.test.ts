@@ -9,10 +9,10 @@ test("one session holds an exclusive model until its nested steps end", async ()
   const leases = new ExclusiveLeases(() => 0, hang)
   assert.equal(await leases.acquire(model, "a", "reviewer"), true)
   assert.equal(await leases.acquire(model, "a", "reviewer"), false)
-  assert.equal(leases.blocks("builder", model), true)
-  assert.equal(leases.blocks("reviewer", model), false)
+  assert.equal(leases.blocks("b", model), true)
+  assert.equal(leases.blocks("a", model), false)
   assert.equal(leases.release("missing"), false)
-  assert.equal(leases.blocks("builder", model), true)
+  assert.equal(leases.blocks("b", model), true)
 
   let finished = false
   const pending = leases.acquire(model, "b", "builder").then((changed) => {
@@ -26,7 +26,7 @@ test("one session holds an exclusive model until its nested steps end", async ()
   assert.equal(finished, false)
   assert.equal(leases.release("a"), true)
   assert.equal(await pending, true)
-  assert.equal(leases.blocks("reviewer", model), true)
+  assert.equal(leases.blocks("a", model), true)
 })
 
 test("a streamed step extends the hold and silence expires it", async () => {
@@ -34,7 +34,7 @@ test("a streamed step extends the hold and silence expires it", async () => {
   const quiet = new ExclusiveLeases(() => now)
   await quiet.acquire(model, "a", "reviewer")
   now = EXCLUSIVE_TTL_MS
-  assert.equal(quiet.blocks("builder", model), false)
+  assert.equal(quiet.blocks("b", model), false)
 
   now = 0
   const refreshed = new ExclusiveLeases(() => now)
@@ -42,9 +42,9 @@ test("a streamed step extends the hold and silence expires it", async () => {
   now = EXCLUSIVE_TTL_MS - 1
   refreshed.touch("a")
   now = EXCLUSIVE_TTL_MS
-  assert.equal(refreshed.blocks("builder", model), true)
+  assert.equal(refreshed.blocks("b", model), true)
   now = EXCLUSIVE_TTL_MS - 1 + EXCLUSIVE_TTL_MS
-  assert.equal(refreshed.blocks("builder", model), false)
+  assert.equal(refreshed.blocks("b", model), false)
 })
 
 test("a waiting session acquires after the hold expires", async () => {
@@ -55,8 +55,8 @@ test("a waiting session acquires after the hold expires", async () => {
   }))
   assert.equal(await leases.acquire(model, "a", "reviewer"), true)
   assert.equal(await leases.acquire(model, "b", "builder"), true)
-  assert.equal(leases.blocks("builder", model), false)
-  assert.equal(leases.blocks("reviewer", model), true)
+  assert.equal(leases.blocks("b", model), false)
+  assert.equal(leases.blocks("a", model), true)
 })
 
 test("primary calls take the slot and later calls wait for the step", async () => {
@@ -106,7 +106,7 @@ test("primary calls take the slot and later calls wait for the step", async () =
   assert.deepEqual(changes, [])
   await request({ sessionID: "a", agent: "reviewer", kind: "primary", model: requested })
   assert.deepEqual(requested, { providerID: "ninfer", id: "qwen" })
-  assert.equal(leases.blocks("builder", model), true)
+  assert.equal(leases.blocks("b", model), true)
   const push = (event: unknown) => new Promise<void>((done) => {
     const item = { event, done }
     if (waiting) waiting(item)
@@ -116,7 +116,7 @@ test("primary calls take the slot and later calls wait for the step", async () =
   now = EXCLUSIVE_TTL_MS - 1
   await push({ type: "session.step.streamed", data: { sessionID: "a" } })
   now = EXCLUSIVE_TTL_MS
-  assert.equal(leases.blocks("builder", model), true)
+  assert.equal(leases.blocks("b", model), true)
   let second = false
   const pending = request({ sessionID: "b", agent: "builder", kind: "primary", model: requested }).then(() => { second = true })
   await Promise.resolve()

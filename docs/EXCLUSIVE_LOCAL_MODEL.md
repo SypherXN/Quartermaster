@@ -1,6 +1,6 @@
 # Exclusive local model
 
-One opt-in local model, such as Qwen on ninfer, may have one in-flight request in this OpenCode process. Other agents are assigned their next eligible candidate while that slot is held. This is not a cross-process lock, a ninfer client, or a mid-turn model switch.
+One opt-in local model, such as Qwen on ninfer, may be used by one session in this OpenCode process. On each new prompt, another session — including another chat with the same agent — is given its next eligible candidate. The holding session keeps the model until that turn ends, and the next prompt chooses again. This is not a cross-process lock, a ninfer client, a free-model routing call, or a mid-turn model switch.
 
 ## Task index
 
@@ -15,8 +15,9 @@ One opt-in local model, such as Qwen on ninfer, may have one in-flight request i
 
 - The user names the model as `providerID/modelID` from `opencode models`. ninfer is that provider, not a special integration.
 - The slot is per listed model, inside the plugin process only. Two OpenCode processes do not share it.
-- The session that holds the slot may run its own later steps. A different session waits only if its request is already aimed at that model.
-- An active session model is not switched. Fallback happens at the next assignment.
+- The session that holds the slot keeps it until the turn ends. A later prompt chooses again.
+- A different session does not wait when its plan has another candidate. A request already aimed at the busy model still waits.
+- An in-flight turn is not switched. A session model outside the agent's plan is left alone.
 - An empty `exclusiveModels` list keeps today's behavior.
 
 ## Task details
