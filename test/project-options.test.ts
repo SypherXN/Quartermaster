@@ -555,8 +555,8 @@ test("matches only this Quartermaster package", async () => {
 
     const example = await readProjectQuartermasterOptions(fileURLToPath(new URL("../examples/test-agent", import.meta.url)))
     assert.deepEqual(example.options, {
-      plans: { "test-agent": ["fixture/primary-model", "fixture/backup-model"] },
-      agents: { "quartermaster-test": "test-agent" },
+      plans: { "test-agent": ["ninfer/qwen3.8-27b", "opencode/space-bunny-free"] },
+      agents: { "qm-test": "test-agent" },
     })
   } finally {
     await rm(root, { recursive: true, force: true })

@@ -5,10 +5,10 @@
       "package": "../..",
       "options": {
         "plans": {
-          "test-agent": ["fixture/primary-model", "fixture/backup-model"]
+          "test-agent": ["ninfer/qwen3.8-27b", "opencode/space-bunny-free"]
         },
         "agents": {
-          "quartermaster-test": "test-agent"
+          "qm-test": "test-agent"
         }
       }
     }

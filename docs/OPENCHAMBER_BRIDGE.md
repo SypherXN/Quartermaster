@@ -1,6 +1,6 @@
 # OpenChamber bridge feasibility
 
-**Current result (2026-10-01): a maintainer-authorized OpenChamber checkout now
+**Verified result (2026-10-01): a maintainer-authorized OpenChamber checkout
 contains a host-mediated bridge to the active project's Quartermaster RPC, and
 it passed a live smoke test on a disposable host.** The SDK exposes an explicit
 `quartermaster` capability on wire API v1. The host chooses the active project,
@@ -28,7 +28,7 @@ extension's own service; neither documents an active OpenCode server
 location/auth handoff. This is documentation/source evidence, not a live host
 smoke test.
 
-The current source reports `@openchamber/sdk` 2.0.4, manifest API v1 and wire
+The source snapshot reviewed on 2026-09-30 reports `@openchamber/sdk` 2.0.4, manifest API v1 and wire
 envelope v1. Web and desktop load guests; VS Code and mobile are unsupported.
 The docs/examples also mention SDK `^1.24.0`; no OpenChamber host-version
 compatibility matrix was found, so the published version story is inconsistent.
@@ -47,13 +47,15 @@ the guest's own local service. That service receives its own loopback port and
 service token; host secrets are withheld. `exec`/`sockets` permissions run with
 the user's broad OS privileges and are not a sandbox or OpenCode RPC tunnel.
 
-The project's OpenCode target is V2 2.0.18 (`docs/PLUGIN_INTEGRATION.md`). The
+The project's locked OpenCode plugin/client/schema target is V2 2.0.23
+(`docs/PLUGIN_INTEGRATION.md`). The
 [current V2 client docs](https://opencode.ai/v2/docs/build/client) document
 `POST /api/rpc/{rpcID}/{method}` and a `location.directory` option for project
 context; the [API docs](https://opencode.ai/v2/docs/api) describe the endpoint's
 401 response. A caller still needs the OpenCode server endpoint and
 authorization. These docs provide no OpenChamber active-server discovery/auth
-handoff and are not a live test of the project's target host version.
+handoff. The bridge smoke below used a separate disposable OpenChamber host on
+2026-10-01; it does not establish compatibility with every OpenCode version.
 
 ## Local implementation and verification
 

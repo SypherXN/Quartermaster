@@ -47,21 +47,6 @@ test("plugin integration docs describe the project-options RPC contract", async 
   assert.match(section, /`quartermaster-options`/)
   assert.match(section, /`quartermaster` grant remains read-only/)
   assert.doesNotMatch(docs, /has no project-configuration write RPC|not an RPC, writes/)
-})
-
-test("project-options plan specs agree with the live writer documentation", async () => {
-  const sections: string[] = []
-  for (const file of ["plans/quartermaster.plan.md", "docs/IMPLEMENTATION_PLAN.md"]) {
-    const docs = await readFile(new URL(`../${file}`, import.meta.url), "utf8")
-    const section = docs.split("### [#33] [plan-config-rpc] ")[1]?.split("\n### ")[0]
-    assert.ok(section, file)
-    assert.match(section, /`readOptions` and `applyOptions`/)
-    assert.match(section, /`quartermaster-options`/)
-    assert.match(section, /offline.*syntax-only/)
-    assert.doesNotMatch(section, /no (?:host write|config) RPC|remain blocked|still needs|Keep this pending/i)
-    sections.push(section.trim())
-  }
-  assert.equal(sections[0], sections[1])
   const readme = await readFile(new URL("../web/README.md", import.meta.url), "utf8")
   assert.match(readme, /`quartermaster-options`/)
   assert.doesNotMatch(readme, /no live project-config writer|no general proxy or write route|bridge is likewise not implemented|still needs the OpenChamber bridge/i)

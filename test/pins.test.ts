@@ -16,14 +16,15 @@ const registry = [primary, backup]
 const eligible = new Map(registry.map((model) => [modelKey(model), { status: "available" as const }]))
 
 function storedPins(initial?: unknown) {
-  let value = initial
+  const values = new Map<string, unknown>()
+  if (initial !== undefined) values.set(PIN_STORAGE_KEY, initial)
   let key: string | undefined
   return {
     storage: {
-      get: async () => value,
-      set: async (storageKey: string, next: unknown) => { key = storageKey; value = next },
+      get: async (storageKey: string) => values.get(storageKey),
+      set: async (storageKey: string, next: unknown) => { key = storageKey; values.set(storageKey, next) },
     },
-    read: () => value,
+    read: (storageKey = PIN_STORAGE_KEY) => values.get(storageKey),
     key: () => key,
   }
 }
@@ -136,4 +137,42 @@ test("a recovered pinned model takes priority again on a later selection", async
     assert.deepEqual(recovered.model, backup)
     assert.equal(recovered.reason.code, "manual-pin")
   }
+})
+
+test("pins are isolated by project and do not import the legacy shared key", async () => {
+  const legacy = { reviewer: backup }
+  const store = storedPins(legacy)
+  const alpha = await AgentPins.load(config, registry, store.storage, "project-a")
+  const beta = await AgentPins.load(config, registry, store.storage, "project-b")
+  assert.equal(alpha.get("reviewer"), undefined)
+  assert.equal(beta.get("reviewer"), undefined)
+
+  await alpha.pin("reviewer", backup)
+  assert.deepEqual(store.read("pins/v1/project-a"), { reviewer: backup })
+  assert.equal(beta.get("reviewer"), undefined)
+  await beta.pin("reviewer", primary)
+  assert.deepEqual(store.read("pins/v1/project-b"), { reviewer: primary })
+  assert.deepEqual(store.read(PIN_STORAGE_KEY), legacy)
+  assert.deepEqual((await AgentPins.load(config, registry, store.storage, "project-a")).get("reviewer"), backup)
+})
+
+test("pins are removed when plan edits or registry refresh make them invalid", async () => {
+  const editable = parseConfig({
+    plans: { review: ["provider-a/primary", { id: "provider-b/backup", variant: "fast" }] },
+    agents: { reviewer: "review" },
+  })
+  const store = storedPins()
+  const pins = await AgentPins.load(editable, registry, store.storage, "project-a")
+  await pins.pin("reviewer", backup)
+
+  editable.plans.review = [primary]
+  assert.equal(await pins.revalidate(), true)
+  assert.equal(pins.get("reviewer"), undefined)
+  assert.deepEqual(store.read("pins/v1/project-a"), {})
+
+  editable.plans.review = [primary, backup]
+  await pins.pin("reviewer", backup)
+  assert.equal(await pins.setRegistry([primary]), true)
+  assert.equal(pins.get("reviewer"), undefined)
+  assert.deepEqual(store.read("pins/v1/project-a"), {})
 })

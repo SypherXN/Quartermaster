@@ -1,6 +1,6 @@
 # Exclusive local model
 
-One opt-in local model, such as Qwen on ninfer, may be used by one session in this OpenCode process. On each new prompt, another session — including another chat with the same agent — is given its next eligible candidate. The holding session keeps the model until that turn ends, and the next prompt chooses again. This is not a cross-process lock, a ninfer client, a free-model routing call, or a mid-turn model switch.
+One opt-in local model, such as Qwen on ninfer, is guarded by an in-memory lease manager per Quartermaster plugin instance. Within that instance, another session — including another chat with the same agent — is given its next eligible candidate. The holding session keeps the model until that turn ends, and the next prompt chooses again. Separate project/plugin instances and OpenCode processes do not share leases. This is not a ninfer client, a free-model routing call, or a mid-turn model switch.
 
 ## Task index
 
@@ -8,13 +8,13 @@ One opt-in local model, such as Qwen on ninfer, may be used by one session in th
 |---|-----|--------|---------|
 | 1 | `exclusive-config` | completed | Opt-in `exclusiveModels` list |
 | 2 | `exclusive-lease` | completed | In-memory one-holder lease |
-| 3 | `exclusive-routing` | completed | Skip a busy model and reload agents |
+| 3 | `exclusive-routing` | completed | Skip a busy model during session prompt routing |
 | 4 | `exclusive-gate` | completed | Hold the slot across the provider call |
 
 ## Assumptions
 
 - The user names the model as `providerID/modelID` from `opencode models`. ninfer is that provider, not a special integration.
-- The slot is per listed model, inside the plugin process only. Two OpenCode processes do not share it.
+- The slot is per listed model, inside one Quartermaster plugin instance only. Separate project/plugin instances and OpenCode processes do not share it.
 - The session that holds the slot keeps it until the turn ends. A later prompt chooses again.
 - A different session does not wait when its plan has another candidate. A request already aimed at the busy model still waits.
 - An in-flight turn is not switched. A session model outside the agent's plan is left alone.
@@ -46,10 +46,10 @@ One opt-in local model, such as Qwen on ninfer, may be used by one session in th
 
 **Priority:** high
 
-**Scope:** Add an in-memory lease keyed by `providerID/modelID`. A session acquires the slot only when it is free or already held by that same session. Acquisition counts nested calls from that session. `session.step.ended` and `session.step.failed` release one count, and the slot frees at zero. A missed end event expires the slot 15 minutes after the last acquire or `session.step.streamed` refresh. The lease is not written to plugin storage.
+**Scope/current behavior:** Add an in-memory lease keyed by `providerID/modelID`. A session acquires the slot only when it is free or already held by that same session. The prompt reservation is held through the execution and step end/failure does not free it; `session.execution.succeeded`, `.failed`, or `.interrupted` finishes the reservation. A missed finish expires the slot 15 minutes after the last acquire or `session.step.streamed` refresh. The lease is not written to plugin storage and is not shared between plugin instances.
 **Acceptance criteria:**
 - [x] A second session cannot acquire a held model. The holding session can acquire again.
-- [x] Ended and failed events release one nested hold, including when the event has no matching hold.
+- [x] Step ended/failed events update lease state; prompt reservation remains until the session execution finishes.
 - [x] A streamed event keeps the holder past the original acquire time. A silent holder expires after 15 minutes.
 - [x] Tests cover these cases with an injected clock and do not open a port or call ninfer.
 **Files:** `src/exclusive.ts`, `test/exclusive.test.ts`
@@ -63,12 +63,12 @@ One opt-in local model, such as Qwen on ninfer, may be used by one session in th
 
 **Priority:** high
 
-**Scope:** While a lease is held, `selectModel` skips that model for every agent except the holding session's agent, with skip reason `exclusive-busy`. The holding agent keeps the model. Releasing the slot or acquiring it requests the existing debounced agent reload so the next assignment can take the model or move off it. `explain` includes the new reason. Pins still do not bypass this skip.
+**Scope/current behavior:** While a lease is held, session-aware routing skips that model for every session except the lease-owning session, with reason `exclusive-busy`. A caller that omits session ID treats every held model as busy. Agent transform itself does not consult lease state; prompt-time routing does. Lease changes do not reload the agent catalog.
 **Acceptance criteria:**
 - [x] With the slot free, the exclusive model remains the first eligible candidate.
-- [x] With another session holding it, the next agent gets the following eligible candidate, and the explanation uses `exclusive-busy`.
+- [x] With another session holding it, session-aware prompt selection takes the following eligible candidate and explanation uses `exclusive-busy`.
 - [x] The holding agent still selects that model. A pin on a busy exclusive model is skipped.
-- [x] Acquire and release call the existing reload path once per change, not on an unchanged eligibility snapshot.
+- [x] Session-aware prompt routing responds to lease state; agent-catalog reload is not used for lease changes.
 **Files:** `src/select.ts`, `src/explain.ts`, `src/agent-routing.ts`, `test/select.test.ts`, `test/agent-routing.test.ts`
 **Depends on:** #2
 
@@ -80,9 +80,9 @@ One opt-in local model, such as Qwen on ninfer, may be used by one session in th
 
 **Priority:** high
 
-**Scope:** Register `session.hook("model.request")` for each exclusive model's provider. Before that call proceeds, acquire the lease for its session. If another session holds it, wait until release or the 15-minute expiry, then acquire. Do not change `model`, call `switchModel`, or retarget the URL. Release through the step ended and failed events from #2, and refresh expiry on streamed events. Limit the hook to `kind: "primary"`. Compaction, title, and generate calls are unchanged.
+**Scope/current behavior:** Register `session.hook("model.request")` for each configured exclusive model provider. Primary requests acquire/wait for a lease; the hook does not retarget an already-started request. Stream events refresh expiry. Step ended/failed release the turn reservation only when a subsequent execution-finished event arrives. Compaction, title, and generate calls are unchanged and are not gated. These hook registrations use startup config; changing `exclusiveModels` requires plugin restart.
 **Acceptance criteria:**
-- [x] Two overlapping primary requests for the same exclusive model result in one acquire before the first returns, and the second proceeds only after ended or failed.
+- [x] Two overlapping primary requests for the same exclusive model result in one acquire before the first returns; step end/failure alone does not release the prompt reservation, which lasts through execution completion.
 - [x] A request for a non-exclusive model, or a non-primary kind, does not take the slot.
 - [x] A request already aimed at the busy model is not moved to another model mid-turn.
 - [x] Disposal removes the hook and the event subscription.

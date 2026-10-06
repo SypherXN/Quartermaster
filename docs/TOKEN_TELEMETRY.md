@@ -7,9 +7,12 @@ billing or complete event capture.
 ## Verified host contract
 
 The lockfile resolves `@opencode/plugin`, `@opencode/client`, and
-`@opencode/schema` to **2.0.18**. The manifest uses `latest`, so this records
-the locked and tested schema, not a runtime version gate; reverify upgrades.
-The upstream reference is OpenCode tag [`v2.0.18`](https://github.com/anomalyco/opencode/tree/v2.0.18),
+`@opencode/schema` to **2.0.23**. The manifest uses `latest`, so this records
+the locked schema, not a runtime version gate; reverify upgrades. The upstream
+event/server source links below were reviewed against OpenCode tag
+[`v2.0.18`](https://github.com/anomalyco/opencode/tree/v2.0.18) and are retained
+as historical source references, not a claim that the current host runs that tag.
+Telemetry tests use the locked 2.0.23 types and synthetic events. The cited source commit is
 commit [`cd9a14a6b688d4021bee381dfd39d2cef9c0f862`](https://github.com/anomalyco/opencode/commit/cd9a14a6b688d4021bee381dfd39d2cef9c0f862):
 
 - [`session-event.ts`](https://github.com/anomalyco/opencode/blob/v2.0.18/packages/schema/src/session-event.ts)
@@ -42,8 +45,9 @@ share a message ID. Persistent deduplication and restart recovery are #21.
   `counts: null` and `usageStatus: "missing"`.
 - Ignore started/streamed events, retry markers, message updates, session
   aggregates, and compaction events. A retry marker is not a provider response.
-  In v2.0.18 the compaction completion event repeats usage from OpenCode's
-  internal accounting path; excluding it avoids mixing it with step records.
+  The v2.0.18 source reviewed for this contract repeats usage on compaction
+  completion; excluding it avoids mixing it with step records. Verify this
+  behavior against the host source when upgrading the locked version.
   Compaction-only usage remains a coverage gap pending an unambiguous source.
 - Assistant message token snapshots are not the accounting unit: OpenCode
   overwrites the snapshot on each provider step, while one logical message may

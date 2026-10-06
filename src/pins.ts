@@ -3,6 +3,9 @@ import { modelKey } from "./select.ts"
 
 export const PIN_STORAGE_KEY = "pins/v1"
 
+const projectStorageKey = (projectID?: string) =>
+  projectID ? `${PIN_STORAGE_KEY}/${encodeURIComponent(projectID)}` : PIN_STORAGE_KEY
+
 interface PinStorage {
   get(key: string): Promise<unknown>
   set(key: string, value: unknown): Promise<void>
@@ -16,24 +19,28 @@ export class AgentPins {
   private readonly config: Pick<QuartermasterConfig, "plans" | "agents">
   private registry: readonly ModelRef[]
   private readonly storage: PinStorage
+  private readonly storageKey: string
 
   private constructor(
     config: Pick<QuartermasterConfig, "plans" | "agents">,
     registry: readonly ModelRef[],
     storage: PinStorage,
+    projectID?: string,
   ) {
     this.config = config
     this.registry = registry
     this.storage = storage
+    this.storageKey = projectStorageKey(projectID)
   }
 
   static async load(
     config: Pick<QuartermasterConfig, "plans" | "agents">,
     registry: readonly ModelRef[],
     storage: PinStorage,
+    projectID?: string,
   ): Promise<AgentPins> {
-    const result = new AgentPins(config, registry, storage)
-    const stored = await storage.get(PIN_STORAGE_KEY)
+    const result = new AgentPins(config, registry, storage, projectID)
+    const stored = await storage.get(result.storageKey)
     if (!isRecord(stored)) return result
 
     for (const [agentID, value] of Object.entries(stored)) {
@@ -54,8 +61,27 @@ export class AgentPins {
     return new Map(this.pins)
   }
 
-  setRegistry(registry: readonly ModelRef[]): void {
+  async setRegistry(registry: readonly ModelRef[]): Promise<boolean> {
     this.registry = registry
+    return this.revalidate()
+  }
+
+  async revalidate(): Promise<boolean> {
+    let changed = false
+    for (const [agentID, pin] of this.pins) {
+      try {
+        const valid = this.validate(agentID, pin)
+        if (JSON.stringify(valid) !== JSON.stringify(pin)) {
+          this.pins.set(agentID, valid)
+          changed = true
+        }
+      } catch {
+        this.pins.delete(agentID)
+        changed = true
+      }
+    }
+    if (changed) await this.persist()
+    return changed
   }
 
   async pin(agentID: string, model: unknown): Promise<ModelRef> {
@@ -104,6 +130,6 @@ export class AgentPins {
   }
 
   private persist(): Promise<void> {
-    return this.storage.set(PIN_STORAGE_KEY, Object.fromEntries(this.pins))
+    return this.storage.set(this.storageKey, Object.fromEntries(this.pins))
   }
 }

@@ -6,6 +6,13 @@ coverage/
 *.tsbuildinfo
 /plans/
 
+# Local credentials and OS metadata
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db
+
 # Local host runtime and tooling artifacts
 .opencode-*.log
 .opencode-*.password

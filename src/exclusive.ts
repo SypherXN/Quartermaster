@@ -118,6 +118,17 @@ export class ExclusiveLeases {
     return freed
   }
 
+  releaseModelReservation(model: Pick<ModelRef, "providerID" | "modelID">, sessionID: string): boolean {
+    const key = modelKey(model)
+    const hold = this.live(key)
+    if (!hold || hold.sessionID !== sessionID) return false
+    hold.reserved = false
+    if (hold.count > 0) return false
+    this.holds.delete(key)
+    this.wake(key)
+    return true
+  }
+
   finish(sessionID: string): boolean {
     let freed = false
     for (const [key, hold] of [...this.holds]) {
@@ -203,7 +214,7 @@ export class ExclusiveLeases {
   }
 }
 
-function readStep(event: unknown): { kind: "touch" | "release" | "finish"; sessionID: string } | undefined {
+function readStep(event: unknown): { kind: "touch" | "release" | "finish" | "delete"; sessionID: string } | undefined {
   if (typeof event !== "object" || event === null) return undefined
   const record = event as { type?: unknown; data?: unknown }
   if (typeof record.data !== "object" || record.data === null) return undefined
@@ -216,6 +227,7 @@ function readStep(event: unknown): { kind: "touch" | "release" | "finish"; sessi
     || record.type === "session.execution.failed"
     || record.type === "session.execution.interrupted"
   ) return { kind: "finish", sessionID }
+  if (record.type === "session.deleted") return { kind: "delete", sessionID }
   return undefined
 }
 
@@ -227,7 +239,7 @@ export async function bindExclusive(
   leases: ExclusiveLeases,
   models: readonly ModelRef[],
   onChange: (changed: boolean) => void | Promise<void>,
-  onStep?: (step: { kind: "touch" | "release" | "finish"; sessionID: string }) => void,
+  onStep?: (step: { kind: "touch" | "release" | "finish" | "delete"; sessionID: string }) => void,
 ) {
   if (!ctx.session || !ctx.event || (models.length === 0 && !onStep)) return { dispose: async () => {} }
   const listed = new Set(models.map((model) => modelKey(model)))
@@ -254,7 +266,7 @@ export async function bindExclusive(
         if (!step) continue
         onStep?.(step)
         if (step.kind === "touch") leases.touch(step.sessionID)
-        else if (step.kind === "finish") await onChange(leases.finish(step.sessionID))
+        else if (step.kind === "finish" || step.kind === "delete") await onChange(leases.finish(step.sessionID))
         else await onChange(leases.release(step.sessionID))
       }
     } catch {

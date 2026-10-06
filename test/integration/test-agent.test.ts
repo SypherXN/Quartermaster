@@ -9,6 +9,19 @@ import { modelKey, type Availability, type ModelEligibility } from "../../src/se
 const readJson = async (path: string) =>
   JSON.parse(await readFile(new URL(path, import.meta.url), "utf8"))
 
+async function fixtureConfig() {
+  const hostConfig = await readJson("../../examples/test-agent/opencode.json")
+  const fixture = await readJson("../fixtures/availability-cycle.json")
+  const options = hostConfig.plugins[0].options
+  const config = parseConfig({
+    ...options,
+    plans: { ...options.plans, "test-agent": fixture.models },
+  })
+  const agentID = Object.entries(config.agents).find(([, plan]) => plan === "test-agent")?.[0]
+  assert.ok(agentID, "example binds an agent to the test plan")
+  return { config, fixture, agentID }
+}
+
 function editorFor(agent: Record<string, unknown>): Pick<AgentEditor, "get" | "update"> {
   return {
     get: (id: string) => id === agent.id ? agent as never : undefined,
@@ -17,9 +30,7 @@ function editorFor(agent: Record<string, unknown>): Pick<AgentEditor, "get" | "u
 }
 
 test("synthetic assignments select primary, backup, then recovered primary", async () => {
-  const hostConfig = await readJson("../../examples/test-agent/opencode.json")
-  const fixture = await readJson("../fixtures/availability-cycle.json")
-  const config = parseConfig(hostConfig.plugins[0].options)
+  const { config, fixture, agentID } = await fixtureConfig()
   const plan = config.plans["test-agent"]
   const registry = fixture.models.map((qualified: string) => {
     const [providerID, ...parts] = qualified.split("/")
@@ -27,7 +38,7 @@ test("synthetic assignments select primary, backup, then recovered primary", asy
   })
 
   for (const assignment of fixture.assignments) {
-    const agent = { id: "quartermaster-test", model: undefined as unknown }
+    const agent = { id: agentID, model: undefined as unknown }
     const eligibility = new Map<string, ModelEligibility>(
       Object.entries(assignment.availability as Record<string, Availability>).map(([qualified, status]) => {
         const model = registry.find((candidate: ModelRef) => `${candidate.providerID}/${candidate.modelID}` === qualified)
@@ -49,10 +60,9 @@ test("synthetic assignments select primary, backup, then recovered primary", asy
 })
 
 test("unbound agent and explicit session model remain unchanged", async () => {
-  const hostConfig = await readJson("../../examples/test-agent/opencode.json")
-  const config = parseConfig(hostConfig.plugins[0].options)
+  const { config, agentID } = await fixtureConfig()
   const agent = { id: "unbound-agent", model: { providerID: "host", id: "original" } }
-  const boundAgent = { id: "quartermaster-test", model: undefined as unknown }
+  const boundAgent = { id: agentID, model: undefined as unknown }
   const sessionModel = { providerID: "user", id: "explicit-choice" }
   const eligibility = new Map<string, ModelEligibility>(
     config.plans["test-agent"].map((model) => [modelKey(model), { status: "available" }]),
@@ -61,7 +71,7 @@ test("unbound agent and explicit session model remain unchanged", async () => {
   applyAgentRouting(editorFor(agent), config, config.plans["test-agent"], eligibility, 0)
   applyAgentRouting(
     editorFor(boundAgent), config, config.plans["test-agent"], eligibility, 0,
-    new Map([["quartermaster-test", config.plans["test-agent"][1]]]),
+    new Map([[agentID, config.plans["test-agent"][1]]]),
   )
 
   assert.deepEqual(agent.model, { providerID: "host", id: "original" })

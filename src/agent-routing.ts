@@ -20,8 +20,12 @@ const AGENT_RELOAD_DEBOUNCE_MS = 25
 type AgentModel = NonNullable<Agent.Info["model"]>
 type MutableAgentEditor = Pick<AgentEditor, "get" | "update">
 
-function modelRef(model: { providerID: string; id: string }): ModelRef {
-  return { providerID: model.providerID, modelID: model.id }
+function modelRef(model: { providerID: string; id: string; variant?: string }): ModelRef {
+  return {
+    providerID: model.providerID,
+    modelID: model.id,
+    ...(model.variant === undefined ? {} : { variant: model.variant }),
+  }
 }
 
 interface SessionModel {
@@ -45,7 +49,11 @@ function sessionView(value: unknown): { agent?: string; model?: SessionModel } {
 }
 
 function sameSessionModel(model: ModelRef, current?: SessionModel) {
-  return current?.providerID === model.providerID && current.id === model.modelID && (current.variant ?? undefined) === (model.variant ?? undefined)
+  return current?.providerID === model.providerID && current.id === model.modelID && (current.variant ?? "default") === (model.variant ?? "default")
+}
+
+function sameModelRef(left: ModelRef, right: ModelRef) {
+  return modelKey(left) === modelKey(right) && (left.variant ?? "default") === (right.variant ?? "default")
 }
 
 export function applyAgentRouting(
@@ -85,7 +93,9 @@ export function applyAgentRouting(
 }
 
 export async function registerAgentRouting(
-  ctx: Pick<Context, "agent" | "model" | "rpc" | "storage"> & Partial<Pick<Context, "session" | "event">> & { location?: { directory?: string } },
+  ctx: Pick<Context, "agent" | "model" | "rpc" | "storage"> & Partial<Pick<Context, "session" | "event">> & {
+    location?: { directory?: string; project?: { id?: string } }
+  },
   config: QuartermasterConfig,
   usage?: UsageReadResult,
   budgetGate?: TokenBudgetGate,
@@ -104,7 +114,7 @@ export async function registerAgentRouting(
   const failures = new FailureCooldowns(config.providerCooldownMs)
   failures.restore(await ctx.storage.get(COOLDOWN_STORAGE_KEY), Date.now())
   eligibility = failures.apply(eligibility, registry, Date.now())
-  const pins = await AgentPins.load(config, registry, ctx.storage)
+  const pins = await AgentPins.load(config, registry, ctx.storage, ctx.location?.project?.id)
   const leases = new ExclusiveLeases()
   const busyFor = (sessionID?: string) => (model: ModelRef) =>
     sessionID === undefined ? leases.taken(model) : leases.blocks(sessionID, model)
@@ -185,7 +195,7 @@ export async function registerAgentRouting(
     refreshPromise = (async () => {
       const before = fingerprint(eligibility)
       registry = (await ctx.model.list()).data.filter((model) => model.enabled).map(modelRef)
-      pins.setRegistry(registry)
+      await pins.setRegistry(registry)
       if (nextEligibility !== undefined) {
         injectedEligibility = nextEligibility
       } else {
@@ -211,13 +221,27 @@ export async function registerAgentRouting(
   const running = new Set<string>()
   let promptHook: { dispose: () => Promise<void> } | undefined
   let runningHook: { dispose: () => Promise<void> } | undefined
+  let retryHook: { dispose: () => Promise<void> } | undefined
+  const requestKinds = new Map<string, { kind: string; agent: string; model: ModelRef }>()
+  const attemptedModels = new Map<string, Set<string>>()
+  const lastPrimaryModels = new Map<string, { agent: string; model: ModelRef }>()
+  const manualModels = new Map<string, { agent: string; model: ModelRef }>()
   const exclusiveGate = await bindExclusive(ctx, leases, config.exclusiveModels, async () => {}, (step) => {
-    if (step.kind === "finish") running.delete(step.sessionID)
+    if (step.kind === "finish" || step.kind === "delete") {
+      running.delete(step.sessionID)
+      requestKinds.delete(step.sessionID)
+      attemptedModels.delete(step.sessionID)
+    }
+    if (step.kind === "delete") {
+      lastPrimaryModels.delete(step.sessionID)
+      manualModels.delete(step.sessionID)
+    }
   })
   const exclusiveKeys = new Set(config.exclusiveModels.map((model) => modelKey(model)))
 
   const ensureProjectOptions = async () => {
     if (ctx.location?.directory) await adoptProjectQuartermasterOptions(config, ctx.location.directory).catch(() => undefined)
+    await pins.revalidate()
   }
 
   const choose = (agentID: string, sessionID: string) => selectAgentModel(
@@ -240,11 +264,52 @@ export async function registerAgentRouting(
       return
     }
     const agentID = view.agent
-    if (!agentID || !Object.hasOwn(config.agents, agentID)) return
+    if (!agentID || !Object.hasOwn(config.agents, agentID)) {
+      manualModels.delete(sessionID)
+      return
+    }
     const plan = config.plans[config.agents[agentID] ?? ""]
-    if (view.model && !plan?.some((candidate) => candidate.providerID === view.model?.providerID && candidate.modelID === view.model.id)) {
+    if (view.model && !plan?.some((candidate) => sameSessionModel(candidate, view.model))) {
+      manualModels.delete(sessionID)
       leases.releaseReservation(sessionID)
       return
+    }
+    const lastPrimary = lastPrimaryModels.get(sessionID)
+    const manual = manualModels.get(sessionID)
+    if (manual && (manual.agent !== agentID || !plan?.some((candidate) => sameModelRef(candidate, manual.model)))) {
+      manualModels.delete(sessionID)
+    }
+    if (manualModels.has(sessionID) && view.model) {
+      const currentOverride = manualModels.get(sessionID)!
+      if (!sameSessionModel(currentOverride.model, view.model)) {
+        if (plan?.some((candidate) => sameSessionModel(candidate, view.model!))) {
+          manualModels.set(sessionID, { agent: agentID, model: modelRef(view.model) })
+        } else {
+          manualModels.delete(sessionID)
+        }
+      }
+    } else if (
+      view.model && lastPrimary?.agent === agentID && !sameSessionModel(lastPrimary.model, view.model) &&
+      plan?.some((candidate) => sameSessionModel(candidate, view.model!))
+    ) {
+      manualModels.set(sessionID, { agent: agentID, model: modelRef(view.model) })
+    }
+    const explicit = manualModels.get(sessionID)
+    if (explicit && view.model && sameSessionModel(explicit.model, view.model)) {
+      const currentChoice = selectModel(
+        [explicit.model],
+        registry,
+        failures.apply(baseSnapshot(), registry, Date.now()),
+        Date.now(),
+        busyFor(sessionID),
+      )
+      if (currentChoice.status === "selected") {
+        leases.releaseReservation(sessionID)
+        return
+      }
+    }
+    if (view.model && lastPrimary?.agent === agentID && !sameSessionModel(lastPrimary.model, view.model) && !manualModels.has(sessionID)) {
+      leases.releaseReservation(sessionID)
     }
     let selection = choose(agentID, sessionID)
     if (selection.status !== "selected") {
@@ -268,6 +333,7 @@ export async function registerAgentRouting(
           ...(selection.model.variant === undefined ? {} : { variant: selection.model.variant }),
         },
       } as never)
+      manualModels.delete(sessionID)
     } catch {
       console.warn("[quartermaster] session model selection failed")
       if (exclusiveKeys.has(modelKey(selection.model))) leases.releaseReservation(sessionID)
@@ -276,7 +342,87 @@ export async function registerAgentRouting(
 
   if (ctx.session && Object.keys(config.agents).length > 0) {
     runningHook = await ctx.session.hook("model.request", async (input) => {
-      if (input.kind === "primary") running.add(input.sessionID)
+      const model = modelRef(input.model)
+      requestKinds.set(input.sessionID, { kind: input.kind, agent: input.agent, model })
+      if (input.kind === "primary") {
+        lastPrimaryModels.set(input.sessionID, { agent: input.agent, model })
+        running.add(input.sessionID)
+        const attempted = attemptedModels.get(input.sessionID) ?? new Set<string>()
+        attempted.add(modelKey(model))
+        attemptedModels.set(input.sessionID, attempted)
+      }
+    })
+    retryHook = await ctx.session.hook("retry", async (event) => {
+      const request = requestKinds.get(event.sessionID)
+      if (
+        event.decision.retry !== true || request?.kind !== "primary" ||
+        request.agent !== event.agent || modelKey(request.model) !== modelKey(modelRef(event.model)) ||
+        !ctx.session?.get || !ctx.session.switchModel
+      ) return
+
+      await ensureProjectOptions()
+      let view: ReturnType<typeof sessionView>
+      try {
+        view = sessionView(await ctx.session.get({ sessionID: event.sessionID } as never))
+      } catch {
+        return
+      }
+      const agentID = view.agent
+      const current = view.model
+      if (!agentID || agentID !== event.agent || !Object.hasOwn(config.agents, agentID)) return
+      const plan = config.plans[config.agents[agentID] ?? ""]
+      if (!current || !plan?.some((candidate) => candidate.providerID === current.providerID && candidate.modelID === current.id)) return
+      if (!sameSessionModel(modelRef(event.model), current)) return
+
+      const status = event.error.status
+      const report: FailureReport = status === 429
+        ? { providerID: event.model.providerID, modelID: event.model.id, classification: "temporary-rate-limit" }
+        : status !== undefined && status >= 500
+          ? { providerID: event.model.providerID, classification: "provider-outage" }
+          : { providerID: event.model.providerID, modelID: event.model.id, classification: "model-outage" }
+      if (failures.reportFailure(report, Date.now())) {
+        await persistCooldowns()
+        await applyCurrent()
+      }
+
+      const attempted = attemptedModels.get(event.sessionID) ?? new Set([modelKey(modelRef(event.model))])
+      const retryPlan = plan?.filter((candidate) => !attempted.has(modelKey(candidate)))
+      const retryPin = pins.get(agentID)
+      const retryCandidates = retryPin && !attempted.has(modelKey(retryPin))
+        ? [retryPin, ...(retryPlan ?? []).filter((candidate) => modelKey(candidate) !== modelKey(retryPin))]
+        : retryPlan
+      let selection = selectModel(
+        retryCandidates,
+        registry,
+        failures.apply(baseSnapshot(), registry, Date.now()),
+        Date.now(),
+        busyFor(event.sessionID),
+      )
+      if (selection.status === "no-eligible" && selection.skipped.length > 0 && selection.skipped.every(({ reason }) => reason.code === "not-in-registry")) {
+        await refresh()
+        selection = selectModel(retryCandidates, registry, failures.apply(baseSnapshot(), registry, Date.now()), Date.now(), busyFor(event.sessionID))
+      }
+      if (selection.status !== "selected" || sameSessionModel(selection.model, current)) return
+      const targetIsExclusive = exclusiveKeys.has(modelKey(selection.model))
+      if (targetIsExclusive && leases.reserve(selection.model, event.sessionID, agentID) === "busy") return
+      try {
+        await ctx.session.switchModel({
+          sessionID: event.sessionID,
+          model: {
+            providerID: selection.model.providerID,
+            id: selection.model.modelID,
+            ...(selection.model.variant === undefined ? {} : { variant: selection.model.variant }),
+          },
+        } as never)
+        attempted.add(modelKey(selection.model))
+        attemptedModels.set(event.sessionID, attempted)
+        if (exclusiveKeys.has(modelKey(modelRef(current)))) leases.releaseModelReservation(modelRef(current), event.sessionID)
+      } catch {
+        console.warn("[quartermaster] retry model selection failed")
+        attempted.add(modelKey(selection.model))
+        attemptedModels.set(event.sessionID, attempted)
+        if (targetIsExclusive) leases.releaseModelReservation(selection.model, event.sessionID)
+      }
     })
     promptHook = await ctx.session.hook("prompt", async (input) => {
       await assignPrompt(input.sessionID)
@@ -360,7 +506,12 @@ export async function registerAgentRouting(
     },
     async dispose() {
       clearInterval(interval)
+      requestKinds.clear()
+      attemptedModels.clear()
+      lastPrimaryModels.clear()
+      manualModels.clear()
       await runningHook?.dispose()
+      await retryHook?.dispose()
       await promptHook?.dispose()
       await exclusiveGate.dispose()
       if (refreshPromise) await refreshPromise.catch(() => {})

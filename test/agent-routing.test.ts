@@ -1,4 +1,7 @@
 import assert from "node:assert/strict"
+import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import test from "node:test"
 import type { AgentEditor } from "@opencode/plugin/promise/agent"
 import { applyAgentRouting, registerAgentRouting } from "../src/agent-routing.ts"
@@ -298,7 +301,7 @@ test("an exclusive model installs the request gate when no agent is bound", asyn
 
 test("each new prompt chooses for that session and chooses again after the turn", async () => {
   const promptConfig = parseConfig({
-    plans: { review: ["provider-a/primary", { id: "provider-b/backup", variant: "fast" }] },
+    plans: { review: ["provider-a/primary", { id: "provider-b/backup", variant: "fast" }, { id: "provider-a/primary", variant: "reasoning" }] },
     agents: { reviewer: "review" },
     exclusiveModels: ["provider-a/primary"],
   })
@@ -306,9 +309,18 @@ test("each new prompt chooses for that session and chooses again after the turn"
     a: { agent: "reviewer", model: { providerID: "provider-a", id: "primary" } },
     b: { agent: "reviewer", model: { providerID: "provider-a", id: "primary" } },
     c: { agent: "reviewer", model: { providerID: "user", id: "picked" } },
+    d: { agent: "unbound", model: { providerID: "provider-a", id: "primary" } },
+    e: { agent: "reviewer", model: { providerID: "provider-a", id: "primary" } },
   }
   const switches: string[] = []
-  const hooks: Record<string, Array<(input: { sessionID: string; kind?: string; model?: { providerID: string; id: string } }) => Promise<void>>> = {}
+  const hooks: Record<string, Array<(input: {
+    sessionID: string
+    kind?: string
+    agent?: string
+    model?: { providerID: string; id: string }
+    decision?: { retry: boolean; delay?: number }
+    error?: { status?: number }
+  }) => Promise<void>>> = {}
   const queued: Array<{ event: unknown; done: () => void }> = []
   let waiting: ((item: { event: unknown; done: () => void } | undefined) => void) | undefined
   let signal: AbortSignal | undefined
@@ -372,16 +384,223 @@ test("each new prompt chooses for that session and chooses again after the turn"
   assert.equal(sessions.c.model.id, "picked")
   assert.deepEqual(switches, ["b"])
   for (const callback of hooks["model.request"]) {
-    await callback({ sessionID: "a", kind: "primary", model: { providerID: "provider-a", id: "primary" } })
+    await callback({ sessionID: "a", kind: "title", agent: "reviewer", model: { providerID: "provider-a", id: "primary" } })
   }
+  await hooks.retry[0]({
+    sessionID: "a", agent: "reviewer", model: { providerID: "provider-a", id: "primary" },
+    decision: { retry: true, delay: 500 }, error: { status: 429 },
+  })
+  assert.deepEqual(sessions.a.model, { providerID: "provider-a", id: "primary" }, "auxiliary requests must not route retries")
+  for (const callback of hooks["model.request"]) {
+    await callback({ sessionID: "c", kind: "primary", agent: "reviewer", model: { providerID: "user", id: "picked" } })
+    await callback({ sessionID: "d", kind: "primary", agent: "unbound", model: { providerID: "user", id: "picked" } })
+  }
+  await hooks.retry[0]({
+    sessionID: "c", agent: "reviewer", model: { providerID: "user", id: "picked" },
+    decision: { retry: true, delay: 500 }, error: { status: 429 },
+  })
+  await hooks.retry[0]({
+    sessionID: "d", agent: "unbound", model: { providerID: "user", id: "picked" },
+    decision: { retry: true, delay: 500 }, error: { status: 429 },
+  })
+  assert.deepEqual(sessions.c.model, { providerID: "user", id: "picked" }, "out-of-plan manual models must not route retries")
+  assert.deepEqual(sessions.d.model, { providerID: "provider-a", id: "primary" }, "unbound agents must not route retries")
+  for (const callback of hooks["model.request"]) {
+    await callback({ sessionID: "a", kind: "primary", agent: "reviewer", model: { providerID: "provider-a", id: "primary" } })
+  }
+  await hooks.retry[0]({
+    sessionID: "a", agent: "reviewer", model: { providerID: "provider-a", id: "primary" },
+    decision: { retry: true, delay: 500 }, error: { status: 429 },
+  })
+  assert.deepEqual(sessions.a.model, { providerID: "provider-b", id: "backup", variant: "fast" })
+  assert.deepEqual(switches, ["b", "a"])
+  for (const callback of hooks["model.request"]) {
+    await callback({ sessionID: "a", kind: "primary", agent: "reviewer", model: { providerID: "provider-b", id: "backup" } })
+  }
+  await hooks.retry[0]({
+    sessionID: "a", agent: "reviewer", model: { providerID: "provider-b", id: "backup" },
+    decision: { retry: true, delay: 500 }, error: { status: 429 },
+  })
+  assert.deepEqual(switches, ["b", "a"], "a model already attempted in this execution is not selected again")
   sessions.a.model = { providerID: "provider-b", id: "backup", variant: "fast" }
   await prompt("a")
-  assert.deepEqual(switches, ["b"])
+  assert.deepEqual(switches, ["b", "a"])
   await push({ type: "session.step.ended", data: { sessionID: "a" } })
   await prompt("b")
   assert.equal(sessions.b.model.id, "backup")
   await push({ type: "session.execution.succeeded", data: { sessionID: "a" } })
   await prompt("b")
-  assert.equal(sessions.b.model.id, "primary")
+  assert.equal(sessions.b.model.id, "backup", "the retry cooldown keeps the failed primary out of the next selection")
+  await routing?.reportSuccess({ providerID: "provider-a", scope: "model", modelID: "primary" })
+  const requestE = async (model: { providerID: string; id: string; variant?: string }) => {
+    for (const callback of hooks["model.request"]) {
+      await callback({ sessionID: "e", kind: "primary", agent: "reviewer", model })
+    }
+  }
+  await requestE({ providerID: "provider-a", id: "primary" })
+  await push({ type: "session.execution.succeeded", data: { sessionID: "e" } })
+  sessions.e.model = { providerID: "provider-a", id: "primary", variant: "reasoning" }
+  await prompt("e")
+  assert.deepEqual(sessions.e.model, { providerID: "provider-a", id: "primary", variant: "reasoning" }, "an explicit in-plan variant survives its first assignment boundary")
+  await requestE(sessions.e.model)
+  await push({ type: "session.execution.succeeded", data: { sessionID: "e" } })
+  await prompt("e")
+  assert.deepEqual(sessions.e.model, { providerID: "provider-a", id: "primary", variant: "reasoning" }, "the explicit variant remains sticky after being used")
+  assert.deepEqual(switches, ["b", "a"], "explicit session variants must not trigger a model switch")
+  await routing?.dispose()
+})
+
+test("adopting project options revalidates and persists project-scoped pins", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "qm-routing-pins-"))
+  const values = new Map<string, unknown>([["pins/v1/project-z", {
+    reviewer: { providerID: "provider-b", modelID: "backup", variant: "fast" },
+  }]])
+  const hooks: Record<string, Array<(input: any) => Promise<void>>> = {}
+  let routing: Awaited<ReturnType<typeof registerAgentRouting>>
+  try {
+    await writeFile(join(directory, "opencode.json"), JSON.stringify({
+      plugins: [{ package: "quartermaster", options: {
+        plans: { review: ["provider-a/primary"] }, agents: { reviewer: "review" },
+      } }],
+    }))
+    const baseConfig = parseConfig({
+      plans: { review: ["provider-a/primary", { id: "provider-b/backup", variant: "fast" }] },
+      agents: { reviewer: "review" },
+    })
+    routing = await registerAgentRouting({
+      location: { directory, project: { id: "project-z" } },
+      model: { list: async () => ({ data: [
+        { providerID: "provider-a", id: "primary", enabled: true },
+        { providerID: "provider-b", id: "backup", enabled: true },
+      ] }) },
+      storage: {
+        get: async (key: string) => values.get(key),
+        set: async (key: string, value: unknown) => { values.set(key, value) },
+        remove: async (key: string) => { values.delete(key) },
+        scan: async () => ({ entries: [] }),
+      },
+      rpc: () => ({ status: async () => { throw new Error("not configured") } }),
+      agent: { transform: async () => ({ dispose: async () => {} }), reload: async () => {} },
+      session: {
+        hook: async (name: string, callback: (input: any) => Promise<void>) => {
+          hooks[name] ??= []
+          hooks[name].push(callback)
+          return { dispose: async () => {} }
+        },
+        get: async () => ({ data: { agent: "reviewer", model: { providerID: "provider-a", id: "primary" } } }),
+        switchModel: async () => {},
+      },
+      event: { subscribe: () => (async function* () {})() },
+    } as never, baseConfig)
+
+    await hooks.prompt[0]({ sessionID: "session" })
+    assert.deepEqual(baseConfig.plans.review, [{ providerID: "provider-a", modelID: "primary" }])
+    assert.deepEqual(values.get("pins/v1/project-z"), {}, "removed project-plan pins are persisted as cleared")
+    assert.deepEqual(values.get("pins/v1"), undefined, "project-scoped pins do not write the legacy shared key")
+  } finally {
+    await routing?.dispose()
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test("retry fallback attempts each model once, rolls back failed switches, and reserves exclusive fallbacks", async () => {
+  const retryConfig = parseConfig({
+    plans: { review: ["provider-a/primary", "provider-b/backup"] },
+    agents: { reviewer: "review" },
+    exclusiveModels: ["provider-b/backup"],
+  })
+  const sessions = Object.fromEntries(["a", "b", "c"].map((sessionID) => [sessionID, {
+    agent: "reviewer", model: { providerID: "provider-a", id: "primary" },
+  }])) as Record<string, { agent: string; model: { providerID: string; id: string; variant?: string } }>
+  const hooks: Record<string, Array<(input: any) => Promise<void>>> = {}
+  const queued: Array<{ event: unknown; done: () => void }> = []
+  let waiting: ((item: { event: unknown; done: () => void } | undefined) => void) | undefined
+  let signal: AbortSignal | undefined
+  let failSession = "a"
+  const switches: string[] = []
+  const routing = await registerAgentRouting({
+    model: { list: async () => ({ data: ["provider-a/primary", "provider-b/backup", "provider-c/other"].map((model) => {
+      const [providerID, id] = model.split("/")
+      return { providerID, id, enabled: true }
+    }) }) },
+    storage: { get: async () => undefined, set: async () => {}, remove: async () => {}, scan: async () => ({ entries: [] }) },
+    rpc: () => ({ status: async () => { throw new Error("not configured") } }),
+    agent: { transform: async () => ({ dispose: async () => {} }), reload: async () => {} },
+    session: {
+      hook: async (name: string, callback: (input: any) => Promise<void>) => {
+        hooks[name] ??= []
+        hooks[name].push(callback)
+        return { dispose: async () => {} }
+      },
+      get: async ({ sessionID }: { sessionID: string }) => ({ data: sessions[sessionID] }),
+      switchModel: async ({ sessionID, model }: { sessionID: string; model: { providerID: string; id: string } }) => {
+        switches.push(sessionID)
+        if (failSession === sessionID) {
+          failSession = ""
+          throw new Error("injected switch failure")
+        }
+        sessions[sessionID].model = model
+      },
+    },
+    event: {
+      subscribe({ signal: nextSignal }: { signal: AbortSignal }) {
+        signal = nextSignal
+        return (async function* () {
+          while (!signal?.aborted) {
+            const item = queued.shift() ?? await new Promise<typeof queued[number] | undefined>((resolve) => {
+              waiting = resolve
+              signal?.addEventListener("abort", () => resolve(undefined), { once: true })
+            })
+            if (!item || signal?.aborted) return
+            yield item.event
+            item.done()
+          }
+        })()
+      },
+    },
+  } as never, retryConfig)
+  assert.equal(hooks.retry.length, 1, "routing registers one retry handler")
+  const request = async (sessionID: string) => {
+    for (const callback of hooks["model.request"]) {
+      await callback({ sessionID, kind: "primary", agent: "reviewer", model: { providerID: "provider-a", id: "primary" } })
+    }
+  }
+  const retry = (sessionID: string, decision = true) => {
+    const event = {
+      sessionID, agent: "reviewer", model: { providerID: "provider-a", id: "primary" },
+      decision: { retry: decision, delay: 100 }, error: { status: decision ? 429 : 499 },
+    }
+    return hooks.retry[0](event).then(() => event)
+  }
+  const push = (event: unknown) => new Promise<void>((done) => {
+    const item = { event, done }
+    if (waiting) waiting(item)
+    else queued.push(item)
+  })
+
+  await request("a")
+  const denied = await retry("a", false)
+  assert.deepEqual(denied.decision, { retry: false, delay: 100 }, "routing must preserve a host-denied retry")
+  assert.deepEqual(switches, [], "cancelled/non-retryable attempts must not route or reserve")
+  const failedSwitch = await retry("a")
+  assert.deepEqual(failedSwitch.decision, { retry: true, delay: 100 }, "switch failure must preserve the host retry decision and delay")
+  assert.deepEqual(sessions.a.model, { providerID: "provider-a", id: "primary" })
+  await routing?.pin("reviewer", { providerID: "provider-b", modelID: "backup" })
+  const pinnedAttempt = await retry("a")
+  assert.deepEqual(pinnedAttempt.decision, { retry: true, delay: 100 })
+  assert.deepEqual(switches, ["a"], "a pin cannot reselect a model already attempted in this execution")
+  await request("b")
+  await retry("b")
+  assert.deepEqual(sessions.b.model, { providerID: "provider-b", id: "backup" }, "failed switch must release its reservation")
+  await request("c")
+  await retry("c")
+  assert.deepEqual(sessions.c.model, { providerID: "provider-a", id: "primary" }, "another session cannot take a reserved exclusive fallback")
+  await push({ type: "session.execution.succeeded", data: { sessionID: "b" } })
+  await retry("c")
+  assert.deepEqual(sessions.c.model, { providerID: "provider-b", id: "backup" }, "finishing the owner releases the transferred lease")
+  retryConfig.plans.review.push({ providerID: "provider-c", modelID: "other" })
+  await request("a")
+  await retry("a")
+  assert.deepEqual(sessions.a.model, { providerID: "provider-c", id: "other" }, "an in-flight retry sees the updated plan after excluding attempted models")
   await routing?.dispose()
 })
