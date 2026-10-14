@@ -57,6 +57,75 @@ test("report viewer uses only the opt-in same-origin report endpoint", async () 
   assert.doesNotMatch(page, /fetch\((?!'\/api\/(?:report|options)')/)
 })
 
+test("assignment editor locks pending loads and saves, then restores Cancel on success or failure", async () => {
+  const page = await readPage("index.html")
+  const script = page.match(/<script>([\s\S]*?)<\/script>/)?.[1]
+  assert.ok(script)
+  assert.match(page, /<fieldset id="options-fields" aria-labelledby="options-heading"/)
+  const fields = page.match(/<fieldset[^>]*>([\s\S]*?)<\/fieldset>/)?.[1] ?? ""
+  for (const id of ["plans", "agents", "work-types", "load-options", "apply-options", "cancel-options"]) {
+    assert.ok(fields.includes(`id="${id}"`))
+  }
+  for (const action of ["load", "apply"]) for (const ok of [true, false]) {
+    const elements = new Map<string, { value: string; textContent: string; disabled: boolean; addEventListener: (type: string, callback: () => unknown) => void }>()
+    const handlers = new Map<string, () => unknown>()
+    const element = (selector: string) => {
+      if (!elements.has(selector)) elements.set(selector, {
+        value: "", textContent: "", disabled: false,
+        addEventListener: (_type, callback) => { handlers.set(selector, callback) },
+      })
+      return elements.get(selector)!
+    }
+    const click = (selector: string) => {
+      const handler = handlers.get(selector)
+      assert.ok(handler)
+      return handler()
+    }
+    const original = { plans: { review: ["fixture/old"] }, agents: {}, workTypes: {} }
+    let persisted = original
+    let requests = 0
+    let finish!: () => void
+    const context = createContext({
+      initial: JSON.stringify(original), document: { querySelector: element },
+      fetch: async (path: string, init?: { method?: string; body?: string }) => {
+        assert.equal(path, "/api/options")
+        requests++
+        const proposed = init?.body ? JSON.parse(init.body).options : original
+        return new Promise((resolve) => { finish = () => {
+          if (ok && init?.method === "POST") persisted = proposed
+          resolve({ ok, json: async () => ok ? { revision: 2, options: persisted } : { error: "Fixture failure" } })
+        } })
+      },
+    })
+    runInContext(script, context)
+    runInContext('saved=JSON.parse(initial);revision=1;show(saved);plansInput.value="review fixture/draft"', context)
+    click("#cancel-options")
+    assert.equal(requests, 0)
+    assert.equal(element("#plans").value, "review fixture/old")
+    element("#plans").value = "review fixture/new"
+    const pending = click(`#${action}-options`)
+    assert.equal(element("#options-fields").disabled, true)
+    const status = element("#options-status").textContent
+    click("#cancel-options")
+    await click("#load-options")
+    await click("#apply-options")
+    assert.equal(requests, 1)
+    assert.equal(element("#options-status").textContent, status)
+    assert.equal(element("#plans").value, "review fixture/new")
+    assert.equal(persisted, original)
+    finish()
+    await pending
+    assert.equal(element("#options-fields").disabled, false)
+    assert.match(element("#options-status").textContent, ok ? /^(Loaded|Applied)/ : /Fixture failure/)
+    assert.deepEqual(persisted.plans.review, [ok && action === "apply" ? "fixture/new" : "fixture/old"])
+    element("#plans").value = "review fixture/another-draft"
+    click("#cancel-options")
+    assert.equal(requests, 1)
+    assert.equal(element("#plans").value, ok ? `review ${persisted.plans.review[0]}` : action === "apply" ? "review fixture/old" : "review fixture/another-draft")
+    assert.match(element("#options-status").textContent, !ok && action === "load" ? /^Nothing to cancel/ : /^Cancelled/)
+  }
+})
+
 test("config page only downloads a syntax-checked JSON draft", async () => {
   const page = await readPage("config.html")
   assert.match(page, /JSON\.parse\(editor\.value\)/)

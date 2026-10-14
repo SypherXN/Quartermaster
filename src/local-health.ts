@@ -1,7 +1,10 @@
+import { request as httpsRequest } from "node:https"
+import { connect } from "node:net"
 import type { ModelRef } from "./config.ts"
 import { modelKey, type ModelEligibility } from "./select.ts"
 
 export type LocalHealthStatus = "online" | "offline"
+export let lastLoopbackDetail = ""
 
 const CACHE_MS = 5_000
 
@@ -64,17 +67,83 @@ export class LocalHealth {
 
   private async probe(endpoint: string): Promise<LocalHealthStatus> {
     try {
-      const response = await this.fetcher(endpoint, {
-        method: "GET",
-        credentials: "omit",
-        redirect: "error",
-        signal: AbortSignal.timeout(Math.min(this.timeoutMs, 2_147_483_647)),
-      })
-      return response.ok ? "online" : "offline"
-    } catch {
+      // The managed host's fetch and HTTP client do not complete loopback probes. A raw socket does.
+      const status = this.fetcher === fetch
+        ? await loopbackStatus(endpoint, this.timeoutMs)
+        : await injectedStatus(this.fetcher, endpoint, this.timeoutMs)
+      const online = status >= 200 && status < 300
+      lastLoopbackDetail = online ? "" : `HTTP ${status}`
+      return online ? "online" : "offline"
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "health probe failed"
+      lastLoopbackDetail = message.replace(/\s+/g, " ").slice(0, 160)
       return "offline"
     }
   }
+}
+
+async function injectedStatus(fetcher: typeof fetch, endpoint: string, timeoutMs: number): Promise<number> {
+  const response = await fetcher(endpoint, {
+    method: "GET",
+    credentials: "omit",
+    redirect: "error",
+    signal: AbortSignal.timeout(Math.min(timeoutMs, 2_147_483_647)),
+  })
+  return response.status
+}
+
+function loopbackStatus(endpoint: string, timeoutMs: number): Promise<number> {
+  const url = new URL(endpoint)
+  if (url.protocol === "https:") return httpsStatus(url, timeoutMs)
+  const port = Number(url.port || 80)
+  const timeout = Math.min(Math.max(timeoutMs, 1), 2_147_483_647)
+  return new Promise((resolve, reject) => {
+    const socket = connect({ host: url.hostname, port })
+    let raw = ""
+    let settled = false
+    const timer = setTimeout(() => finish(new Error(`local health timed out after ${raw.length} bytes`)), timeout)
+    const finish = (error?: Error, status?: number) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      socket.destroy()
+      if (error) reject(error)
+      else resolve(status ?? 0)
+    }
+    const take = (chunk: Buffer | string | null) => {
+      if (chunk == null) return
+      raw += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("latin1")
+      const status = raw.match(/HTTP\/1\.[01] (\d{3})/)?.[1]
+      if (status) finish(undefined, Number(status))
+    }
+    // Bun leaves this socket paused, so a flowing "data" listener never sees the reply.
+    socket.on("readable", () => {
+      let chunk: Buffer | string | null
+      while ((chunk = socket.read()) !== null) take(chunk)
+    })
+    socket.on("error", (error) => finish(error))
+    socket.on("connect", () => {
+      const path = `${url.pathname || "/"}${url.search}`
+      socket.write(`GET ${path} HTTP/1.0\r\nHost: ${url.host}\r\nAccept: */*\r\nConnection: close\r\n\r\n`)
+    })
+  })
+}
+
+function httpsStatus(url: URL, timeoutMs: number): Promise<number> {
+  const timeout = Math.min(Math.max(timeoutMs, 1), 2_147_483_647)
+  return new Promise((resolve, reject) => {
+    const req = httpsRequest(url, { method: "GET", headers: { accept: "*/*", connection: "close" } }, (res) => {
+      clearTimeout(timer)
+      res.resume()
+      resolve(res.statusCode ?? 0)
+    })
+    const timer = setTimeout(() => req.destroy(new Error("local health timed out")), timeout)
+    req.on("error", (error) => {
+      clearTimeout(timer)
+      reject(error)
+    })
+    req.end()
+  })
 }
 
 export function applyLocalHealth(

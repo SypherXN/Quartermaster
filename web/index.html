@@ -14,8 +14,9 @@
 <p id="status" role="status" aria-live="polite">No report loaded.</p></section>
 <main id="report" aria-live="polite"></main>
 <section id="editor">
-  <h2>Assignment editor</h2>
-  <p>Load the project options, edit plans and bindings, then apply. Apply uses the project writer. Cancel discards unsaved edits. The current session stays unchanged, and the next assignment reads the saved file.</p>
+  <h2 id="options-heading">Assignment editor</h2>
+  <p>Load the project options, edit plans and bindings, then apply. Apply submits a save through the project writer. The editor is disabled while loading or saving; Cancel only discards unsaved edits, not a submitted save. The current session stays unchanged, and the next assignment reads the saved file.</p>
+  <fieldset id="options-fields" aria-labelledby="options-heading" style="border:0;padding:0;margin:0;min-width:0">
   <label for="plans">Plans. One model per line: plan provider/model variant</label>
   <textarea id="plans" rows="4" spellcheck="false"></textarea>
   <label for="agents">Agent bindings. One per line: agent plan</label>
@@ -23,6 +24,7 @@
   <label for="work-types">Work types. One per line: workType plan</label>
   <textarea id="work-types" rows="3" spellcheck="false"></textarea>
   <p><button id="load-options" type="button">Load project options</button> <button id="apply-options" type="button">Apply project options</button> <button id="cancel-options" type="button">Cancel edits</button></p>
+  </fieldset>
   <p id="options-status" role="status" aria-live="polite">Project options are not loaded. The editor cannot apply until they load.</p>
 </section>
 <script>
@@ -41,6 +43,7 @@ async function loadReport(read){const mine=++loadID;output.replaceChildren();liv
 input.addEventListener('change',()=>{const file=input.files?.[0];if(file)void loadReport(async()=>JSON.parse(await file.text()))})
 live.addEventListener('click',()=>void loadReport(async()=>{const response=await fetch('/api/report',{cache:'no-store',credentials:'same-origin'});if(!response.ok)throw Error('Gateway unavailable');return response.json()}))
 const plansInput=document.querySelector('#plans'), agentsInput=document.querySelector('#agents'), workTypesInput=document.querySelector('#work-types'), optionsStatus=document.querySelector('#options-status')
+const optionsFields=document.querySelector('#options-fields')
 let revision, saved
 const lines=value=>value.split('\n').map(line=>line.trim()).filter(Boolean)
 const modelText=model=>typeof model==='string'?model:`${model.id}${model.variant?` ${model.variant}`:''}`
@@ -56,15 +59,21 @@ function editedOptions(){
   return {...saved,...{plans,agents:pair(agentsInput.value,'agent'),workTypes:pair(workTypesInput.value,'work type')}}
 }
 document.querySelector('#load-options').addEventListener('click',async()=>{
+  if(optionsFields.disabled)return
+  optionsFields.disabled=true
   optionsStatus.textContent='Loading project options…'
   try{const response=await fetch('/api/options',{cache:'no-store',credentials:'same-origin'});const body=await response.json();if(!response.ok)throw Error(body.error||'unavailable');revision=body.revision;saved=body.options;show(saved);optionsStatus.textContent='Loaded project options. Review them, then apply.'}
   catch(error){revision=undefined;saved=undefined;optionsStatus.textContent=error.message||'Could not load project options.'}
+  finally{optionsFields.disabled=false}
 })
-document.querySelector('#cancel-options').addEventListener('click',()=>{if(!saved){optionsStatus.textContent='Nothing to cancel.';return}show(saved);optionsStatus.textContent='Cancelled. Unsaved edits were discarded.'})
+document.querySelector('#cancel-options').addEventListener('click',()=>{if(optionsFields.disabled)return;if(!saved){optionsStatus.textContent='Nothing to cancel.';return}show(saved);optionsStatus.textContent='Cancelled. Unsaved edits were discarded.'})
 document.querySelector('#apply-options').addEventListener('click',async()=>{
+  if(optionsFields.disabled)return
+  optionsFields.disabled=true
   optionsStatus.textContent='Applying project options…'
   try{if(typeof revision!=='number'||!saved)throw Error('Load project options before applying');const options=editedOptions();const response=await fetch('/api/options',{method:'POST',cache:'no-store',credentials:'same-origin',headers:{'content-type':'application/json'},body:JSON.stringify({options,revision})});const body=await response.json();if(!response.ok)throw Error(body.error||'apply failed');revision=body.revision;saved=body.options;show(saved);optionsStatus.textContent='Applied. The current session is unchanged. The next assignment uses these options.'}
   catch(error){optionsStatus.textContent=error.message||'Could not apply project options.'}
+  finally{optionsFields.disabled=false}
 })
 </script>
 </html>

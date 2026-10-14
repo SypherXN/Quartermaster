@@ -5,6 +5,18 @@ import { bindExclusive, EXCLUSIVE_TTL_MS, ExclusiveLeases } from "../src/exclusi
 const model = { providerID: "ninfer", modelID: "qwen" }
 const hang = () => ({ promise: new Promise<void>(() => {}), cancel() {} })
 
+test("diagnostic lease checks neither release holds nor prune expired entries", () => {
+  let now = 0
+  const leases = new ExclusiveLeases(() => now)
+  leases.reserve(model, "a", "reviewer")
+  assert.equal(leases.peekBlocks("a", model), false)
+  assert.equal(leases.peekBlocks("b", model), true)
+  now = EXCLUSIVE_TTL_MS
+  assert.equal(leases.peekBlocks("b", model), false)
+  now = 0
+  assert.equal(leases.peekBlocks("b", model), true, "inspection did not delete the stored hold")
+})
+
 test("one session holds an exclusive model until its nested steps end", async () => {
   const leases = new ExclusiveLeases(() => 0, hang)
   assert.equal(await leases.acquire(model, "a", "reviewer"), true)

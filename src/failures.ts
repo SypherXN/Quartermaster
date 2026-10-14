@@ -24,6 +24,42 @@ export type SuccessReport =
   | { providerID: string; scope: "provider" }
   | { providerID: string; scope: "model"; modelID: string }
 
+export interface RetryFailureDecision {
+  fallback: boolean
+  report?: FailureReport
+}
+
+export function classifyRetryFailure(
+  error: { type?: unknown; status?: unknown },
+  providerID: string,
+  modelID: string,
+): RetryFailureDecision {
+  const type = typeof error.type === "string" ? error.type : ""
+  const status = typeof error.status === "number" ? error.status : undefined
+
+  if (type === "provider.quota" || status === 402) {
+    return { fallback: false, report: { providerID, modelID, classification: "quota-exhausted" } }
+  }
+  if (type === "provider.auth" || type === "permission.rejected" || status === 401 || status === 403) {
+    return { fallback: false, report: { providerID, modelID, classification: "auth" } }
+  }
+  if (type === "provider.rate-limit" || status === 429) {
+    return { fallback: true, report: { providerID, modelID, classification: "temporary-rate-limit" } }
+  }
+  if (type === "provider.invalid-request" || type === "provider.no-route") {
+    return status === 404 || status === 410 || type === "provider.no-route"
+      ? { fallback: false, report: { providerID, modelID, classification: "model-outage" } }
+      : { fallback: false }
+  }
+  if (type === "provider.invalid-output" || type === "provider.content-filter" || type === "provider.unsupported-operation" || type === "provider.unknown" || type === "unknown" || type === "provider.timeout") {
+    return { fallback: false }
+  }
+  if (type === "provider.internal" || type === "provider.transport" || status === 408 || status === 409 || (status !== undefined && status >= 500)) {
+    return { fallback: true, report: { providerID, classification: "provider-outage" } }
+  }
+  return { fallback: false }
+}
+
 type Scope = { providerID: string; modelID?: string }
 export interface PersistedCooldown extends Scope {
   until: number
@@ -38,9 +74,13 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 export class FailureCooldowns {
   private readonly until = new Map<string, number>()
-  private readonly durationMs: number
+  private durationMs: number
 
   constructor(durationMs: number) {
+    this.durationMs = durationMs
+  }
+
+  setDuration(durationMs: number): void {
     this.durationMs = durationMs
   }
 

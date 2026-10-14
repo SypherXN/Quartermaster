@@ -6,6 +6,7 @@ import test from "node:test"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import { parseConfig } from "../src/config.ts"
 import { QUARTERMASTER_RPC, registerQuartermasterRpc, requestReport, requestSelection } from "../src/rpc.ts"
+import { fixtureConfiguration } from "./configuration-fixture.ts"
 
 const config = parseConfig({ plans: { p: ["provider-a/primary"] }, agents: { reviewer: "p" }, workTypes: { review: "p" }, usageSources: { "provider-a": "codex" } })
 const model = { providerID: "provider-a", modelID: "primary", variant: "thinking" }
@@ -29,10 +30,26 @@ function context(routing?: unknown, reporting?: unknown, optionsDirectory?: stri
   return {
     ctx,
     disposed: () => disposed,
-    register: () => registerQuartermasterRpc(ctx as unknown as Pick<Context, "rpc" | "model">, config, routing as never, undefined, reporting as never, optionsDirectory),
+    register: () => registerQuartermasterRpc(ctx as unknown as Pick<Context, "rpc" | "model">, config, routing as never, undefined, reporting as never, optionsDirectory, fixtureConfiguration),
     client: () => ctx.rpc(QUARTERMASTER_RPC) as Record<string, (input: unknown, options?: { signal?: AbortSignal }) => Promise<Record<string, unknown>>>,
   }
 }
+
+test("session diagnostics RPC validates input and returns the snapshot without selecting or queueing", async () => {
+  const requested: string[] = []
+  const routing = { diagnoseSession: async (sessionID: string) => { requested.push(sessionID); return { apiVersion: 1, session: { id: sessionID } } } }
+  const fixture = context(routing)
+  await fixture.register()
+  const client = fixture.client()
+  assert.deepEqual(await client.diagnoseSession({ sessionID: "session-a" }), { apiVersion: 1, session: { id: "session-a" } })
+  for (const input of [{}, { sessionID: " " }, { sessionID: "a".repeat(257) }, { sessionID: "session-a", projectID: "other" }]) {
+    await assert.rejects(client.diagnoseSession(input), (error: Error & { code?: string }) => error.code === "invalid_input")
+  }
+  assert.deepEqual(requested, ["session-a"])
+  const missing = context()
+  await missing.register()
+  await assert.rejects(missing.client().diagnoseSession({ sessionID: "session-a" }), (error: Error & { code?: string }) => error.code === "unavailable")
+})
 
 test("plugin integration docs describe the project-options RPC contract", async () => {
   const docs = await readFile(new URL("../docs/PLUGIN_INTEGRATION.md", import.meta.url), "utf8")
@@ -66,13 +83,17 @@ test("project-options RPC uses its bound directory and never returns a path", as
     await testContext.register()
     const client = testContext.client()
     const current = await client.readOptions({})
-    assert.deepEqual(current, { apiVersion: 1, status: "ok", options: JSON.parse(text).plugins[0].options, revision: (await stat(path)).mtimeMs })
+    assert.deepEqual(current.options, JSON.parse(text).plugins[0].options)
+    assert.equal(current.status, "ok")
+    assert.equal(Number.isSafeInteger(current.revision), true)
     assert.equal("path" in current, false)
     assert.equal("directory" in current, false)
 
     const nextOptions = { plans: { review: ["provider-a/new"] } }
     const saved = await client.applyOptions({ options: nextOptions, revision: current.revision })
-    assert.deepEqual(saved, { apiVersion: 1, status: "saved", options: nextOptions, revision: (await stat(path)).mtimeMs })
+    assert.deepEqual(saved.options, nextOptions)
+    assert.equal(saved.status, "saved")
+    assert.notEqual(saved.revision, current.revision)
     assert.deepEqual(JSON.parse((await readFile(path, "utf8")).replace(/\/\/[^\n]*/g, "" )).plugins[0].options, nextOptions)
     assert.equal(await readFile(otherPath, "utf8"), originalOther)
     assert.equal("path" in current, false)

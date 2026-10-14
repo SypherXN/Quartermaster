@@ -1,0 +1,6 @@
+{
+  "name": "qm-managed-routing-proof",
+  "private": true,
+  "type": "module",
+  "main": "./index.ts"
+}

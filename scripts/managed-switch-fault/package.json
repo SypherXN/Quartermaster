@@ -1,0 +1,6 @@
+{
+  "name": "qm-managed-switch-fault",
+  "private": true,
+  "type": "module",
+  "main": "./index.ts"
+}

@@ -1,8 +1,11 @@
 {
-  "name": "quartermaster",
+  "name": "opencode-quartermaster",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
+  "main": "./index.js",
+  "types": "./dist/index.d.ts",
   "description": "OpenCode V2 agent model allocation plugin",
   "repository": {
     "type": "git",
@@ -12,17 +15,21 @@
     "node": ">=23.6.0"
   },
   "exports": {
-    ".": "./src/index.ts",
-    "./rpc": "./src/rpc.ts"
+    ".": { "types": "./dist/index.d.ts", "default": "./index.js" },
+    "./rpc": { "types": "./dist/rpc.d.ts", "default": "./dist/rpc.js" }
   },
+  "files": ["index.js", "dist", "docs", "README.md", "LICENSE"],
   "scripts": {
-    "build": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
+    "verify-package": "node scripts/verify-package.mjs",
     "local-ui": "node src/local-ui.mjs",
     "test": "node --test test/*.test.ts test/*.test.mjs test/integration/*.test.ts test/telemetry/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@opencode/plugin": "latest"
+    "@opencode/client": "2.0.23",
+    "@opencode/plugin": "2.0.23"
   },
   "devDependencies": {
     "@types/node": "^24",

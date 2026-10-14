@@ -9,6 +9,8 @@ import { parseConfig } from "../src/config.ts"
 import { modelKey, type ModelEligibility } from "../src/select.ts"
 import { TokenBudgetGate } from "../src/telemetry/budget-gate.ts"
 import type { TokenTelemetryRecord } from "../src/telemetry/types.ts"
+import { normalizeUsageSnapshot } from "../src/usage.ts"
+import { fixtureConfiguration } from "./configuration-fixture.ts"
 
 const config = parseConfig({
   plans: { review: ["provider-a/primary", { id: "provider-b/backup", variant: "fast" }] },
@@ -163,7 +165,8 @@ test("routing preloads registry before transform and reloads at the next assignm
   assert.deepEqual(agents.reviewer.model, { providerID: "provider-b", id: "backup", variant: "fast" })
   await routing?.pin("reviewer", primary)
   assert.deepEqual(agents.reviewer.model, { providerID: "provider-b", id: "backup", variant: "fast" })
-  assert.deepEqual((await routing?.explain("reviewer"))?.skipped.map(({ code }) => code), ["limited"])
+  assert.equal((await routing?.explain("reviewer"))?.selected?.modelID, "primary")
+  assert.equal((await routing?.explain("reviewer"))?.reason, "Selected because this model is pinned for the agent.")
 
   await routing?.refresh(availability("available"))
   assert.deepEqual(agents.reviewer.model, { providerID: "provider-a", id: "primary" })
@@ -171,11 +174,185 @@ test("routing preloads registry before transform and reloads at the next assignm
   assert.equal(await routing?.unpin("reviewer"), true)
   assert.equal((await routing?.explain("reviewer"))?.reason, "Selected as the highest-priority eligible candidate.")
   assert.deepEqual(calls, [
-    "models", "transform", "reload", "reload", "reload", "models", "reload", "reload", "models", "reload", "reload",
+    "models", "transform", "reload", "reload", "reload", "models", "reload", "reload", "models", "reload",
+    "models", "models", "models", "reload", "models",
   ])
 
   await routing?.dispose()
   assert.equal(calls.at(-1), "dispose")
+})
+
+test("routing picks up models registered after plugin setup", async () => {
+  const lateConfig = parseConfig({
+    plans: { local: ["ninfer/qwen", "opencode/fallback"] },
+    agents: { "qm-test": "local" },
+  })
+  let models: Array<{ providerID: string; id: string; enabled: boolean }> = []
+  let transform: ((editor: AgentEditor) => void) | undefined
+  const { editor, agents } = editorWith({ "qm-test": { id: "qm-test" } })
+  const routing = await registerAgentRouting({
+    model: { list: async () => ({ data: models }) },
+    storage: { get: async () => undefined, set: async () => {}, remove: async () => {}, scan: async () => ({ entries: [] }) },
+    rpc: () => ({ status: async () => { throw new Error("not configured") } }),
+    agent: {
+      transform: async (callback: (editor: AgentEditor) => void) => {
+        transform = callback
+        return { dispose: async () => {} }
+      },
+      reload: async () => transform?.(editor as AgentEditor),
+    },
+  } as never, lateConfig)
+
+  models = [
+    { providerID: "ninfer", id: "qwen", enabled: true },
+    { providerID: "opencode", id: "fallback", enabled: true },
+  ]
+  const explanation = await routing?.explain("qm-test")
+
+  assert.equal(explanation?.selected?.providerID, "ninfer")
+  assert.equal(explanation?.selected?.modelID, "qwen")
+  assert.deepEqual(agents["qm-test"].model, { providerID: "ninfer", id: "qwen" })
+  await routing?.dispose()
+})
+
+test("automatic request guard rejects stale models but preserves manual, unbound and auxiliary requests", async () => {
+  const hooks: Record<string, Array<(input: any) => Promise<void>>> = {}
+  const commands: Record<string, { execute(input: { sessionID: string }): Promise<void> }> = {}
+  const stored = new Map<string, unknown>()
+  const session = { agent: "reviewer", model: { providerID: "provider-a", id: "primary" } }
+  let unreadable = false
+  const routing = await registerAgentRouting({
+    model: { list: async () => ({ data: registry.map((m) => ({ providerID: m.providerID, id: m.modelID, enabled: true })) }) },
+    storage: {
+      get: async (key: string) => { if (unreadable && key.startsWith("routing/")) throw Error("unreadable ownership"); return stored.get(key) },
+      set: async (key: string, value: unknown) => { stored.set(key, value) },
+      remove: async (key: string) => { stored.delete(key) }, scan: async () => ({ entries: [] }),
+    },
+    rpc: () => ({ status: async () => { throw Error("unconfigured") } }),
+    agent: { transform: async () => ({ dispose: async () => {} }), reload: async () => {} },
+    session: {
+      hook: async (name: string, callback: (input: any) => Promise<void>) => {
+        (hooks[name] ??= []).push(callback); return { dispose: async () => {} }
+      },
+      get: async () => ({ data: session }),
+      switchModel: async ({ model }: { model: typeof session.model }) => { session.model = model },
+    },
+    command: { transform: async (callback: any) => {
+      callback({ add: (command: any) => { commands[command.name] = command } }); return { dispose: async () => {} }
+    } },
+  } as never, config)
+  const request = async (kind = "primary", agent = "reviewer", model = session.model) => {
+    for (const hook of hooks["model.request"]) await hook({ sessionID: "guard", kind, agent, model })
+  }
+  try {
+    await hooks.prompt[0]({ sessionID: "guard" })
+    await routing?.reportFailure({ providerID: "provider-a", classification: "provider-outage" })
+    await assert.rejects(request(), /blocked a stale or ineligible model/)
+    assert.equal((await routing?.diagnoseSession("guard"))?.primaryRequestEvidence.lastObserved, "unknown")
+    assert.deepEqual(session.model, { providerID: "provider-a", id: "primary" }, "guard must not change a captured model")
+    await commands["qm-manual"].execute({ sessionID: "guard" })
+    await request()
+    await request("primary", "builder", { providerID: "host", id: "manual" })
+    await commands["qm-auto"].execute({ sessionID: "guard" })
+    unreadable = true
+    await request("compaction")
+    await assert.rejects(request(), /unreadable ownership/)
+    unreadable = false
+    await routing?.reportSuccess({ providerID: "provider-a", scope: "provider" })
+    await request()
+    await assert.rejects(request("primary", "reviewer", { providerID: "host", id: "outside" }), /blocked a stale or ineligible model/)
+  } finally { await routing?.dispose() }
+})
+
+test("managed prompt refreshes quota with an unchanged registry", async () => {
+  const promptConfig = parseConfig({
+    plans: { local: ["provider-a/primary", "provider-b/backup"] },
+    agents: { "qm-test": "local" },
+    usageSources: { "provider-a": "codex" },
+  })
+  const snapshot = (state: "available" | "limited") => {
+    const checkedAt = new Date().toISOString()
+    const source = {
+      authenticated: true,
+      checkedAt,
+      stale: false,
+      error: null,
+      windows: [{
+        name: "weekly",
+        usedPercent: state === "limited" ? 100 : 40,
+        state: state === "limited" ? "rate-limited" : "ok",
+        resetsAt: state === "limited" ? new Date(Date.now() + 60_000).toISOString() : null,
+        ...(state === "limited" ? { resetEstimated: true } : {}),
+      }],
+      nextAvailableAt: state === "limited" ? new Date(Date.now() + 60_000).toISOString() : null,
+      availability: state,
+    }
+    return {
+      schemaVersion: 1,
+      updatedAt: checkedAt,
+      sources: { go: source, codex: source, cursor: source },
+      models: { go: {} },
+    }
+  }
+  const initialUsage = normalizeUsageSnapshot(snapshot("limited"))
+  assert.equal(initialUsage.status, "ok")
+  if (initialUsage.status !== "ok") return
+
+  let nextUsage = snapshot("available")
+  const usageCalls: unknown[] = []
+  let modelLists = 0
+  let promptHook: ((input: { sessionID: string }) => Promise<void>) | undefined
+  const session: { agent: string; model: { providerID: string; id: string } } = {
+    agent: "qm-test",
+    model: { providerID: "provider-b", id: "backup" },
+  }
+  const { editor, agents } = editorWith({ "qm-test": { id: "qm-test" } })
+  let transform: ((editor: AgentEditor) => void) | undefined
+  const routing = await registerAgentRouting({
+    model: { list: async () => {
+      modelLists += 1
+      return { data: [
+        { providerID: "provider-a", id: "primary", enabled: true },
+        { providerID: "provider-b", id: "backup", enabled: true },
+      ] }
+    } },
+    storage: { get: async () => undefined, set: async () => {}, remove: async () => {}, scan: async () => ({ entries: [] }) },
+    rpc: () => ({ status: async (input: unknown) => { usageCalls.push(input); return nextUsage } }),
+    agent: {
+      transform: async (callback: (editor: AgentEditor) => void) => {
+        transform = callback
+        return { dispose: async () => {} }
+      },
+      reload: async () => transform?.(editor as AgentEditor),
+    },
+    session: {
+      hook: async (name: string, callback: (input: { sessionID: string }) => Promise<void>) => {
+        if (name === "prompt") promptHook = callback
+        return { dispose: async () => {} }
+      },
+      get: async () => ({ data: session }),
+      switchModel: async ({ model }: { model: { providerID: string; id: string } }) => { session.model = model },
+    },
+  } as never, promptConfig, initialUsage)
+
+  assert.deepEqual(agents["qm-test"].model, { providerID: "provider-b", id: "backup" })
+  const before = modelLists
+  nextUsage = snapshot("available")
+  const [explanation, selection] = await Promise.all([
+    routing?.explain("qm-test"),
+    routing?.select("qm-test"),
+  ])
+  assert.equal(explanation?.selected?.modelID, "primary")
+  assert.equal(selection && "selected" in selection ? selection.selected?.modelID : undefined, "primary")
+  assert.equal(modelLists, before + 1, "concurrent decisions share one availability refresh")
+  assert.deepEqual(usageCalls, [{}], "usage status is read without forcing provider polling")
+
+  await promptHook?.({ sessionID: "session" })
+
+  assert.deepEqual(session.model, { providerID: "provider-a", id: "primary" })
+  assert.equal(modelLists, before + 2, "registry stayed unchanged while eligibility refreshed")
+  assert.deepEqual(usageCalls, [{}, {}], "prompt admission also reads cached usage without forced polling")
+  await routing?.dispose()
 })
 
 test("a held exclusive model is skipped per session and does not reload the agent catalog", async () => {
@@ -313,6 +490,8 @@ test("each new prompt chooses for that session and chooses again after the turn"
     e: { agent: "reviewer", model: { providerID: "provider-a", id: "primary" } },
   }
   const switches: string[] = []
+  const commands: Record<string, { execute(input: { sessionID: string }): Promise<void> }> = {}
+  const stored = new Map<string, unknown>()
   const hooks: Record<string, Array<(input: {
     sessionID: string
     kind?: string
@@ -326,7 +505,10 @@ test("each new prompt chooses for that session and chooses again after the turn"
   let signal: AbortSignal | undefined
   const routing = await registerAgentRouting({
     model: { list: async () => ({ data: registry.map((model) => ({ providerID: model.providerID, id: model.modelID, enabled: true })) }) },
-    storage: { get: async () => undefined, set: async () => {}, remove: async () => {}, scan: async () => ({ entries: [] }) },
+    storage: {
+      get: async (key: string) => stored.get(key), set: async (key: string, value: unknown) => { stored.set(key, value) },
+      remove: async (key: string) => { stored.delete(key) }, scan: async () => ({ entries: [] }),
+    },
     rpc: () => ({ status: async () => { throw new Error("not configured") } }),
     agent: {
       transform: async () => ({ dispose: async () => {} }),
@@ -342,6 +524,12 @@ test("each new prompt chooses for that session and chooses again after the turn"
       switchModel: async (input: { sessionID: string; model: { providerID: string; id: string; variant?: string } }) => {
         switches.push(input.sessionID)
         sessions[input.sessionID].model = input.model
+      },
+    },
+    command: {
+      transform: async (callback: (editor: { add(command: { name: string; execute(input: { sessionID: string }): Promise<void> }): void }) => void) => {
+        callback({ add: (command) => { commands[command.name] = command } })
+        return { dispose: async () => {} }
       },
     },
     event: {
@@ -380,6 +568,7 @@ test("each new prompt chooses for that session and chooses again after the turn"
   assert.equal((await routing?.explain("reviewer", "b"))?.selected?.modelID, "backup")
   await prompt("b")
   assert.deepEqual(sessions.b.model, { providerID: "provider-b", id: "backup", variant: "fast" })
+  await commands["qm-manual"].execute({ sessionID: "c" })
   await prompt("c")
   assert.equal(sessions.c.model.id, "picked")
   assert.deepEqual(switches, ["b"])
@@ -439,6 +628,7 @@ test("each new prompt chooses for that session and chooses again after the turn"
   }
   await requestE({ providerID: "provider-a", id: "primary" })
   await push({ type: "session.execution.succeeded", data: { sessionID: "e" } })
+  await commands["qm-manual"].execute({ sessionID: "e" })
   sessions.e.model = { providerID: "provider-a", id: "primary", variant: "reasoning" }
   await prompt("e")
   assert.deepEqual(sessions.e.model, { providerID: "provider-a", id: "primary", variant: "reasoning" }, "an explicit in-plan variant survives its first assignment boundary")
@@ -446,7 +636,22 @@ test("each new prompt chooses for that session and chooses again after the turn"
   await push({ type: "session.execution.succeeded", data: { sessionID: "e" } })
   await prompt("e")
   assert.deepEqual(sessions.e.model, { providerID: "provider-a", id: "primary", variant: "reasoning" }, "the explicit variant remains sticky after being used")
-  assert.deepEqual(switches, ["b", "a"], "explicit session variants must not trigger a model switch")
+  assert.deepEqual(switches, ["b", "a"], "manual opt-out must not trigger a model switch")
+  await hooks.retry[0]({
+    sessionID: "e", agent: "reviewer", model: sessions.e.model,
+    decision: { retry: true, delay: 500 }, error: { status: 429 },
+  })
+  assert.deepEqual(sessions.e.model, { providerID: "provider-a", id: "primary", variant: "reasoning" }, "manual in-plan choices must not route retries")
+  await commands["qm-auto"].execute({ sessionID: "e" })
+  await prompt("e")
+  assert.deepEqual(sessions.e.model, { providerID: "provider-a", id: "primary" }, "resuming automatic routing removes the manual variant")
+  await requestE(sessions.e.model)
+  const beforeBusyPrompt = [...switches]
+  await prompt("e")
+  assert.deepEqual(switches, beforeBusyPrompt, "a prompt admitted while primary execution is active must not switch its model")
+  await push({ type: "session.execution.interrupted", data: { sessionID: "e" } })
+  await prompt("a")
+  assert.deepEqual(sessions.a.model, { providerID: "provider-a", id: "primary" }, "cancelling the owner releases its exclusive slot for another idle session")
   await routing?.dispose()
 })
 
@@ -491,7 +696,7 @@ test("adopting project options revalidates and persists project-scoped pins", as
         switchModel: async () => {},
       },
       event: { subscribe: () => (async function* () {})() },
-    } as never, baseConfig)
+    } as never, baseConfig, undefined, undefined, fixtureConfiguration)
 
     await hooks.prompt[0]({ sessionID: "session" })
     assert.deepEqual(baseConfig.plans.review, [{ providerID: "provider-a", modelID: "primary" }])
@@ -501,6 +706,63 @@ test("adopting project options revalidates and persists project-scoped pins", as
     await routing?.dispose()
     await rm(directory, { recursive: true, force: true })
   }
+})
+
+test("structured unsafe failures never switch models even when the host retry hook permits retry", async () => {
+  const retryConfig = parseConfig({
+    plans: { review: ["provider-a/primary", "provider-b/backup"] },
+    agents: { reviewer: "review" },
+  })
+  const hooks: Record<string, Array<(input: any) => Promise<void>>> = {}
+  const session = { agent: "reviewer", model: { providerID: "provider-a", id: "primary" } }
+  const switches: unknown[] = []
+  const routing = await registerAgentRouting({
+    model: { list: async () => ({ data: [
+      { providerID: "provider-a", id: "primary", enabled: true },
+      { providerID: "provider-b", id: "backup", enabled: true },
+    ] }) },
+    storage: { get: async () => undefined, set: async () => {}, remove: async () => {}, scan: async () => ({ entries: [] }) },
+    rpc: () => ({ status: async () => { throw new Error("not configured") } }),
+    agent: { transform: async () => ({ dispose: async () => {} }), reload: async () => {} },
+    session: {
+      hook: async (name: string, callback: (input: any) => Promise<void>) => {
+        hooks[name] ??= []
+        hooks[name].push(callback)
+        return { dispose: async () => {} }
+      },
+      get: async () => ({ data: session }),
+      switchModel: async (input: unknown) => { switches.push(input) },
+    },
+  } as never, retryConfig)
+
+  const unsafe = [
+    { type: "cancelled" },
+    { type: "permission.rejected" },
+    { type: "provider.quota", status: 402 },
+    { type: "provider.auth", status: 401 },
+    { type: "provider.invalid-request", status: 404 },
+    { type: "provider.invalid-request", status: 413 },
+    { type: "provider.no-route" },
+    { type: "provider.content-filter" },
+    { type: "provider.unsupported-operation" },
+    { type: "provider.invalid-output" },
+    { type: "provider.timeout" },
+    { type: "provider.unknown" },
+  ]
+  for (const error of unsafe) {
+    // Independent failures: a prior model-outage must not block the next test dispatch.
+    await routing?.reportSuccess({ providerID: "provider-a", modelID: "primary", scope: "model" })
+    await hooks["model.request"][0]({ sessionID: "s", kind: "primary", agent: "reviewer", model: session.model })
+    const event = {
+      sessionID: "s", agent: "reviewer", model: session.model,
+      decision: { retry: true, delay: 250 }, error,
+    }
+    await hooks.retry[0](event)
+    assert.deepEqual(event.decision, { retry: true, delay: 250 })
+    assert.deepEqual(session.model, { providerID: "provider-a", id: "primary" })
+  }
+  assert.deepEqual(switches, [])
+  await routing?.dispose()
 })
 
 test("retry fallback attempts each model once, rolls back failed switches, and reserves exclusive fallbacks", async () => {
@@ -561,14 +823,17 @@ test("retry fallback attempts each model once, rolls back failed switches, and r
   } as never, retryConfig)
   assert.equal(hooks.retry.length, 1, "routing registers one retry handler")
   const request = async (sessionID: string) => {
+    // These retry scenarios start with a reachable primary, not a stale queued dispatch.
+    await routing?.reportSuccess({ providerID: "provider-a", scope: "provider" })
+    await routing?.reportSuccess({ providerID: "provider-a", modelID: "primary", scope: "model" })
     for (const callback of hooks["model.request"]) {
       await callback({ sessionID, kind: "primary", agent: "reviewer", model: { providerID: "provider-a", id: "primary" } })
     }
   }
-  const retry = (sessionID: string, decision = true) => {
+  const retry = (sessionID: string, decision = true, error: { type?: string; status?: number } = { status: decision ? 429 : 499 }) => {
     const event = {
       sessionID, agent: "reviewer", model: { providerID: "provider-a", id: "primary" },
-      decision: { retry: decision, delay: 100 }, error: { status: decision ? 429 : 499 },
+      decision: { retry: decision, delay: 100 }, error,
     }
     return hooks.retry[0](event).then(() => event)
   }
@@ -579,9 +844,9 @@ test("retry fallback attempts each model once, rolls back failed switches, and r
   })
 
   await request("a")
-  const denied = await retry("a", false)
-  assert.deepEqual(denied.decision, { retry: false, delay: 100 }, "routing must preserve a host-denied retry")
-  assert.deepEqual(switches, [], "cancelled/non-retryable attempts must not route or reserve")
+  const denied = await retry("a", false, { type: "provider.internal", status: 503 })
+  assert.deepEqual(denied.decision, { retry: false, delay: 100 }, "routing preserves the retry veto observed at its hook")
+  assert.deepEqual(switches, [], "a later hook observing a veto must not route or reserve")
   const failedSwitch = await retry("a")
   assert.deepEqual(failedSwitch.decision, { retry: true, delay: 100 }, "switch failure must preserve the host retry decision and delay")
   assert.deepEqual(sessions.a.model, { providerID: "provider-a", id: "primary" })
@@ -603,4 +868,222 @@ test("retry fallback attempts each model once, rolls back failed switches, and r
   await retry("a")
   assert.deepEqual(sessions.a.model, { providerID: "provider-c", id: "other" }, "an in-flight retry sees the updated plan after excluding attempted models")
   await routing?.dispose()
+})
+
+test("bound agents route automatically by default and support manual release", async () => {
+  const hooks: Record<string, ((input: { sessionID: string }) => Promise<void>)[]> = {}
+  const commands: Record<string, { execute(input: { sessionID: string }): Promise<void> }> = {}
+  const stored = new Map<string, unknown>()
+  const events: Array<{ event: unknown; done: () => void }> = []
+  let waiting: ((item: typeof events[number] | undefined) => void) | undefined
+  const session: { agent: string; model: { providerID: string; id: string; variant?: string } } = {
+    agent: "reviewer",
+    model: { providerID: "composer", id: "default" },
+  }
+  const { editor } = editorWith({ reviewer: { id: "reviewer" } })
+  const routing = await registerAgentRouting({
+    model: { list: async () => ({ data: [
+      { providerID: "provider-a", id: "primary", enabled: true },
+      { providerID: "provider-b", id: "backup", enabled: true },
+    ] }) },
+    storage: {
+      get: async (key: string) => stored.get(key),
+      set: async (key: string, value: unknown) => { stored.set(key, value) },
+      remove: async (key: string) => { stored.delete(key) },
+      scan: async () => ({ entries: [] }),
+    },
+    rpc: () => ({ status: async () => { throw new Error("not configured") } }),
+    agent: { transform: async () => ({ dispose: async () => {} }), reload: async () => {} },
+    session: {
+      hook: async (name: string, callback: (input: { sessionID: string }) => Promise<void>) => {
+        hooks[name] ??= []
+        hooks[name].push(callback)
+        return { dispose: async () => {} }
+      },
+      get: async () => ({ data: session }),
+      switchModel: async ({ model }: { model: { providerID: string; id: string; variant?: string } }) => { session.model = model },
+    },
+    command: {
+      transform: async (callback: (editor: { add(command: { name: string; execute(input: { sessionID: string }): Promise<void> }): void }) => void) => {
+        callback({ add: (command) => { commands[command.name] = command } })
+        return { dispose: async () => {} }
+      },
+    },
+    event: {
+      subscribe({ signal }: { signal: AbortSignal }) {
+        return (async function* () {
+          while (!signal.aborted) {
+            const item = events.shift() ?? await new Promise<typeof events[number] | undefined>((resolve) => {
+              waiting = resolve
+              signal.addEventListener("abort", () => resolve(undefined), { once: true })
+            })
+            if (!item || signal.aborted) return
+            yield item.event
+            item.done()
+          }
+        })()
+      },
+    },
+    location: { directory: "project-a" },
+  } as never, config)
+
+  await hooks.prompt[0]({ sessionID: "session" })
+  assert.deepEqual(session.model, { providerID: "provider-a", id: "primary" }, "bound agent switches before prompt hook completes by default")
+  for (const callback of hooks["model.request"]) {
+    await callback({ sessionID: "session", kind: "primary", agent: "reviewer", model: session.model } as never)
+  }
+  await new Promise<void>((done) => {
+    const item = { event: { type: "session.execution.succeeded", data: { sessionID: "session" } }, done }
+    if (waiting) { const resume = waiting; waiting = undefined; resume(item) }
+    else events.push(item)
+  })
+  session.model = { providerID: "provider-b", id: "backup", variant: "fast" }
+  await hooks.prompt[0]({ sessionID: "session" })
+  assert.deepEqual(session.model, { providerID: "provider-a", id: "primary" }, "an in-plan picker choice is not a manual opt-out")
+  session.model = { providerID: "provider-a", id: "primary", variant: "reasoning" }
+  await hooks.prompt[0]({ sessionID: "session" })
+  assert.deepEqual(session.model, { providerID: "provider-a", id: "primary" }, "variant provenance is not inferred from model IDs")
+
+  session.model = { providerID: "composer", id: "manual" }
+  await commands["qm-manual"].execute({ sessionID: "session" })
+  await hooks.prompt[0]({ sessionID: "session" })
+  assert.deepEqual(session.model, { providerID: "composer", id: "manual" }, "manual release preserves an out-of-plan choice")
+  session.model = { providerID: "provider-a", id: "primary", variant: "reasoning" }
+  await hooks.prompt[0]({ sessionID: "session" })
+  assert.deepEqual(session.model, { providerID: "provider-a", id: "primary", variant: "reasoning" }, "manual release preserves a variant-only choice")
+  await commands["qm-auto"].execute({ sessionID: "session" })
+  await hooks.prompt[0]({ sessionID: "session" })
+  assert.deepEqual(session.model, { providerID: "provider-a", id: "primary" }, "explicitly returning to automatic routing reapplies the plan")
+  session.agent = "unbound"
+  session.model = { providerID: "composer", id: "manual" }
+  await hooks.prompt[0]({ sessionID: "session" })
+  assert.equal(stored.size, 0, "changing agents clears the old ownership record")
+  session.agent = "reviewer"
+  await commands["qm-auto"].execute({ sessionID: "session" })
+  await new Promise<void>((done) => {
+    const item = { event: { type: "session.deleted", data: { sessionID: "session" } }, done }
+    if (waiting) { const resume = waiting; waiting = undefined; resume(item) }
+    else events.push(item)
+  })
+  assert.equal(stored.size, 0, "session deletion clears persistent ownership")
+  await routing?.dispose()
+})
+
+test("default automatic admission rejects a failed switch and releases its exclusive reservation", async () => {
+  const admissionConfig = parseConfig({
+    plans: { review: ["provider-a/primary", "provider-b/backup"] },
+    agents: { reviewer: "review" },
+    exclusiveModels: ["provider-a/primary"],
+  })
+  const hooks: Array<(input: { sessionID: string }) => Promise<void>> = []
+  const stored = new Map<string, unknown>()
+  const sessions = new Map([
+    ["failed", { agent: "reviewer", model: { providerID: "composer", id: "default" } }],
+    ["noop", { agent: "reviewer", model: { providerID: "composer", id: "default" } }],
+    ["unread", { agent: "reviewer", model: { providerID: "composer", id: "default" } }],
+    ["confirm-unread", { agent: "reviewer", model: { providerID: "composer", id: "default" } }],
+    ["next", { agent: "reviewer", model: { providerID: "composer", id: "default" } }],
+  ])
+  const routing = await registerAgentRouting({
+    model: { list: async () => ({ data: [
+      { providerID: "provider-a", id: "primary", enabled: true },
+      { providerID: "provider-b", id: "backup", enabled: true },
+    ] }) },
+    storage: {
+      get: async (key: string) => stored.get(key), set: async (key: string, value: unknown) => { stored.set(key, value) },
+      remove: async (key: string) => { stored.delete(key) }, scan: async () => ({ entries: [] }),
+    },
+    rpc: () => ({ status: async () => { throw new Error("not configured") } }),
+    agent: { transform: async () => ({ dispose: async () => {} }), reload: async () => {} },
+    session: {
+      hook: async (name: string, callback: (input: { sessionID: string }) => Promise<void>) => {
+        if (name === "prompt") hooks.push(callback)
+        return { dispose: async () => {} }
+      },
+      get: async ({ sessionID }: { sessionID: string }) => {
+        const session = sessions.get(sessionID)
+        if (sessionID === "unread" || (sessionID === "confirm-unread" && session?.model.id === "primary")) throw new Error("private host error")
+        return { data: session }
+      },
+      switchModel: async ({ sessionID, model }: { sessionID: string; model: { providerID: string; id: string } }) => {
+        if (sessionID === "failed") throw new Error("switch failed")
+        if (sessionID === "noop") return
+        sessions.get(sessionID)!.model = model
+      },
+    },
+    location: { directory: "project-a" },
+  } as never, admissionConfig)
+
+  await assert.rejects(hooks[0]({ sessionID: "failed" }), /could not confirm its model switch/)
+  await assert.rejects(hooks[0]({ sessionID: "noop" }), /could not confirm its model switch/)
+  await assert.rejects(hooks[0]({ sessionID: "unread" }), /could not read session ownership/)
+  await assert.rejects(hooks[0]({ sessionID: "confirm-unread" }), /could not confirm its model switch/)
+  await hooks[0]({ sessionID: "next" })
+  assert.deepEqual(sessions.get("next")?.model, { providerID: "provider-a", id: "primary" }, "failed admission releases the exclusive reservation")
+  await routing?.dispose()
+})
+
+test("manual opt-out survives reload and stays isolated by project and session", async () => {
+  const ownerConfig = parseConfig({ plans: { review: ["provider-a/primary"] }, agents: { reviewer: "review" } })
+  const stored = new Map<string, unknown>()
+  const sessions = new Map([
+    ["shared", { agent: "reviewer", model: { providerID: "composer", id: "default" } }],
+    ["other", { agent: "reviewer", model: { providerID: "composer", id: "default" } }],
+  ])
+  const install = async (directory: string, runtimeStorage = stored) => {
+    const hooks: Array<(input: { sessionID: string }) => Promise<void>> = []
+    const commands: Record<string, { execute(input: { sessionID: string }): Promise<void> }> = {}
+    const routing = await registerAgentRouting({
+      model: { list: async () => ({ data: [{ providerID: "provider-a", id: "primary", enabled: true }] }) },
+      storage: {
+        get: async (key: string) => runtimeStorage.get(key), set: async (key: string, value: unknown) => { runtimeStorage.set(key, value) },
+        remove: async (key: string) => { runtimeStorage.delete(key) }, scan: async () => ({ entries: [] }),
+      },
+      rpc: () => ({ status: async () => { throw new Error("not configured") } }),
+      agent: { transform: async () => ({ dispose: async () => {} }), reload: async () => {} },
+      session: {
+        hook: async (name: string, callback: (input: { sessionID: string }) => Promise<void>) => {
+          if (name === "prompt") hooks.push(callback)
+          return { dispose: async () => {} }
+        },
+        get: async ({ sessionID }: { sessionID: string }) => ({ data: sessions.get(sessionID) }),
+        switchModel: async ({ sessionID, model }: { sessionID: string; model: { providerID: string; id: string } }) => {
+          sessions.get(sessionID)!.model = model
+        },
+      },
+      command: {
+        transform: async (callback: (editor: { add(command: { name: string; execute(input: { sessionID: string }): Promise<void> }): void }) => void) => {
+          callback({ add: (command) => { commands[command.name] = command } })
+          return { dispose: async () => {} }
+        },
+      },
+      location: { directory },
+    } as never, ownerConfig)
+    return { hooks, commands, routing }
+  }
+
+  const first = await install("project-a")
+  await first.commands["qm-manual"].execute({ sessionID: "shared" })
+  await first.hooks[0]({ sessionID: "shared" })
+  assert.deepEqual(sessions.get("shared")?.model, { providerID: "composer", id: "default" }, "manual opt-out preserves the host model")
+  await first.routing?.dispose()
+
+  const otherProject = await install("project-b")
+  await otherProject.hooks[0]({ sessionID: "shared" })
+  assert.deepEqual(sessions.get("shared")?.model, { providerID: "provider-a", id: "primary" }, "manual opt-out is isolated to its project")
+  await otherProject.routing?.dispose()
+
+  sessions.get("shared")!.model = { providerID: "composer", id: "default" }
+  const otherRuntime = await install("project-a", new Map())
+  await otherRuntime.hooks[0]({ sessionID: "shared" })
+  assert.deepEqual(sessions.get("shared")?.model, { providerID: "provider-a", id: "primary" }, "independent runtime storage does not inherit another runtime's manual opt-out")
+  await otherRuntime.routing?.dispose()
+
+  sessions.get("shared")!.model = { providerID: "composer", id: "default" }
+  const reloaded = await install("project-a")
+  await reloaded.hooks[0]({ sessionID: "other" })
+  assert.deepEqual(sessions.get("other")?.model, { providerID: "provider-a", id: "primary" }, "manual opt-out is isolated to its session")
+  await reloaded.hooks[0]({ sessionID: "shared" })
+  assert.deepEqual(sessions.get("shared")?.model, { providerID: "composer", id: "default" }, "manual opt-out survives plugin reload")
+  await reloaded.routing?.dispose()
 })

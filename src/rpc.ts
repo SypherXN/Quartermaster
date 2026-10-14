@@ -9,7 +9,7 @@ import type { ProviderErrorLedger } from "./telemetry/errors.ts"
 import type { TokenLedger } from "./telemetry/ledger.ts"
 import { MAX_ATTRIBUTION_SESSIONS, type PluginAttributionLedger } from "./telemetry/attribution.ts"
 import { buildQuartermasterReport, REPORT_MAX_OFFSET, REPORT_MAX_PAGE_SIZE, type QuartermasterReport, type ReportQuery } from "./telemetry/report.ts"
-import { applyProjectQuartermasterOptions, readProjectQuartermasterOptions } from "./project-options.ts"
+import { applyProjectQuartermasterOptions, readProjectQuartermasterOptions, readNativeConfiguration, type ConfigurationReader } from "./project-options.ts"
 
 type AgentRouting = NonNullable<Awaited<ReturnType<typeof registerAgentRouting>>>
 
@@ -41,6 +41,7 @@ export const QUARTERMASTER_RPC = Rpc.define({
     select: { input: object({ agent: string, workType: string }, ["agent"]), output, errors: { invalid_input: errors.invalid_input } },
     explain: { input: object({ agent: string }, ["agent"]), output, errors: { invalid_input: errors.invalid_input } },
     status: { input: object({}), output },
+    diagnoseSession: { input: object({ sessionID: string }, ["sessionID"]), output, errors },
     report: {
       input: object({
         projectID: string,
@@ -241,6 +242,7 @@ export async function registerQuartermasterRpc(
   usage?: UsageReadResult,
   reporting?: ReportingServices,
   optionsDirectory?: string,
+  readConfiguration: ConfigurationReader = readNativeConfiguration,
 ) {
   return ctx.rpc.register(QUARTERMASTER_RPC, {
     async select(input, call) {
@@ -258,6 +260,14 @@ export async function registerQuartermasterRpc(
     },
     async status() {
       return routing ? await routing.status() : statusFallback(config, usage)
+    },
+    async diagnoseSession(input, call) {
+      if (!isRecord(input) || Object.keys(input).some((key) => key !== "sessionID") ||
+        typeof input.sessionID !== "string" || !input.sessionID.trim() || input.sessionID.length > 256) {
+        throw call.error("invalid_input", "Invalid diagnostic request.", { path: "sessionID", message: "expected a non-empty session ID up to 256 characters" })
+      }
+      if (!routing) throw call.error("unavailable", "Session diagnostics are unavailable.", { reason: "routing-unavailable" })
+      return routing.diagnoseSession(input.sessionID)
     },
     async report(input, call) {
       if (!isRecord(input)) throw call.error("invalid_input", "Invalid report request.", { path: "request", message: "expected an object" })
@@ -311,8 +321,8 @@ export async function registerQuartermasterRpc(
     async readOptions(_input, call) {
       if (!optionsDirectory) throw call.error("unavailable", "Project options are unavailable.", { reason: "no-project" })
       try {
-        const loaded = await readProjectQuartermasterOptions(optionsDirectory)
-        return { apiVersion: QUARTERMASTER_API_VERSION, status: "ok", options: loaded.options, revision: loaded.revision }
+        const loaded = await readProjectQuartermasterOptions(optionsDirectory, readConfiguration)
+        return { apiVersion: QUARTERMASTER_API_VERSION, status: "ok", options: loaded.options, revision: loaded.revision, writable: loaded.writable }
       } catch {
         throw call.error("unavailable", "Quartermaster project options could not be read.", { reason: "read-failed" })
       }
@@ -324,8 +334,8 @@ export async function registerQuartermasterRpc(
         throw call.error("invalid_input", "Invalid project options update.", { path: "request", message: "expected options and revision" })
       }
       try {
-        await applyProjectQuartermasterOptions({ directory: optionsDirectory, options: input.options, revision: input.revision, signal: call.signal })
-        const loaded = await readProjectQuartermasterOptions(optionsDirectory)
+        await applyProjectQuartermasterOptions({ directory: optionsDirectory, options: input.options, revision: input.revision, signal: call.signal, readConfiguration })
+        const loaded = await readProjectQuartermasterOptions(optionsDirectory, readConfiguration)
         return { apiVersion: QUARTERMASTER_API_VERSION, status: "saved", options: loaded.options, revision: loaded.revision }
       } catch (error) {
         if (error instanceof Error && error.message === "Project config changed; refusing to overwrite") {

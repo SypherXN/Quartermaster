@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { FailureCooldowns } from "../src/failures.ts"
+import { classifyRetryFailure, FailureCooldowns } from "../src/failures.ts"
 import { modelKey, selectModel } from "../src/select.ts"
 import type { ModelRef } from "../src/config.ts"
 
@@ -9,6 +9,38 @@ const spare: ModelRef = { providerID: "a", modelID: "spare" }
 const otherProvider: ModelRef = { providerID: "b", modelID: "model" }
 const registry = [primary, spare, otherProvider]
 const eligible = new Map(registry.map((model) => [modelKey(model), { status: "available" as const }]))
+
+test("structured retry failures permit only safe transient fallback", () => {
+  const cases = [
+    { error: { type: "provider.rate-limit", status: 429 }, fallback: true, classification: "temporary-rate-limit" },
+    { error: { type: "provider.internal", status: 503 }, fallback: true, classification: "provider-outage" },
+    { error: { type: "provider.transport", status: 503 }, fallback: true, classification: "provider-outage" },
+    { error: { type: "provider.quota", status: 402 }, fallback: false, classification: "quota-exhausted" },
+    { error: { type: "provider.auth", status: 401 }, fallback: false, classification: "auth" },
+    { error: { type: "permission.rejected" }, fallback: false, classification: "auth" },
+    { error: { type: "provider.invalid-request", status: 404 }, fallback: false, classification: "model-outage" },
+    { error: { type: "provider.no-route" }, fallback: false, classification: "model-outage" },
+    { error: { type: "provider.invalid-request", status: 413 }, fallback: false },
+    { error: { type: "provider.content-filter" }, fallback: false },
+    { error: { type: "provider.unsupported-operation" }, fallback: false },
+    { error: { type: "provider.invalid-output" }, fallback: false },
+    { error: { type: "provider.timeout" }, fallback: false },
+    { error: { type: "provider.unknown" }, fallback: false },
+    { error: { type: "cancelled" }, fallback: false },
+    { error: { type: "provider.unknown", status: 503 }, fallback: false },
+    { error: { type: "unrecognized" }, fallback: false },
+  ] as const
+
+  for (const item of cases) {
+    const result = classifyRetryFailure(item.error, "provider-a", "primary")
+    assert.equal(result.fallback, item.fallback, item.error.type)
+    assert.equal(result.report?.classification, "classification" in item ? item.classification : undefined, item.error.type)
+    if (result.report) {
+      assert.equal(result.report.providerID, "provider-a")
+      if ("modelID" in result.report) assert.equal(result.report.modelID, "primary")
+    }
+  }
+})
 
 test("model and provider outages affect only their scopes", () => {
   const failures = new FailureCooldowns(100)

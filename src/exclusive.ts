@@ -41,6 +41,11 @@ export class ExclusiveLeases {
     return hold !== undefined && hold.sessionID !== sessionID
   }
 
+  peekBlocks(sessionID: string, model: Pick<ModelRef, "providerID" | "modelID">): boolean {
+    const hold = this.holds.get(modelKey(model))
+    return hold !== undefined && this.now() < hold.expiresAt && hold.sessionID !== sessionID
+  }
+
   taken(model: Pick<ModelRef, "providerID" | "modelID">): boolean {
     return this.live(modelKey(model)) !== undefined
   }
@@ -239,7 +244,7 @@ export async function bindExclusive(
   leases: ExclusiveLeases,
   models: readonly ModelRef[],
   onChange: (changed: boolean) => void | Promise<void>,
-  onStep?: (step: { kind: "touch" | "release" | "finish" | "delete"; sessionID: string }) => void,
+  onStep?: (step: { kind: "touch" | "release" | "finish" | "delete"; sessionID: string }) => void | Promise<void>,
 ) {
   if (!ctx.session || !ctx.event || (models.length === 0 && !onStep)) return { dispose: async () => {} }
   const listed = new Set(models.map((model) => modelKey(model)))
@@ -264,7 +269,7 @@ export async function bindExclusive(
         if (controller.signal.aborted) return
         const step = readStep(event)
         if (!step) continue
-        onStep?.(step)
+        await onStep?.(step)
         if (step.kind === "touch") leases.touch(step.sessionID)
         else if (step.kind === "finish" || step.kind === "delete") await onChange(leases.finish(step.sessionID))
         else await onChange(leases.release(step.sessionID))

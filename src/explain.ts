@@ -1,4 +1,5 @@
 import type { ModelRef } from "./config.ts"
+import { lastLoopbackDetail } from "./local-health.ts"
 import type { SelectionResult, SkipReason } from "./select.ts"
 
 const skipMessages: Record<SkipReason, string> = {
@@ -39,7 +40,7 @@ export function explainSelection(selection: SelectionResult): SelectionExplanati
     skipped: selection.skipped.map(({ model, reason }) => ({
       model,
       code: reason.code,
-      reason: `${modelName(model)} skipped: ${skipMessages[reason.code]}.`,
+      reason: `${modelName(model)} skipped: ${skipMessages[reason.code]}${reason.code === "local-offline" && lastLoopbackDetail ? ` (${lastLoopbackDetail})` : ""}.`,
     })),
   }
 }

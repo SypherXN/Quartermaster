@@ -1,5 +1,6 @@
 import assert from "node:assert/strict"
 import { execFile } from "node:child_process"
+import { createServer } from "node:http"
 import { link, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, relative } from "node:path"
@@ -7,8 +8,14 @@ import { fileURLToPath, pathToFileURL } from "node:url"
 import test from "node:test"
 import { promisify } from "node:util"
 import { parseConfig } from "../src/config.ts"
-import { adoptProjectQuartermasterOptions, applyProjectQuartermasterOptions, readProjectQuartermasterOptions } from "../src/project-options.ts"
+import { adoptProjectQuartermasterOptions as adoptOptions, applyProjectQuartermasterOptions as applyOptions, readProjectQuartermasterOptions as readOptions, parseProjectConfig, readNativeConfiguration } from "../src/project-options.ts"
+import { Service } from "@opencode/client/service"
+import { fixtureConfiguration } from "./configuration-fixture.ts"
 import { resolvePlan } from "../src/select.ts"
+
+const readProjectQuartermasterOptions = (directory: string) => readOptions(directory, fixtureConfiguration)
+const adoptProjectQuartermasterOptions = (config: Parameters<typeof adoptOptions>[0], directory: string) => adoptOptions(config, directory, fixtureConfiguration)
+const applyProjectQuartermasterOptions = (input: Parameters<typeof applyOptions>[0], io?: Parameters<typeof applyOptions>[1]) => applyOptions({ ...input, readConfiguration: fixtureConfiguration }, io)
 
 const projectConfig = `{
   // keep this comment
@@ -35,7 +42,7 @@ test("replaces only Quartermaster options and preserves comments", async () => {
   const root = await mkdtemp(join(tmpdir(), "qm-options-"))
   try {
     const path = await writeProject(root)
-    const revision = (await stat(path)).mtimeMs
+    const revision = (await readProjectQuartermasterOptions(root)).revision
     const options = { plans: { review: ["provider-a/new"] }, agents: { reviewer: "review" } }
     await applyProjectQuartermasterOptions({ directory: root, options, revision })
     const next = await readFile(path, "utf8")
@@ -178,7 +185,7 @@ for (const separateProcess of [false, true]) {
     try {
       const path = await writeProject(root)
       const otherPath = await writeProject(other)
-      const revision = (await stat(path)).mtimeMs
+      const revision = (await readProjectQuartermasterOptions(root)).revision
       const options = { plans: { review: ["provider-a/winner"] } }
       pending = applyProjectQuartermasterOptions({ directory: root, revision, options }, {
         writeFile: async (file, contents) => {
@@ -201,7 +208,7 @@ for (const separateProcess of [false, true]) {
       }
       assert.equal(await readFile(path, "utf8"), projectConfig)
       assert.equal(await readFile(`${path}.quartermaster.bak`, "utf8"), projectConfig)
-      await applyProjectQuartermasterOptions({ directory: other, revision: (await stat(otherPath)).mtimeMs, options })
+      await applyProjectQuartermasterOptions({ directory: other, revision: (await readProjectQuartermasterOptions(other)).revision, options })
       release()
       await pending
       assert.deepEqual((await readProjectQuartermasterOptions(root)).options, options)
@@ -243,6 +250,7 @@ for (const kind of ["directory", "config", "backup", "backup directory", "dangli
         }
       }
       const revision = (await stat(path)).mtimeMs
+      const writeRevision = kind === "directory" || kind === "config" ? revision : (await readProjectQuartermasterOptions(root)).revision
       if (kind === "directory" || kind === "config") {
         await assert.rejects(() => readProjectQuartermasterOptions(root), /outside project/)
         const config = parseConfig({})
@@ -252,7 +260,7 @@ for (const kind of ["directory", "config", "backup", "backup directory", "dangli
       }
       let writes = 0
       await assert.rejects(() => applyProjectQuartermasterOptions({
-        directory: root, options: { plans: { review: ["provider-a/new"] } }, revision,
+        directory: root, options: { plans: { review: ["provider-a/new"] } }, revision: writeRevision,
       }, { writeFile: async () => { writes += 1 } }), /outside project|unresolvable link/)
       assert.equal(writes, 0)
       assert.equal(await readFile(otherPath, "utf8"), projectConfig)
@@ -306,10 +314,11 @@ for (const backup of [false, true]) {
       if (backup) await writeProject(root)
       await link(otherPath, backup ? `${path}.quartermaster.bak` : path)
       const revision = (await stat(path)).mtimeMs
+      const writeRevision = backup ? (await readProjectQuartermasterOptions(root)).revision : revision
       const otherRevision = (await stat(otherPath)).mtimeMs
       if (!backup) await assert.rejects(() => readProjectQuartermasterOptions(root), /multiple hard links/)
       let writes = 0
-      await assert.rejects(() => applyProjectQuartermasterOptions({ directory: root, revision, options: {} }, {
+      await assert.rejects(() => applyProjectQuartermasterOptions({ directory: root, revision: writeRevision, options: {} }, {
         writeFile: async () => { writes += 1 },
       }), /multiple hard links/)
       assert.equal(writes, 0)
@@ -334,7 +343,7 @@ test("rollback refuses a directory retargeted outside the project", async () => 
     const path = await writeProject(nested)
     const otherText = projectConfig.replace("provider-a/old", "provider-a/other")
     const otherPath = await writeProject(other, otherText)
-    const revision = (await stat(path)).mtimeMs
+    const revision = (await readProjectQuartermasterOptions(root)).revision
     await assert.rejects(() => applyProjectQuartermasterOptions({ directory: root, options: {}, revision }, {
       writeFile: async () => {
         await rename(nested, join(root, "original"))
@@ -359,7 +368,7 @@ test("does not change another project", async () => {
     await applyProjectQuartermasterOptions({
       directory: root,
       options: { plans: { review: ["provider-a/new"] } },
-      revision: (await stat(path)).mtimeMs,
+      revision: (await readProjectQuartermasterOptions(root)).revision,
     })
     assert.equal(await readFile(otherPath, "utf8"), before)
   } finally {
@@ -419,7 +428,7 @@ test("rejects invalid options and restores the file when the write fails", async
   const root = await mkdtemp(join(tmpdir(), "qm-options-"))
   try {
     const path = await writeProject(root)
-    const revision = (await stat(path)).mtimeMs
+    const revision = (await readProjectQuartermasterOptions(root)).revision
     await assert.rejects(
       () => applyProjectQuartermasterOptions({ directory: root, options: { unknown: true }, revision }),
       /unknown field/,
@@ -431,7 +440,7 @@ test("rejects invalid options and restores the file when the write fails", async
     ))
     assert.equal(await readFile(path, "utf8"), projectConfig)
     await assert.rejects(() => stat(join(root, ".quartermaster-options.lock")), { code: "ENOENT" })
-    await applyProjectQuartermasterOptions({ directory: root, options: {}, revision: (await stat(path)).mtimeMs })
+    await applyProjectQuartermasterOptions({ directory: root, options: {}, revision: (await readProjectQuartermasterOptions(root)).revision })
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -442,7 +451,7 @@ test("restores the project file when an options write is cancelled", async () =>
   const controller = new AbortController()
   try {
     const path = await writeProject(root)
-    const revision = (await stat(path)).mtimeMs
+    const revision = (await readProjectQuartermasterOptions(root)).revision
     await assert.rejects(() => applyProjectQuartermasterOptions({
       directory: root,
       options: { plans: { review: ["provider-a/new"] } },
@@ -454,25 +463,25 @@ test("restores the project file when an options write is cancelled", async () =>
     } }))
     assert.equal(await readFile(path, "utf8"), projectConfig)
     await assert.rejects(() => stat(join(root, ".quartermaster-options.lock")), { code: "ENOENT" })
-    await applyProjectQuartermasterOptions({ directory: root, options: {}, revision: (await stat(path)).mtimeMs })
+    await applyProjectQuartermasterOptions({ directory: root, options: {}, revision: (await readProjectQuartermasterOptions(root)).revision })
   } finally {
     await rm(root, { recursive: true, force: true })
   }
 })
 
-test("fails closed when two project files define Quartermaster", async () => {
+test("updates only the effective project document selected by native precedence", async () => {
   const root = await mkdtemp(join(tmpdir(), "qm-options-"))
   try {
     await mkdir(join(root, ".opencode"))
     const path = await writeProject(root, projectConfig, "opencode.json")
     const nested = await writeProject(root, projectConfig, join(".opencode", "opencode.json"))
-    const revision = (await stat(path)).mtimeMs
-    await assert.rejects(
-      () => applyProjectQuartermasterOptions({ directory: root, options: {}, revision }),
-      /exactly one/,
-    )
+    const loaded = await readProjectQuartermasterOptions(root)
+    assert.equal(loaded.path, nested)
+    await applyProjectQuartermasterOptions({ directory: root, options: {}, revision: loaded.revision })
     assert.equal(await readFile(path, "utf8"), projectConfig)
-    assert.equal(await readFile(nested, "utf8"), projectConfig)
+    assert.deepEqual(JSON.parse((await readFile(nested, "utf8")).replace(/\/\/[^\n]*/g, "")).plugins[1].options, {})
+    assert.equal(await readFile(`${nested}.quartermaster.bak`, "utf8"), projectConfig)
+    await assert.rejects(() => stat(`${path}.quartermaster.bak`), { code: "ENOENT" })
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -489,15 +498,24 @@ test("a later assignment uses the applied project options", async () => {
 `
   try {
     const path = await writeProject(root, text, "opencode.json")
-    const config = parseConfig({})
+    const config = parseConfig({
+      plans: { global: ["provider-a/global"] },
+      agents: { globalAgent: "global" },
+      usageSources: { "provider-a": "codex" },
+      localEndpoints: { "provider-a": "http://127.0.0.1:11434" },
+    })
     await adoptProjectQuartermasterOptions(config, root)
+    assert.deepEqual(config.plans, { review: [{ providerID: "provider-a", modelID: "old" }] })
+    assert.deepEqual(config.agents, { reviewer: "review" })
+    assert.deepEqual(config.usageSources, {})
+    assert.deepEqual(config.localEndpoints, {})
     const first = resolvePlan(config, "reviewer")
     assert.equal(first.status, "plan")
     if (first.status === "plan") assert.equal(first.plan[0].modelID, "old")
     await applyProjectQuartermasterOptions({
       directory: root,
       options: { plans: { review: ["provider-a/new"] }, agents: { reviewer: "review" } },
-      revision: (await stat(path)).mtimeMs,
+      revision: (await readProjectQuartermasterOptions(root)).revision,
     })
     await adoptProjectQuartermasterOptions(config, root)
     const second = resolvePlan(config, "reviewer")
@@ -534,7 +552,7 @@ test("matches only this Quartermaster package", async () => {
 
     const relativeSpec = relative(root, packageRoot)
     assert.match(relativeSpec, /^\.\.[\\/]/)
-    for (const pkg of ["quartermaster", "quartermaster@0.1.0", "github:SypherXN/quartermaster#main", "github:SypherXN/quartermaster.git#main", "https://github.com/SypherXN/quartermaster", "git+https://github.com/SypherXN/quartermaster.git", relativeSpec, packageRoot, pathToFileURL(packageRoot).href]) {
+    for (const pkg of ["opencode-quartermaster", "opencode-quartermaster@0.1.0", "quartermaster", "quartermaster@0.1.0", "github:SypherXN/quartermaster#main", "github:SypherXN/quartermaster.git#main", "https://github.com/SypherXN/quartermaster", "git+https://github.com/SypherXN/quartermaster.git", relativeSpec, packageRoot, pathToFileURL(packageRoot).href]) {
       const text = JSON.stringify({
         plugins: [
           { package: "not-quartermaster", options: untouched },
@@ -556,10 +574,127 @@ test("matches only this Quartermaster package", async () => {
     const example = await readProjectQuartermasterOptions(fileURLToPath(new URL("../examples/test-agent", import.meta.url)))
     assert.deepEqual(example.options, {
       plans: { "test-agent": ["ninfer/qwen3.8-27b", "opencode/space-bunny-free"] },
-      agents: { "qm-test": "test-agent" },
+      agents: { "qm-test": "test-agent", "quartermaster-test": "test-agent" },
+      localEndpoints: { ninfer: "http://127.0.0.1:8080/v1/models" },
     })
   } finally {
     await rm(root, { recursive: true, force: true })
     await rm(decoyRoot, { recursive: true, force: true })
+  }
+})
+
+test("follows native global, ancestor, project and .opencode ordering without writing inherited files", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "qm-options-precedence-"))
+  const root = join(fixture, "ancestor", "project")
+  try {
+    await mkdir(join(root, ".opencode"), { recursive: true })
+    await mkdir(join(fixture, "ancestor", ".opencode"))
+    const paths = [join(fixture, "system.json"), join(fixture, "global.json"), join(fixture, "ancestor", "opencode.json"), join(root, "opencode.json"), join(fixture, "ancestor", ".opencode", "opencode.jsonc"), join(root, ".opencode", "opencode.jsonc")]
+    const texts = paths.map((_, index) => projectConfig.replace("provider-a/old", `fixture/model-${index}`))
+    for (let index = 0; index < paths.length; index += 1) await writeFile(paths[index], texts[index])
+    let count = 2
+    const sources = async () => Promise.all(paths.slice(0, count).map(async path => ({ type: "document", path, info: parseProjectConfig(await readFile(path, "utf8")) } as never)))
+    const global = await readOptions(root, sources)
+    assert.deepEqual(global.options, { plans: { review: ["fixture/model-1"] } })
+    assert.equal(global.writable, false)
+    await assert.rejects(() => applyOptions({ directory: root, revision: global.revision, options: {}, readConfiguration: sources }), /outside the writable project/)
+    count = 5
+    const inherited = await readOptions(root, sources)
+    assert.deepEqual(inherited.options, { plans: { review: ["fixture/model-4"] } })
+    assert.equal(inherited.writable, false, "ancestor .opencode outranks nearer direct config")
+    await assert.rejects(() => applyOptions({ directory: root, revision: inherited.revision, options: {}, readConfiguration: sources }), /outside the writable project/)
+    count = 6
+    const loaded = await readOptions(root, sources)
+    assert.equal(loaded.path, paths[5])
+    assert.equal(loaded.writable, true)
+    await applyOptions({ directory: root, revision: loaded.revision, options: { plans: { review: ["fixture/updated"] } }, readConfiguration: sources })
+    for (let index = 0; index < 5; index += 1) {
+      assert.equal(await readFile(paths[index], "utf8"), texts[index])
+      await assert.rejects(() => stat(`${paths[index]}.quartermaster.bak`), { code: "ENOENT" })
+    }
+    assert.deepEqual((await readOptions(root, sources)).options, { plans: { review: ["fixture/updated"] } })
+    const inline = async () => [...await sources(), { type: "directory", path: root } as never, { type: "document", info: { plugins: [{ package: "quartermaster", options: { plans: { review: ["fixture/inline"] } } }] } } as never]
+    const readonly = await readOptions(root, inline)
+    assert.equal(readonly.writable, false)
+    assert.deepEqual(readonly.options, { plans: { review: ["fixture/inline"] } })
+    const before = await readFile(paths[5], "utf8")
+    await assert.rejects(() => applyOptions({ directory: root, revision: loaded.revision, options: {}, readConfiguration: inline }), /outside the writable project/)
+    assert.equal(await readFile(paths[5], "utf8"), before)
+  } finally { await rm(fixture, { recursive: true, force: true }) }
+})
+
+test("preserves trailing-comma JSONC and rejects malformed commas and comments", async () => {
+  const root = await mkdtemp(join(tmpdir(), "qm-options-jsonc-"))
+  const text = '{\r\n  // keep , } and , ] here\r\n  "model": "literal,}]",\r\n  "plugins": [{"package":"quartermaster","options":{"plans":{"review":["fixture/old", /* keep */],},},},],\r\n}\r\n'
+  try {
+    const path = await writeProject(root, text)
+    const loaded = await readProjectQuartermasterOptions(root)
+    await applyProjectQuartermasterOptions({ directory: root, revision: loaded.revision, options: { plans: { review: ["fixture/new"] } } })
+    const next = await readFile(path, "utf8")
+    assert.ok(next.startsWith(text.slice(0, text.indexOf('{"plans"'))))
+    assert.ok(next.endsWith('},],\r\n}\r\n'))
+    assert.deepEqual((parseProjectConfig(next) as any).plugins[0].options, { plans: { review: ["fixture/new"] } })
+    assert.equal(await readFile(`${path}.quartermaster.bak`, "utf8"), text)
+    for (const malformed of ['[,]', '{,}', '[1,,]', '{"x":,}', '{"x":1} /* unterminated']) assert.throws(() => parseProjectConfig(malformed))
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test("refuses stale native metadata and changed effective sources before any options write", async () => {
+  const root = await mkdtemp(join(tmpdir(), "qm-options-source-change-"))
+  try {
+    await mkdir(join(root, ".opencode"))
+    const path = await writeProject(root, projectConfig, "opencode.json")
+    const nested = await writeProject(root, projectConfig, ".opencode/opencode.jsonc")
+    const sources = await fixtureConfiguration(root)
+    const loaded = await readOptions(root, async () => sources.slice(0, 1))
+    let calls = 0
+    let writes = 0
+    await assert.rejects(() => applyOptions({ directory: root, revision: loaded.revision, options: {}, readConfiguration: async () => ++calls === 1 ? sources.slice(0, 1) : sources }, { writeFile: async () => { writes += 1 } }), /refusing to overwrite/)
+    assert.equal(writes, 0)
+    assert.equal(await readFile(path, "utf8"), projectConfig)
+    assert.equal(await readFile(nested, "utf8"), projectConfig)
+    const changed = projectConfig.replace('"unchanged"', '"changed"')
+    await writeFile(path, changed)
+    const current = await readOptions(root, async () => (await fixtureConfiguration(root)).slice(0, 1))
+    assert.notEqual(current.revision, loaded.revision, "revision includes unrelated file content")
+    await assert.rejects(() => applyOptions({ directory: root, revision: loaded.revision, options: {}, readConfiguration: async () => (await fixtureConfiguration(root)).slice(0, 1) }), /refusing to overwrite/)
+    await writeFile(path, projectConfig.replace("provider-a/old", "provider-a/other"))
+    await assert.rejects(() => readOptions(root, async () => sources.slice(0, 1)), /refusing to overwrite/)
+    await assert.rejects(() => stat(join(root, ".quartermaster-options.lock")), { code: "ENOENT" })
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test("native discovery never starts a server or reads config from another process", async t => {
+  let pid = process.pid + 1
+  let reads = 0
+  const server = createServer((request, response) => {
+    assert.equal(request.headers.authorization, `Basic ${Buffer.from("fixture:fixture-only").toString("base64")}`)
+    const url = new URL(request.url!, "http://127.0.0.1")
+    response.setHeader("Content-Type", "application/json")
+    if (url.pathname === "/api/info") response.end(JSON.stringify({ version: "2.0.23", pid, urls: [], paths: {}, capabilities: {} }))
+    else {
+      assert.equal(url.pathname, "/api/config")
+      assert.equal(url.searchParams.get("location[directory]"), "/fixture")
+      reads += 1
+      response.end("[]")
+    }
+  })
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve))
+  const endpoint = { url: `http://127.0.0.1:${(server.address() as { port: number }).port}`, auth: { type: "basic" as const, username: "fixture", password: "fixture-only" } }
+  const discover = t.mock.method(Service, "discover", async () => endpoint)
+  const ensure = t.mock.method(Service, "ensure", async () => { throw new Error("must not start a server") })
+  try {
+    await assert.rejects(() => readNativeConfiguration("/fixture"), /provenance is unavailable/)
+    assert.equal(reads, 0)
+    pid = process.pid
+    assert.deepEqual(await readNativeConfiguration("/fixture"), [])
+    assert.equal(reads, 1)
+    discover.mock.mockImplementation(async () => undefined)
+    await assert.rejects(() => readNativeConfiguration("/fixture"), /provenance is unavailable/)
+    assert.equal(reads, 1)
+    assert.equal(ensure.mock.callCount(), 0)
+  } finally {
+    server.closeAllConnections()
+    await new Promise<void>(resolve => server.close(() => resolve()))
   }
 })

@@ -1,14 +1,16 @@
+import { randomUUID } from "node:crypto"
+import { readFileSync } from "node:fs"
 import type { Agent } from "@opencode/plugin"
 import type { AgentEditor } from "@opencode/plugin/promise/agent"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import type { ModelRef, QuartermasterConfig } from "./config.ts"
 import { buildQuotaEligibility } from "./eligibility.ts"
-import { FailureCooldowns, type FailureReport, type SuccessReport } from "./failures.ts"
+import { classifyRetryFailure, FailureCooldowns, type FailureReport, type SuccessReport } from "./failures.ts"
 import { applyLocalHealth, LocalHealth } from "./local-health.ts"
 import { bindExclusive, ExclusiveLeases } from "./exclusive.ts"
 import { explainSelection, type SelectionExplanation } from "./explain.ts"
 import { AgentPins } from "./pins.ts"
-import { adoptProjectQuartermasterOptions } from "./project-options.ts"
+import { adoptProjectQuartermasterOptions, readNativeConfiguration, type ConfigurationReader } from "./project-options.ts"
 import { modelKey, resolvePlan, selectAgentModel, selectModel, type ModelEligibility } from "./select.ts"
 import { readUsageStatus, type UsageReadResult, type UsageSourceID } from "./usage.ts"
 import type { TokenBudgetGate, TokenBudgetReason } from "./telemetry/budget-gate.ts"
@@ -16,6 +18,7 @@ import type { TokenBudgetGate, TokenBudgetReason } from "./telemetry/budget-gate
 const COOLDOWN_STORAGE_KEY = "availability/cooldowns-v1"
 const AVAILABILITY_REFRESH_MS = 60_000
 const AGENT_RELOAD_DEBOUNCE_MS = 25
+const PLUGIN_VERSION: string = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version
 
 type AgentModel = NonNullable<Agent.Info["model"]>
 type MutableAgentEditor = Pick<AgentEditor, "get" | "update">
@@ -34,18 +37,25 @@ interface SessionModel {
   variant?: string
 }
 
-function sessionView(value: unknown): { agent?: string; model?: SessionModel } {
+function sessionView(value: unknown): { agent?: string; model?: SessionModel; projectID?: string } {
   const record = value && typeof value === "object" && "data" in value && typeof (value as { data?: unknown }).data === "object"
     ? (value as { data: unknown }).data
     : value
   if (!record || typeof record !== "object") return {}
-  const info = record as { agent?: unknown; model?: unknown }
+  const info = record as { agent?: unknown; model?: unknown; projectID?: unknown }
   const agent = typeof info.agent === "string" && info.agent ? info.agent : undefined
   const raw = info.model && typeof info.model === "object" ? info.model as { providerID?: unknown; id?: unknown; variant?: string } : undefined
   const model = raw && typeof raw.providerID === "string" && typeof raw.id === "string"
     ? { providerID: raw.providerID, id: raw.id, ...(typeof raw.variant === "string" ? { variant: raw.variant } : {}) }
     : undefined
-  return { ...(agent ? { agent } : {}), ...(model ? { model } : {}) }
+  return { ...(agent ? { agent } : {}), ...(model ? { model } : {}), ...(typeof info.projectID === "string" ? { projectID: info.projectID } : {}) }
+}
+
+function diagnosticRead<T>(read: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>
+  return Promise.race([read, new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("Diagnostic read timed out")), 2_000)
+  })]).finally(() => clearTimeout(timer))
 }
 
 function sameSessionModel(model: ModelRef, current?: SessionModel) {
@@ -93,22 +103,27 @@ export function applyAgentRouting(
 }
 
 export async function registerAgentRouting(
-  ctx: Pick<Context, "agent" | "model" | "rpc" | "storage"> & Partial<Pick<Context, "session" | "event">> & {
+  ctx: Pick<Context, "agent" | "model" | "rpc" | "storage"> & Partial<Pick<Context, "session" | "event" | "command" | "app">> & {
     location?: { directory?: string; project?: { id?: string } }
   },
   config: QuartermasterConfig,
   usage?: UsageReadResult,
   budgetGate?: TokenBudgetGate,
+  readConfiguration: ConfigurationReader = readNativeConfiguration,
 ) {
   if (
     config.exclusiveModels.length === 0 &&
     Object.keys(config.agents).length === 0 &&
-    Object.keys(config.workTypes).length === 0
+    Object.keys(config.workTypes).length === 0 &&
+    !(ctx.command && ctx.session)
   ) return undefined
 
   let registry = (await ctx.model.list()).data.filter((model) => model.enabled).map(modelRef)
-  const localHealth = new LocalHealth(config.localEndpoints, config.localHealthTimeoutMs)
+  let localHealth = new LocalHealth(config.localEndpoints, config.localHealthTimeoutMs)
+  let localHealthOptions = JSON.stringify([config.localEndpoints, config.localHealthTimeoutMs])
   let health = await localHealth.checkAll(registry.map((model) => model.providerID))
+  let availabilityCheckedAt = Date.now()
+  const instanceID = randomUUID()
   let quotaEligibility = buildQuotaEligibility(registry, config.usageSources, config.quotaExemptModels, usage)
   let eligibility = applyLocalHealth(registry, quotaEligibility, health)
   const failures = new FailureCooldowns(config.providerCooldownMs)
@@ -190,22 +205,29 @@ export async function registerAgentRouting(
     return reloadPromise
   }
 
-  const refresh = (nextEligibility?: ReadonlyMap<string, ModelEligibility>): Promise<boolean> => {
+  const refresh = (nextEligibility?: ReadonlyMap<string, ModelEligibility>, refreshAvailability = true): Promise<boolean> => {
     if (refreshPromise) return refreshPromise
     refreshPromise = (async () => {
       const before = fingerprint(eligibility)
-      registry = (await ctx.model.list()).data.filter((model) => model.enabled).map(modelRef)
+      const nextRegistry = (await ctx.model.list()).data.filter((model) => model.enabled).map(modelRef)
+      const registryChanged = registry.length !== nextRegistry.length || registry.some((model) =>
+        !nextRegistry.some((candidate) => sameModelRef(model, candidate)),
+      )
+      registry = nextRegistry
       await pins.setRegistry(registry)
       if (nextEligibility !== undefined) {
         injectedEligibility = nextEligibility
       } else {
-        injectedEligibility = undefined
-        if (Object.keys(config.usageSources).length > 0) usage = await readUsageStatus(ctx)
-        health = await localHealth.checkAll(registry.map((model) => model.providerID), { force: true })
-        quotaEligibility = buildQuotaEligibility(registry, config.usageSources, config.quotaExemptModels, usage)
+        if (refreshAvailability || registryChanged) {
+          injectedEligibility = undefined
+          if (Object.keys(config.usageSources).length > 0) usage = await readUsageStatus(ctx)
+          health = await localHealth.checkAll(registry.map((model) => model.providerID))
+          quotaEligibility = buildQuotaEligibility(registry, config.usageSources, config.quotaExemptModels, usage)
+        }
       }
       eligibility = failures.apply(baseSnapshot(), registry, Date.now())
-      const changed = before !== fingerprint(eligibility)
+      availabilityCheckedAt = Date.now()
+      const changed = registryChanged || before !== fingerprint(eligibility)
       if (changed) await requestReload()
       return changed
     })().finally(() => {
@@ -225,22 +247,65 @@ export async function registerAgentRouting(
   const requestKinds = new Map<string, { kind: string; agent: string; model: ModelRef }>()
   const attemptedModels = new Map<string, Set<string>>()
   const lastPrimaryModels = new Map<string, { agent: string; model: ModelRef }>()
-  const manualModels = new Map<string, { agent: string; model: ModelRef }>()
-  const exclusiveGate = await bindExclusive(ctx, leases, config.exclusiveModels, async () => {}, (step) => {
-    if (step.kind === "finish" || step.kind === "delete") {
-      running.delete(step.sessionID)
-      requestKinds.delete(step.sessionID)
-      attemptedModels.delete(step.sessionID)
+  const ownershipScope = encodeURIComponent(ctx.location?.project?.id ?? ctx.location?.directory ?? "runtime")
+  const ownershipKey = (sessionID: string) => `routing/ownership-v1/${ownershipScope}/${encodeURIComponent(sessionID)}`
+  const clearOwnership = async (sessionID: string) => {
+    try {
+      await ctx.storage.remove(ownershipKey(sessionID))
+    } catch {
+      console.warn("[quartermaster] session ownership cleanup failed")
     }
-    if (step.kind === "delete") {
-      lastPrimaryModels.delete(step.sessionID)
-      manualModels.delete(step.sessionID)
-    }
-  })
+  }
+  const commandRegistration = ctx.command && ctx.session
+    ? await ctx.command.transform((editor) => {
+      editor.add({
+        name: "qm-auto",
+        description: "Let Quartermaster route this session's bound agent",
+        execute: async ({ sessionID }) => {
+          const view = sessionView(await ctx.session!.get({ sessionID } as never))
+          if (!view.agent || !Object.hasOwn(config.agents, view.agent) || !config.plans[config.agents[view.agent] ?? ""]) {
+            throw new Error("Quartermaster automatic routing requires a bound agent with a configured plan")
+          }
+          await ctx.storage.set(ownershipKey(sessionID), { mode: "automatic", agent: view.agent })
+        },
+      })
+      editor.add({
+        name: "qm-manual",
+        description: "Keep this session under the host's model selection",
+        execute: async ({ sessionID }) => {
+          const view = sessionView(await ctx.session!.get({ sessionID } as never))
+          await ctx.storage.set(ownershipKey(sessionID), { mode: "manual", ...(view.agent ? { agent: view.agent } : {}) })
+          leases.releaseReservation(sessionID)
+        },
+      })
+      editor.add({
+        name: "qm-status",
+        description: "Queue read-only Quartermaster diagnostics for a later turn; diagnoseSession RPC returns immediately",
+        execute: async ({ sessionID }) => {
+          const report = await diagnoseSession(sessionID)
+          await ctx.session!.synthetic({
+            sessionID,
+            text: JSON.stringify(report, null, 2),
+            description: "Quartermaster routing diagnostics (not provider-send proof)",
+            delivery: "queue",
+            resume: false,
+          })
+        },
+      })
+    })
+    : undefined
   const exclusiveKeys = new Set(config.exclusiveModels.map((model) => modelKey(model)))
 
   const ensureProjectOptions = async () => {
-    if (ctx.location?.directory) await adoptProjectQuartermasterOptions(config, ctx.location.directory).catch(() => undefined)
+    if (ctx.location?.directory) {
+      await adoptProjectQuartermasterOptions(config, ctx.location.directory, readConfiguration).catch(() => undefined)
+      const nextHealthOptions = JSON.stringify([config.localEndpoints, config.localHealthTimeoutMs])
+      if (nextHealthOptions !== localHealthOptions) {
+        localHealthOptions = nextHealthOptions
+        localHealth = new LocalHealth(config.localEndpoints, config.localHealthTimeoutMs)
+      }
+      failures.setDuration(config.providerCooldownMs)
+    }
     await pins.revalidate()
   }
 
@@ -254,73 +319,125 @@ export async function registerAgentRouting(
     busyFor(sessionID),
   )
 
+  const diagnoseSession = async (sessionID: string) => {
+    let view: ReturnType<typeof sessionView> = {}
+    let sessionRead: "ok" | "unavailable" = "ok"
+    let ownership: { mode?: unknown; agent?: unknown } | undefined
+    let ownershipRead: "ok" | "unavailable" = "ok"
+    try {
+      view = sessionView(await diagnosticRead(ctx.session!.get({ sessionID } as never, { signal: AbortSignal.timeout(2_000) })))
+    } catch {
+      sessionRead = "unavailable"
+    }
+    try {
+      ownership = await diagnosticRead(ctx.storage.get(ownershipKey(sessionID))) as typeof ownership
+    } catch {
+      ownershipRead = "unavailable"
+    }
+    const projectID = ctx.location?.project?.id
+    const scope = projectID && view.projectID ? (projectID === view.projectID ? "confirmed-project" : "mismatch") : "unknown"
+    if (scope === "mismatch") view = {}
+    const now = Date.now()
+    const agentID = view.agent
+    const bound = agentID !== undefined && Object.hasOwn(config.agents, agentID)
+    const planID = bound ? config.agents[agentID] : undefined
+    const plan = planID === undefined ? undefined : config.plans[planID]
+    const mode = !agentID ? "unknown" : !bound ? "unbound" : ownershipRead !== "ok" ? "unknown"
+      : ownership?.agent === agentID && ownership.mode === "manual" ? "manual" : "automatic"
+    // Snapshot-only: refresh/select/status can adopt options, persist pins or reload agents.
+    const recommendation = explainSelection(selectAgentModel(
+      config, agentID ?? "", registry, failures.apply(baseSnapshot(), registry, now), now,
+      agentID ? pins.get(agentID) : undefined,
+      (model) => leases.peekBlocks(sessionID, model),
+    ))
+    const observed = lastPrimaryModels.get(sessionID)
+    const quotaConfigured = Object.keys(config.usageSources).length > 0
+    const currentUsage = usage
+    return {
+      apiVersion: 1,
+      plugin: { id: "quartermaster", version: PLUGIN_VERSION },
+      runtime: {
+        processID: process.pid,
+        pluginInstanceID: instanceID,
+        host: ctx.app ? { name: ctx.app.name, version: ctx.app.version, channel: ctx.app.channel } : "unknown",
+        verifiedAdmissionHost: "OpenCode 2.0.25 and 2.0.26 (isolated fixtures; not an OpenChamber support claim)",
+        identityScope: "local handling process and plugin instance; session ID alone is not runtime identity",
+      },
+      location: { projectID: ctx.location?.project?.id ?? "unknown", directory: ctx.location?.directory ?? "unknown" },
+      session: {
+        id: sessionID, read: sessionRead, scope, agent: agentID ?? "unknown", mode, ownershipRead,
+        model: view.model ? modelRef(view.model) : "unknown",
+        binding: !agentID ? "unknown" : !bound ? "unbound" : !plan ? "missing-plan" : "configured",
+        plan: planID === undefined ? null : { id: planID, candidates: plan ?? [] },
+        activePrimary: scope === "mismatch" ? "unknown" : running.has(sessionID),
+      },
+      availability: {
+        basis: "cached router snapshot; no refresh, polling or option adoption",
+        snapshotReadAt: availabilityCheckedAt,
+        snapshotAgeMs: Math.max(0, now - availabilityCheckedAt),
+        periodicRefreshMs: AVAILABILITY_REFRESH_MS,
+        localHealthCacheMs: 5_000,
+        localHealth: Object.fromEntries(Object.keys(config.localEndpoints).map((provider) => [provider, health.get(provider) ?? "unknown"])),
+        quota: !quotaConfigured ? "unconfigured" : currentUsage?.status ?? "unavailable",
+        quotaUpdatedAt: quotaConfigured && currentUsage?.status === "ok" ? currentUsage.snapshot.updatedAt : null,
+        sources: !quotaConfigured || currentUsage?.status !== "ok" ? {} : Object.fromEntries(Object.entries(config.usageSources).map(([provider, sourceID]) => {
+          const source = currentUsage.snapshot.sources[sourceID as UsageSourceID]
+          return [provider, { sourceID, checkedAt: source.checkedAt, stale: source.stale || source.checkedAt === null || now < source.checkedAt || now - source.checkedAt > 300_000, availability: source.availability }]
+        })),
+      },
+      recommendation: { ...recommendation, applies: mode === "automatic", note: "Snapshot recommendation only; manual/unbound choices are not changed. Admission rechecks availability." },
+      primaryRequestEvidence: {
+        lastObserved: scope === "mismatch" ? "unknown" : observed ?? "unknown",
+        basis: "model.request hook observed in this plugin instance; not proof of an HTTP send or successful inference",
+      },
+    }
+  }
+
   const assignPrompt = async (sessionID: string) => {
     if (running.has(sessionID) || !ctx.session?.get || !ctx.session.switchModel) return
     await ensureProjectOptions()
+    await refresh()
     let view: ReturnType<typeof sessionView>
     try {
       view = sessionView(await ctx.session.get({ sessionID } as never))
     } catch {
-      return
+      leases.releaseReservation(sessionID)
+      throw new Error("Quartermaster could not read session ownership before provider admission")
     }
     const agentID = view.agent
-    if (!agentID || !Object.hasOwn(config.agents, agentID)) {
-      manualModels.delete(sessionID)
+    if (!agentID) {
+      leases.releaseReservation(sessionID)
+      throw new Error("Quartermaster could not read session ownership before provider admission")
+    }
+    if (!Object.hasOwn(config.agents, agentID)) {
+      await clearOwnership(sessionID)
       return
     }
-    const plan = config.plans[config.agents[agentID] ?? ""]
-    if (view.model && !plan?.some((candidate) => sameSessionModel(candidate, view.model))) {
-      manualModels.delete(sessionID)
+    let ownership: { mode?: unknown; agent?: unknown } | undefined
+    try {
+      ownership = await ctx.storage.get(ownershipKey(sessionID)) as typeof ownership
+    } catch {
+      leases.releaseReservation(sessionID)
+      throw new Error("Quartermaster could not read session ownership before provider admission")
+    }
+    if (ownership?.agent !== agentID) await clearOwnership(sessionID)
+    if (ownership?.agent === agentID && ownership.mode === "manual") {
       leases.releaseReservation(sessionID)
       return
     }
-    const lastPrimary = lastPrimaryModels.get(sessionID)
-    const manual = manualModels.get(sessionID)
-    if (manual && (manual.agent !== agentID || !plan?.some((candidate) => sameModelRef(candidate, manual.model)))) {
-      manualModels.delete(sessionID)
-    }
-    if (manualModels.has(sessionID) && view.model) {
-      const currentOverride = manualModels.get(sessionID)!
-      if (!sameSessionModel(currentOverride.model, view.model)) {
-        if (plan?.some((candidate) => sameSessionModel(candidate, view.model!))) {
-          manualModels.set(sessionID, { agent: agentID, model: modelRef(view.model) })
-        } else {
-          manualModels.delete(sessionID)
-        }
-      }
-    } else if (
-      view.model && lastPrimary?.agent === agentID && !sameSessionModel(lastPrimary.model, view.model) &&
-      plan?.some((candidate) => sameSessionModel(candidate, view.model!))
-    ) {
-      manualModels.set(sessionID, { agent: agentID, model: modelRef(view.model) })
-    }
-    const explicit = manualModels.get(sessionID)
-    if (explicit && view.model && sameSessionModel(explicit.model, view.model)) {
-      const currentChoice = selectModel(
-        [explicit.model],
-        registry,
-        failures.apply(baseSnapshot(), registry, Date.now()),
-        Date.now(),
-        busyFor(sessionID),
-      )
-      if (currentChoice.status === "selected") {
-        leases.releaseReservation(sessionID)
-        return
-      }
-    }
-    if (view.model && lastPrimary?.agent === agentID && !sameSessionModel(lastPrimary.model, view.model) && !manualModels.has(sessionID)) {
-      leases.releaseReservation(sessionID)
-    }
+    // Bound agents are automatic by default; /qm-manual is the per-session opt-out.
     let selection = choose(agentID, sessionID)
     if (selection.status !== "selected") {
       leases.releaseReservation(sessionID)
-      return
+      throw new Error("Quartermaster could not select an eligible model before provider admission")
     }
     if (exclusiveKeys.has(modelKey(selection.model))) {
       leases.releaseReservation(sessionID)
       if (leases.reserve(selection.model, sessionID, agentID) === "busy") {
         selection = choose(agentID, sessionID)
-        if (selection.status !== "selected" || exclusiveKeys.has(modelKey(selection.model))) return
+        if (selection.status !== "selected" || exclusiveKeys.has(modelKey(selection.model))) {
+          throw new Error("Quartermaster could not reserve an eligible model before provider admission")
+        }
       }
     } else leases.releaseReservation(sessionID)
     if (selection.status !== "selected" || sameSessionModel(selection.model, view.model)) return
@@ -333,16 +450,45 @@ export async function registerAgentRouting(
           ...(selection.model.variant === undefined ? {} : { variant: selection.model.variant }),
         },
       } as never)
-      manualModels.delete(sessionID)
+      const selectedView = sessionView(await ctx.session.get({ sessionID } as never))
+      if (!sameSessionModel(selection.model, selectedView.model)) {
+        throw new Error("Quartermaster model switch was not reflected before provider admission")
+      }
     } catch {
       console.warn("[quartermaster] session model selection failed")
       if (exclusiveKeys.has(modelKey(selection.model))) leases.releaseReservation(sessionID)
+      throw new Error("Quartermaster could not confirm its model switch before provider admission")
     }
   }
 
   if (ctx.session && Object.keys(config.agents).length > 0) {
     runningHook = await ctx.session.hook("model.request", async (input) => {
       const model = modelRef(input.model)
+      if (input.kind === "primary" && Object.hasOwn(config.agents, input.agent) && ctx.session?.get) {
+        try {
+          const ownership = await ctx.storage.get(ownershipKey(input.sessionID)) as { mode?: unknown; agent?: unknown } | undefined
+          if (!(ownership?.agent === input.agent && ownership.mode === "manual")) {
+            const view = sessionView(await ctx.session.get({ sessionID: input.sessionID } as never))
+            if (view.agent !== input.agent || (ctx.location?.project?.id && view.projectID !== ctx.location.project.id)) {
+              throw new Error("Quartermaster could not confirm request ownership before provider dispatch")
+            }
+            await ensureProjectOptions()
+            await refresh()
+            if (Object.hasOwn(config.agents, input.agent)) {
+              const plan = config.plans[config.agents[input.agent] ?? ""]
+              // ponytail: validate the captured model only; native dequeue selection needs a host hook.
+              const valid = selectModel(plan?.filter((candidate) => modelKey(candidate) === modelKey(model)),
+                registry, failures.apply(baseSnapshot(), registry, Date.now()), Date.now(), busyFor(input.sessionID))
+              if (valid.status !== "selected") {
+                throw new Error("Quartermaster blocked a stale or ineligible model before provider dispatch; send again when the session is idle")
+              }
+            }
+          }
+        } catch (error) {
+          leases.releaseReservation(input.sessionID)
+          throw error
+        }
+      }
       requestKinds.set(input.sessionID, { kind: input.kind, agent: input.agent, model })
       if (input.kind === "primary") {
         lastPrimaryModels.set(input.sessionID, { agent: input.agent, model })
@@ -355,7 +501,7 @@ export async function registerAgentRouting(
     retryHook = await ctx.session.hook("retry", async (event) => {
       const request = requestKinds.get(event.sessionID)
       if (
-        event.decision.retry !== true || request?.kind !== "primary" ||
+        request?.kind !== "primary" ||
         request.agent !== event.agent || modelKey(request.model) !== modelKey(modelRef(event.model)) ||
         !ctx.session?.get || !ctx.session.switchModel
       ) return
@@ -370,20 +516,21 @@ export async function registerAgentRouting(
       const agentID = view.agent
       const current = view.model
       if (!agentID || agentID !== event.agent || !Object.hasOwn(config.agents, agentID)) return
+      const ownership = await ctx.storage.get(ownershipKey(event.sessionID)) as { mode?: unknown; agent?: unknown } | undefined
+      if (ownership?.agent === agentID && ownership.mode === "manual") return
       const plan = config.plans[config.agents[agentID] ?? ""]
       if (!current || !plan?.some((candidate) => candidate.providerID === current.providerID && candidate.modelID === current.id)) return
       if (!sameSessionModel(modelRef(event.model), current)) return
 
-      const status = event.error.status
-      const report: FailureReport = status === 429
-        ? { providerID: event.model.providerID, modelID: event.model.id, classification: "temporary-rate-limit" }
-        : status !== undefined && status >= 500
-          ? { providerID: event.model.providerID, classification: "provider-outage" }
-          : { providerID: event.model.providerID, modelID: event.model.id, classification: "model-outage" }
-      if (failures.reportFailure(report, Date.now())) {
+      const failure = classifyRetryFailure(event.error, event.model.providerID, event.model.id)
+      if (failure.report && failures.reportFailure(failure.report, Date.now())) {
         await persistCooldowns()
         await applyCurrent()
       }
+
+      if (event.decision.retry !== true || !failure.fallback) return
+
+      await refresh()
 
       const attempted = attemptedModels.get(event.sessionID) ?? new Set([modelKey(modelRef(event.model))])
       const retryPlan = plan?.filter((candidate) => !attempted.has(modelKey(candidate)))
@@ -429,8 +576,22 @@ export async function registerAgentRouting(
     })
   }
 
+  // Validate automatic ownership/availability before acquiring an exclusive request lease.
+  const exclusiveGate = await bindExclusive(ctx, leases, config.exclusiveModels, async () => {}, async (step) => {
+    if (step.kind === "finish" || step.kind === "delete") {
+      running.delete(step.sessionID)
+      requestKinds.delete(step.sessionID)
+      attemptedModels.delete(step.sessionID)
+    }
+    if (step.kind === "delete") {
+      lastPrimaryModels.delete(step.sessionID)
+      await clearOwnership(step.sessionID)
+    }
+  })
+
   const select = async (agentID: string, workType?: string, sessionID?: string) => {
     await ensureProjectOptions()
+    await refresh()
     const resolution = resolvePlan(config, agentID, { workType })
     if (resolution.status === "explicit-model") {
       return { status: "explicit-model", model: resolution.model, reasonCode: resolution.reason.code }
@@ -443,10 +604,8 @@ export async function registerAgentRouting(
         reason: resolution.reason.code === "unknown-work-type" ? "Unknown work type and no agent plan is configured." : "No model plan is configured for this agent.",
       }
     }
-    const currentRegistry = (await ctx.model.list()).data.filter((model) => model.enabled).map(modelRef)
-    const currentHealth = await localHealth.checkAll(currentRegistry.map((model) => model.providerID))
-    const base = applyLocalHealth(currentRegistry, buildQuotaEligibility(currentRegistry, config.usageSources, config.quotaExemptModels, usage), currentHealth)
-    const currentEligibility = failures.apply(base, currentRegistry, Date.now())
+    const currentRegistry = registry
+    const currentEligibility = failures.apply(baseSnapshot(), currentRegistry, Date.now())
     const pin = pins.get(agentID)
     const candidates = pin ? [pin, ...resolution.plan.filter((candidate) => modelKey(candidate) !== modelKey(pin))] : resolution.plan
     let selection = selectModel(candidates, currentRegistry, currentEligibility, Date.now(), busyFor(sessionID))
@@ -496,11 +655,15 @@ export async function registerAgentRouting(
     },
     async explain(agentID: string, sessionID?: string): Promise<SelectionExplanation> {
       await ensureProjectOptions()
+      await refresh()
       return explainSelection(selectedFor(agentID, sessionID))
     },
     select,
     status,
-    refresh,
+    diagnoseSession,
+    refresh(nextEligibility?: ReadonlyMap<string, ModelEligibility>) {
+      return refresh(nextEligibility)
+    },
     async refreshBudgets() {
       await requestReload()
     },
@@ -509,10 +672,10 @@ export async function registerAgentRouting(
       requestKinds.clear()
       attemptedModels.clear()
       lastPrimaryModels.clear()
-      manualModels.clear()
       await runningHook?.dispose()
       await retryHook?.dispose()
       await promptHook?.dispose()
+      await commandRegistration?.dispose()
       await exclusiveGate.dispose()
       if (refreshPromise) await refreshPromise.catch(() => {})
       if (reloadPromise) await reloadPromise

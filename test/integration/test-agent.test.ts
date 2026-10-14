@@ -17,9 +17,9 @@ async function fixtureConfig() {
     ...options,
     plans: { ...options.plans, "test-agent": fixture.models },
   })
-  const agentID = Object.entries(config.agents).find(([, plan]) => plan === "test-agent")?.[0]
-  assert.ok(agentID, "example binds an agent to the test plan")
-  return { config, fixture, agentID }
+  const agentIDs = Object.entries(config.agents).filter(([, plan]) => plan === "test-agent").map(([id]) => id)
+  assert.deepEqual(agentIDs, ["qm-test", "quartermaster-test"])
+  return { config, fixture, agentIDs }
 }
 
 function editorFor(agent: Record<string, unknown>): Pick<AgentEditor, "get" | "update"> {
@@ -29,15 +29,24 @@ function editorFor(agent: Record<string, unknown>): Pick<AgentEditor, "get" | "u
   } as unknown as Pick<AgentEditor, "get" | "update">
 }
 
-test("synthetic assignments select primary, backup, then recovered primary", async () => {
-  const { config, fixture, agentID } = await fixtureConfig()
+test("example keeps its primary agent and defines the required read-only subagent", async () => {
+  await fixtureConfig()
+  for (const [id, mode] of [["qm-test", "primary"], ["quartermaster-test", "subagent"]]) {
+    const definition = await readFile(new URL(`../../examples/test-agent/.opencode/agents/${id}.md`, import.meta.url), "utf8")
+    assert.match(definition, new RegExp(`^---\\r?\\ndescription: [^\\n]+\\r?\\nmode: ${mode}\\r?\\n`))
+    assert.match(definition, /\r?\npermissions:\r?\n  - action: "\*"\r?\n    resource: "\*"\r?\n    effect: deny\r?\n---\r?\n/)
+  }
+})
+
+test("synthetic assignments select primary, backup, then recovered primary for both agents", async () => {
+  const { config, fixture, agentIDs } = await fixtureConfig()
   const plan = config.plans["test-agent"]
   const registry = fixture.models.map((qualified: string) => {
     const [providerID, ...parts] = qualified.split("/")
     return { providerID, modelID: parts.join("/") }
   })
 
-  for (const assignment of fixture.assignments) {
+  for (const agentID of agentIDs) for (const assignment of fixture.assignments) {
     const agent = { id: agentID, model: undefined as unknown }
     const eligibility = new Map<string, ModelEligibility>(
       Object.entries(assignment.availability as Record<string, Availability>).map(([qualified, status]) => {
@@ -59,22 +68,22 @@ test("synthetic assignments select primary, backup, then recovered primary", asy
   }
 })
 
-test("unbound agent and explicit session model remain unchanged", async () => {
-  const { config, agentID } = await fixtureConfig()
+test("unbound agent stays unchanged and eligible pins apply to both test agents", async () => {
+  const { config, agentIDs } = await fixtureConfig()
   const agent = { id: "unbound-agent", model: { providerID: "host", id: "original" } }
-  const boundAgent = { id: agentID, model: undefined as unknown }
-  const sessionModel = { providerID: "user", id: "explicit-choice" }
   const eligibility = new Map<string, ModelEligibility>(
     config.plans["test-agent"].map((model) => [modelKey(model), { status: "available" }]),
   )
 
   applyAgentRouting(editorFor(agent), config, config.plans["test-agent"], eligibility, 0)
-  applyAgentRouting(
-    editorFor(boundAgent), config, config.plans["test-agent"], eligibility, 0,
-    new Map([[agentID, config.plans["test-agent"][1]]]),
-  )
+  for (const agentID of agentIDs) {
+    const boundAgent = { id: agentID, model: undefined as unknown }
+    applyAgentRouting(
+      editorFor(boundAgent), config, config.plans["test-agent"], eligibility, 0,
+      new Map([[agentID, config.plans["test-agent"][1]]]),
+    )
+    assert.deepEqual(boundAgent.model, { providerID: "fixture", id: "backup-model" })
+  }
 
   assert.deepEqual(agent.model, { providerID: "host", id: "original" })
-  assert.deepEqual(boundAgent.model, { providerID: "fixture", id: "backup-model" })
-  assert.deepEqual(sessionModel, { providerID: "user", id: "explicit-choice" })
 })

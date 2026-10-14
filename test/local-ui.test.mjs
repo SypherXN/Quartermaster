@@ -5,6 +5,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
 import { createLocalUiServer } from "../src/local-ui.mjs"
+import { fixtureConfiguration } from "./configuration-fixture.ts"
 
 const report = { apiVersion: 1, status: "ok", projectID: "project-a", generatedAt: 1, totals: {}, costs: {} }
 const plans = { apiVersion: 1, status: "unconfigured", plans: { review: ["provider/model"] }, agents: { reviewer: "review" }, workTypes: {}, sources: {} }
@@ -111,9 +112,18 @@ test("local gateway applies options only for its project", async (t) => {
 `
   await writeFile(join(root, "opencode.json"), text)
   await writeFile(join(other, "opencode.json"), text)
-  const upstream = createServer((_request, response) => {
+  let locationDirectory = root
+  let configReads = 0
+  const upstream = createServer(async (request, response) => {
     response.writeHead(200, { "content-type": "application/json" })
-    response.end(JSON.stringify(locationBody()))
+    if (new URL(request.url, "http://127.0.0.1").pathname === "/api/config") {
+      configReads += 1
+      assert.equal(request.headers.authorization, `Basic ${Buffer.from("opencode:token").toString("base64")}`)
+      assert.equal(new URL(request.url, "http://127.0.0.1").searchParams.get("location[directory]"), root)
+      response.end(JSON.stringify(await fixtureConfiguration(root)))
+    } else {
+      response.end(JSON.stringify({ directory: locationDirectory, project: { id: "project-a", directory: locationDirectory } }))
+    }
   })
   await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve))
   t.after(() => new Promise((resolve, reject) => upstream.close((error) => error ? reject(error) : resolve())))
@@ -158,6 +168,16 @@ test("local gateway applies options only for its project", async (t) => {
   })
   assert.equal(denied.status, 403)
   assert.equal(await readFile(join(root, "opencode.json"), "utf8"), before)
+  locationDirectory = other
+  const previousReads = configReads
+  assert.equal((await fetch(`${origin}/api/options`, { headers })).status, 409)
+  assert.equal((await fetch(`${origin}/api/options`, {
+    method: "POST", headers: { ...headers, "content-type": "application/json" },
+    body: JSON.stringify({ revision: current.revision, options: {} }),
+  })).status, 400)
+  assert.equal(configReads, previousReads, "wrong location never reaches configuration sources")
+  assert.equal(await readFile(join(root, "opencode.json"), "utf8"), before)
+  assert.equal(await readFile(join(other, "opencode.json"), "utf8"), text)
 })
 
 test("local gateway rejects non-loopback upstreams and unsupported routes", () => {

@@ -1,9 +1,26 @@
 import { copyFile, lstat, mkdir, readFile, realpath, rmdir, stat, writeFile as writeFileDefault } from "node:fs/promises"
+import { createHash } from "node:crypto"
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path"
 import { fileURLToPath } from "node:url"
+import { isDeepStrictEqual } from "node:util"
+import { OpenCode, type ConfigEntry } from "@opencode/client"
+import { Service } from "@opencode/client/service"
 import { parseConfig, type QuartermasterConfig } from "./config.ts"
 
-const configNames = ["opencode.json", "opencode.jsonc", ".opencode/opencode.json", ".opencode/opencode.jsonc"]
+export type ConfigurationReader = (directory: string) => Promise<readonly ConfigEntry[]>
+
+export const readNativeConfiguration: ConfigurationReader = async (directory) => {
+  const signal = AbortSignal.timeout(2_000)
+  const endpoint = await Service.discover()
+  if (!endpoint) throw new Error("Receiving server configuration provenance is unavailable")
+  const url = new URL(endpoint.url)
+  if (!["http:", "https:"].includes(url.protocol) || !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname) || url.username || url.password)
+    throw new Error("Receiving server configuration provenance is unavailable")
+  const client = OpenCode.make({ baseUrl: endpoint.url, headers: Service.headers(endpoint) })
+  const info = await client.server.info({ signal })
+  if (info.pid !== process.pid) throw new Error("Receiving server configuration provenance is unavailable")
+  return client.config.get({ location: { directory } }, { signal })
+}
 
 const blankComments = (text: string) => {
   let out = ""
@@ -25,7 +42,8 @@ const blankComments = (text: string) => {
       const start = index
       index += 2
       while (index < text.length && !text.startsWith("*/", index)) index += 1
-      index = Math.min(text.length, index + 2)
+      if (index >= text.length) throw new Error("Project config has an unterminated comment")
+      index += 2
       out += " ".repeat(index - start)
       continue
     }
@@ -33,6 +51,26 @@ const blankComments = (text: string) => {
     index += 1
   }
   return out
+}
+
+export const parseProjectConfig = (text: string) => {
+  const blanked = blankComments(text)
+  let normalized = ""
+  let previous = ""
+  for (let index = 0; index < blanked.length; index += 1) {
+    if (blanked[index] === "\"") {
+      const end = endString(blanked, index)
+      normalized += blanked.slice(index, end)
+      index = end - 1
+      previous = "\""
+    } else {
+      let next = index + 1
+      if (blanked[index] === ",") while (next < blanked.length && " \t\r\n".includes(blanked[next])) next += 1
+      normalized += blanked[index] === "," && previous && !"[{,:".includes(previous) && "}]".includes(blanked[next] ?? " ") ? " " : blanked[index]
+      if (!" \t\r\n".includes(blanked[index])) previous = blanked[index]
+    }
+  }
+  return JSON.parse(normalized) as unknown
 }
 
 const endString = (text: string, index: number) => {
@@ -174,7 +212,7 @@ const quartermasterRoot = (() => {
     let dir = dirname(fileURLToPath(import.meta.url))
     while (true) {
       const text = await readFile(resolve(dir, "package.json"), "utf8").catch(missing)
-      if (text !== undefined && (JSON.parse(text) as { name?: unknown }).name === "quartermaster") return realpath(dir)
+      if (text !== undefined && packageNames.includes((JSON.parse(text) as { name?: unknown }).name as string)) return realpath(dir)
       const parent = dirname(dir)
       if (parent === dir) throw new Error("Quartermaster package root not found")
       dir = parent
@@ -187,7 +225,8 @@ const localPackageSpec = (value: string) => {
   return spec.startsWith("file:") || spec.startsWith("./") || spec.startsWith("../") || spec.startsWith("/") || /^[A-Za-z]:\//.test(spec)
 }
 
-const namedPackage = (value: string) => value === "quartermaster" || value.startsWith("quartermaster@")
+const packageNames = ["opencode-quartermaster", "quartermaster"]
+const namedPackage = (value: string) => packageNames.some((name) => value === name || value.startsWith(`${name}@`))
 
 const githubPackage = (value: string) => {
   const spec = value.replace(/#.*$/, "").replace(/\.git$/, "")
@@ -210,7 +249,7 @@ const isThisPackage = async (value: string, configFile: string, root: string) =>
   let dir = info.isDirectory() ? resolved : dirname(resolved)
   while (insideDirectory(root, dir)) {
     const text = await readFile(resolve(dir, "package.json"), "utf8").catch(missing)
-    if (text !== undefined) return samePath(root, dir) && (JSON.parse(text) as { name?: unknown }).name === "quartermaster"
+    if (text !== undefined) return samePath(root, dir) && packageNames.includes((JSON.parse(text) as { name?: unknown }).name as string)
     if (samePath(root, dir)) return false
     const parent = dirname(dir)
     if (parent === dir) return false
@@ -219,26 +258,59 @@ const isThisPackage = async (value: string, configFile: string, root: string) =>
   return false
 }
 
-const candidates = async (directory: string) => {
+const effectiveEntry = async (directory: string, readConfiguration: ConfigurationReader) => {
   const root = await realpath(directory)
   const packageRoot = await quartermasterRoot()
-  const found: { path: string, text: string, span: { start: number, end: number } }[] = []
-  for (const name of configNames) {
-    const path = await containedPath(root, resolve(root, name))
-    if (path === undefined) continue
-    const text = await readFile(path, "utf8")
-    const blanked = blankComments(text)
-    JSON.parse(blanked)
-    const matches: { start: number, end: number, value: string }[] = []
-    for (const span of packageSpans(blanked)) {
-      if (await isThisPackage(span.value, path, packageRoot)) matches.push(span)
+  const sources = await readConfiguration(root)
+  if (!Array.isArray(sources)) throw new Error("Invalid configuration provenance")
+  let selected: { path?: string, options: unknown } | undefined
+  for (const source of sources) {
+    if (source.type === "directory") continue
+    if (source.type !== "document" || !source.info || typeof source.info !== "object")
+      throw new Error("Invalid configuration provenance")
+    if (source.path && insideDirectory(root, resolve(source.path))) {
+      const path = await containedPath(root, source.path)
+      if (!path) throw new Error("Project config changed; refusing to overwrite")
+      const text = await readFile(path, "utf8")
+      parseProjectConfig(text)
+      packageSpans(blankComments(text))
     }
-    for (const match of matches) {
-      const object = enclosingObject(blanked, match.start)
-      found.push({ path, text, span: optionsValueSpan(blanked, object.start, object.end) })
+    const plugins = source.info.plugins ?? []
+    if (!Array.isArray(plugins)) throw new Error("Invalid configuration provenance")
+    const matches: { options: unknown }[] = []
+    for (const plugin of plugins) {
+      const spec = typeof plugin === "string" ? plugin : plugin.package
+      if (typeof spec !== "string") throw new Error("Invalid configuration provenance")
+      if (!source.path && localPackageSpec(spec) && !isAbsolute(spec) && !spec.startsWith("file:"))
+        throw new Error("Relative plugin source has no configuration path")
+      if (await isThisPackage(spec, source.path ?? resolve(root, "opencode.json"), packageRoot))
+        matches.push({ options: typeof plugin === "string" ? {} : plugin.options ?? {} })
     }
+    if (matches.length > 1) throw new Error("Expected exactly one Quartermaster plugin entry per configuration document")
+    if (matches.length === 1) selected = { path: source.path, options: matches[0].options }
   }
-  return found
+  if (!selected) throw new Error("Expected exactly one project Quartermaster plugin entry")
+  const config = parseConfig(selected.options)
+  if (!selected.path) return { ...selected, config, revision: 0, writable: false }
+  // Inherited and virtual sources are readable, never writable through a project editor.
+  if (!insideDirectory(root, resolve(selected.path)))
+    return { ...selected, config, revision: 0, writable: false }
+  const path = await containedPath(root, selected.path)
+  if (!path) throw new Error("Project config changed; refusing to overwrite")
+  const text = await readFile(path, "utf8")
+  parseProjectConfig(text)
+  const blanked = blankComments(text)
+  const matches = []
+  for (const span of packageSpans(blanked)) {
+    if (await isThisPackage(span.value, path, packageRoot)) matches.push(span)
+  }
+  if (matches.length !== 1) throw new Error("Expected exactly one project Quartermaster plugin entry")
+  const object = enclosingObject(blanked, matches[0].start)
+  const span = optionsValueSpan(blanked, object.start, object.end)
+  if (!isDeepStrictEqual(parseProjectConfig(text.slice(span.start, span.end)), selected.options))
+    throw new Error("Project config changed; refusing to overwrite")
+  const revision = createHash("sha256").update(JSON.stringify([root, path, text])).digest().readUIntBE(0, 6)
+  return { path, text, span, options: selected.options, config, revision, writable: true }
 }
 
 const renderOptions = (text: string, span: { start: number, end: number }, options: unknown) => {
@@ -256,6 +328,7 @@ export async function applyProjectQuartermasterOptions(input: {
   options: unknown
   revision: number
   signal?: AbortSignal
+  readConfiguration?: ConfigurationReader
 }, io: { writeFile?: typeof writeFileDefault } = {}) {
   parseConfig(input.options)
   if (input.signal?.aborted) throw input.signal.reason ?? new DOMException("The operation was aborted", "AbortError")
@@ -267,15 +340,18 @@ export async function applyProjectQuartermasterOptions(input: {
     throw error
   })
   try {
-    const found = await candidates(root)
-    if (found.length !== 1) throw new Error("Expected exactly one project Quartermaster plugin entry")
-    const target = found[0]
-    const info = await stat(target.path)
-    if (info.mtimeMs !== input.revision) throw new Error("Project config changed; refusing to overwrite")
+    const readConfiguration = input.readConfiguration ?? readNativeConfiguration
+    const target = await effectiveEntry(root, readConfiguration)
+    if (!target.writable || !target.path || target.text === undefined || !target.span)
+      throw new Error("Effective Quartermaster options are outside the writable project configuration")
+    if (target.revision !== input.revision) throw new Error("Project config changed; refusing to overwrite")
     const next = renderOptions(target.text, target.span, input.options)
     const backup = (await containedPath(root, `${target.path}.quartermaster.bak`, true))!
     if (await containedPath(root, target.path) !== target.path) throw new Error("Project config changed; refusing to overwrite")
     await copyFile(target.path, backup)
+    const current = await effectiveEntry(root, readConfiguration)
+    if (!current.writable || current.path !== target.path || current.revision !== input.revision)
+      throw new Error("Project config changed; refusing to overwrite")
     try {
       if (input.signal?.aborted) throw input.signal.reason ?? new DOMException("The operation was aborted", "AbortError")
       if (await containedPath(root, target.path) !== target.path) throw new Error("Project config changed; refusing to overwrite")
@@ -293,18 +369,13 @@ export async function applyProjectQuartermasterOptions(input: {
   }
 }
 
-export async function readProjectQuartermasterOptions(directory: string) {
-  const found = await candidates(directory)
-  if (found.length !== 1) throw new Error("Expected exactly one project Quartermaster plugin entry")
-  const target = found[0]
-  const options = JSON.parse(blankComments(target.text).slice(target.span.start, target.span.end)) as unknown
-  const config = parseConfig(options)
-  const info = await stat(target.path)
-  return { path: target.path, revision: info.mtimeMs, options, config }
+export async function readProjectQuartermasterOptions(directory: string, readConfiguration: ConfigurationReader = readNativeConfiguration) {
+  const target = await effectiveEntry(directory, readConfiguration)
+  return { path: target.path, revision: target.revision, options: target.options, config: target.config, writable: target.writable }
 }
 
-export async function adoptProjectQuartermasterOptions(config: QuartermasterConfig, directory: string) {
-  const loaded = await readProjectQuartermasterOptions(directory)
+export async function adoptProjectQuartermasterOptions(config: QuartermasterConfig, directory: string, readConfiguration: ConfigurationReader = readNativeConfiguration) {
+  const loaded = await readProjectQuartermasterOptions(directory, readConfiguration)
   Object.assign(config, loaded.config)
   if (loaded.config.budgets === undefined) delete config.budgets
   if (loaded.config.tokenRates === undefined) delete config.tokenRates

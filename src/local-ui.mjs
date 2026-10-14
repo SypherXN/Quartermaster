@@ -67,6 +67,14 @@ export function createLocalUiServer({ openCodeURL, token, projectDirectory, port
     const body = await upstreamJSON(endpoint, { method: "POST", body: JSON.stringify({ input }) })
     return body?.output
   }
+  async function readConfiguration() {
+    await projectIDForDirectory()
+    const endpoint = new URL("/api/config", upstream)
+    endpoint.searchParams.set("location[directory]", directory)
+    const sources = await upstreamJSON(endpoint)
+    if (!Array.isArray(sources)) throw new Error("Configuration provenance is unavailable")
+    return sources
+  }
 
   let server
   server = createServer(async (req, res) => {
@@ -96,8 +104,8 @@ export function createLocalUiServer({ openCodeURL, token, projectDirectory, port
     }
     if (req.method === "GET" && req.url === "/api/options") {
       try {
-        const loaded = await readProjectQuartermasterOptions(directory)
-        send(res, 200, { revision: loaded.revision, options: loaded.options })
+        const loaded = await readProjectQuartermasterOptions(directory, readConfiguration)
+        send(res, 200, { revision: loaded.revision, options: loaded.options, writable: loaded.writable })
       } catch (error) {
         send(res, 409, { error: error instanceof Error ? error.message : "options" })
       }
@@ -115,8 +123,8 @@ export function createLocalUiServer({ openCodeURL, token, projectDirectory, port
         const body = JSON.parse(Buffer.concat(chunks).toString())
         if (!body || typeof body !== "object" || Array.isArray(body) || typeof body.revision !== "number" || !body.options || typeof body.options !== "object" || Array.isArray(body.options))
           return send(res, 400, { error: "expected options and revision" })
-        await applyProjectQuartermasterOptions({ directory, options: body.options, revision: body.revision })
-        const loaded = await readProjectQuartermasterOptions(directory)
+        await applyProjectQuartermasterOptions({ directory, options: body.options, revision: body.revision, readConfiguration })
+        const loaded = await readProjectQuartermasterOptions(directory, readConfiguration)
         send(res, 200, { revision: loaded.revision, options: loaded.options })
       } catch (error) {
         const message = error instanceof Error ? error.message : "options"

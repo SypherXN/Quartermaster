@@ -4,9 +4,9 @@ Quartermaster exposes model routing through the OpenCode V2 plugin RPC
 boundary. Consumers should use this RPC, not import Quartermaster internals
 or read its private state.
 
-The canonical descriptor and helper are exported from `quartermaster/rpc`.
-Install Quartermaster from `github:SypherXN/quartermaster` or from a local
-checkout, then import that same installed copy.
+The canonical descriptor and helper are exported from `opencode-quartermaster/rpc`.
+Install the versioned local archive (see the README), then import that same
+installed copy. The package is not published; checkout installs need a build.
 
 ## Assignment-time selection
 
@@ -15,7 +15,7 @@ synchronous transform. Cache the result and apply it in the transform; never
 await RPC inside the callback.
 
 ```ts
-import { requestSelection } from 'quartermaster/rpc'
+import { requestSelection } from 'opencode-quartermaster/rpc'
 
 const result = await requestSelection(ctx, { agent: 'reviewer' })
 await ctx.agent.transform((draft) => {
@@ -44,7 +44,7 @@ options and a revision, not filesystem or backup paths.
 
 | Method | Success response |
 | --- | --- |
-| `readOptions({})` | `apiVersion: 1`, `status: "ok"`, `options`, numeric `revision` |
+| `readOptions({})` | `apiVersion: 1`, `status: "ok"`, effective `options`, opaque numeric `revision`, `writable` |
 | `applyOptions({ options, revision })` | `apiVersion: 1`, `status: "saved"`, persisted `options`, updated numeric `revision` |
 
 Read before editing and pass the returned revision unchanged. `options` is the
@@ -52,22 +52,41 @@ complete replacement Quartermaster options object, not a partial patch. Preserve
 settings the editor does not change. Authorized V2 plugin callers use
 `ctx.rpc(QUARTERMASTER_RPC)` for both methods.
 
-The reader and writer require exactly one matching project Quartermaster entry
-across `opencode.json`, `opencode.jsonc`, `.opencode/opencode.json`, and
-`.opencode/opencode.jsonc` in that directory. A match is the package name
-`quartermaster` with an optional `@version`, `github:SypherXN/quartermaster`
+When receiving-server provenance is available, the reader consumes OpenCode's
+ordered `GET /api/config` documents, from lowest to highest priority. The last
+matching declaration replaces the complete lower-priority options object;
+matches in different documents are normal overrides. Multiple matching entries
+in one document fail closed. A match is the package name
+`opencode-quartermaster` with an optional `@version` (legacy `quartermaster` entries
+are still recognized for existing configs, not a recommendation to install that npm name), `github:SypherXN/quartermaster`
 with an optional `#ref` or `.git` suffix, that same repository as an
 `https://github.com/` or `git+https://github.com/` URL, or a `file:`, relative,
 or absolute path that resolves to this install. Another name or path is left
-unchanged, including one that only contains that word. They do not edit global or ancestor
-configuration. The writer validates options, checks the file revision, creates a
+unchanged, including one that only contains that word. An effective global,
+ancestor or pathless inline declaration is readable with `writable: false` and
+revision zero, but cannot be edited through the project writer. Only a winning
+document contained in the bound project directory with an existing `options`
+object is writable; the editor does not insert plugin entries or options. The writer
+validates options, checks an opaque content-and-path revision, creates a
 `.quartermaster.bak` backup, and replaces only the entry's `options` object,
-preserving unrelated configuration and JSONC comments outside that object.
+preserving unrelated configuration, comments and JSONC trailing commas outside
+that object. Pass the revision unchanged; it is not a timestamp.
 
-The writer searches only the four named config files directly inside the
-plugin's project directory; it does not resolve OpenCode's ancestor/global
-effective configuration chain. It parses comments but currently rejects valid
-JSONC trailing commas. The project root and existing configuration paths are
+At plugin startup, Quartermaster first parses OpenCode's resolved plugin options,
+then adopts the winning native declaration when its provenance is available.
+This is complete options replacement, not a key-by-key merge with global
+options. Invalid or unavailable provenance, no matching declaration or ambiguous
+entries in one document leave startup's host-supplied options unchanged. A
+different project may resolve a different declaration.
+
+The gateway uses its existing authenticated connection and validates its fixed
+directory before requesting native configuration sources. In the plugin, normal
+SDK service discovery never starts a server, and `/api/info` must identify this
+process's PID before configuration is read. Unregistered services, a different
+PID or unavailable provenance make editing unavailable; there is no filesystem
+guess or substitute server. These paths have disposable-file and authenticated
+loopback tests, not a new live-host certification. The project root and existing
+configuration paths are
 filesystem-resolved before reading. Config and backup targets must remain inside that resolved root;
 escaping junctions/symlinks and unresolvable file links fail closed. Contained
 links are allowed, but multiply hard-linked files are rejected because their
@@ -98,10 +117,12 @@ failure. Cancellation after a completed write does not undo the saved options.
 The plugin rereads project options before prompt-time assignment and selection
 operations; saving does not change an active session model. Pins are revalidated
 after project-option adoption and provider-registry refresh. This is not a full
-runtime reload: budget/report dependencies, local health settings, cooldown
-duration, exclusive-model hooks, and startup registration decisions retain
-their initial values. Restart the plugin after changing these settings; binding
-changes are applied at the next prompt-time assignment, not to an active turn.
+runtime reload: budget/report dependencies, exclusive-model hooks and startup
+registration decisions retain their initial values. Local health settings and
+cooldown duration refresh during option adoption, but structural changes can
+still require a plugin restart. Binding changes take effect at the next
+prompt-time assignment when the required hooks are already registered, not in
+an active turn.
 
 RPC calls do not carry an authenticated caller identity. Directory binding and a
 supplied project ID are not write authorization; the calling host must authorize
@@ -157,36 +178,44 @@ create a model-switch loop. Use `apiVersion` for protocol compatibility and
 
 ## Native same-prompt retry fallback
 
-Quartermaster's retry-hook routing is verified with OpenCode **2.0.23** and
-`@opencode/plugin` **2.0.23**. Re-run
+The following isolated retry matrix is historical OpenCode **2.0.24** evidence,
+not certification of a new archive. The current package pins `@opencode/plugin`
+**2.0.23**; stock managed OpenCode **2.0.26** request/UI proof also passed (#43).
+Use the exact installed artifact and [deployment gate](DEPLOYMENT.md) for release
+claims. For the historical matrix, run
 `node scripts/verify-retry-host-contract.mjs` when changing either version; the
-loopback fake-provider check observes actual requests and does not contact a
-configured or paid provider. Run it with `--exhausted` to make every candidate
-fail; on 2.0.23 the checked trace is two primary requests followed by ten
-fallback requests, then the host reports failure. Both modes assert no extra
-prompt or tool call. The host remains responsible for whether a retry is
-allowed, its delay, and its attempt ceiling. Quartermaster switches only for a
-still-approved retry correlated to a bound agent's primary request, and keeps
-each attempted model out of the current execution's remaining plan.
+loopback fake-provider fixture never contacts a configured or paid provider.
+Rate-limit is the default; `--failure=internal` and `--failure=transport` prove
+additional safe failures reach the backup in the original prompt. Auth, quota,
+missing-model, and context-overflow modes prove no model switch (the host may
+retry the same model). `--exhausted` verifies two primary requests followed by
+ten fallback requests before host failure. The fixture checks bounded attempts,
+the original prompt, and zero tool calls. The host owns retry approval, delay,
+and its attempt ceiling. Quartermaster never changes `decision.retry` or delay;
+it switches only for a host-approved retry with an explicitly safe structured
+failure correlated to a bound agent's primary request, and excludes attempted
+models from the remaining plan.
 
-Retry classification uses structured HTTP status, not provider error text:
-429 applies a model-scoped temporary rate limit, 5xx a provider outage, and
-other statuses a model outage. If there is no eligible unattempted candidate,
-or switching to one fails, Quartermaster does not alter the host retry decision
-or delay. If the fallback also fails, it is not revisited during that execution;
-the host ends the request after its native attempts. Cooldowns and later
-availability updates affect future assignments, allowing the primary to be
-selected after recovery.
+Routing classification uses structured type/status only; it ignores messages
+and response bodies and does not persist raw errors. Rate limits (429) create a
+model-scoped temporary cooldown. Retry-approved internal/transport and 408,
+409, or 5xx outage signals may switch to an eligible backup. Confirmed quota,
+auth, and permission errors do not create outage cooldowns or switch models.
+Missing-model/no-route errors may cool down that model for later assignments
+but remain terminal in the current execution. Context overflow, content
+filtering, unsupported operations, invalid output, timeouts, and unknown errors
+remain terminal. Failure cooldowns and recovered availability affect only a
+later assignment; a failed fallback is never retried again in that execution.
 
-This supports clean pre-output retries only. In OpenCode 2.0.23 a failure after
-partial output follows continuation semantics rather than the clean retry
-hook; Quartermaster does not roll back output or switch models mid-response.
-The host check uses a prompt with no tools and does not establish exactly-once
-tool execution. Other plugins can also hook retry. Quartermaster reads the
-decision as it exists when its hook runs and does not force a retry, but hook
-ordering or another plugin changing the decision afterward is not covered by
-the host smoke test. See the isolated [`qm-test` procedure](../examples/test-agent/README.md)
-for an optional provider smoke and its safety boundaries.
+Only clean pre-output retries are fallback evidence. Partial-output continuation
+is separate: Quartermaster does not roll back output or switch mid-response.
+The managed 2.0.26 proof verifies an automatic same-model continuation after one
+completed read, without replaying that tool. This is a tested scenario, not a
+universal exactly-once guarantee. Other plugins can hook retry: Quartermaster observes the
+decision when its hook runs and never overrides a veto, but cross-plugin hook
+ordering or later decision changes are not covered. See the isolated
+[`qm-test` procedure](../examples/test-agent/README.md) for optional provider
+smoke guidance and safety boundaries.
 
 ## Optional RPC methods
 
