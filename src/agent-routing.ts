@@ -395,24 +395,21 @@ export async function registerAgentRouting(
 
   const assignPrompt = async (sessionID: string) => {
     if (running.has(sessionID) || !ctx.session?.get || !ctx.session.switchModel) return
-    await ensureProjectOptions()
-    await refresh()
     let view: ReturnType<typeof sessionView>
     try {
       view = sessionView(await ctx.session.get({ sessionID } as never))
     } catch {
-      leases.releaseReservation(sessionID)
-      throw new Error("Quartermaster could not read session ownership before provider admission")
-    }
-    const agentID = view.agent
-    if (!agentID) {
-      leases.releaseReservation(sessionID)
-      throw new Error("Quartermaster could not read session ownership before provider admission")
-    }
-    if (!Object.hasOwn(config.agents, agentID)) {
-      await clearOwnership(sessionID)
+      // An unreadable session cannot be shown to use a configured agent.
       return
     }
+    const agentID = view.agent
+    if (!agentID || !Object.hasOwn(config.agents, agentID)) {
+      if (agentID) await clearOwnership(sessionID)
+      leases.releaseReservation(sessionID)
+      return
+    }
+    await ensureProjectOptions()
+    await refresh()
     let ownership: { mode?: unknown; agent?: unknown } | undefined
     try {
       ownership = await ctx.storage.get(ownershipKey(sessionID)) as typeof ownership

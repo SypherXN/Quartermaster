@@ -981,6 +981,8 @@ test("default automatic admission rejects a failed switch and releases its exclu
     ["failed", { agent: "reviewer", model: { providerID: "composer", id: "default" } }],
     ["noop", { agent: "reviewer", model: { providerID: "composer", id: "default" } }],
     ["unread", { agent: "reviewer", model: { providerID: "composer", id: "default" } }],
+    ["other", { agent: "builder", model: { providerID: "composer", id: "default" } }],
+    ["blank", { model: { providerID: "composer", id: "default" } }],
     ["confirm-unread", { agent: "reviewer", model: { providerID: "composer", id: "default" } }],
     ["next", { agent: "reviewer", model: { providerID: "composer", id: "default" } }],
   ])
@@ -1016,7 +1018,12 @@ test("default automatic admission rejects a failed switch and releases its exclu
 
   await assert.rejects(hooks[0]({ sessionID: "failed" }), /could not confirm its model switch/)
   await assert.rejects(hooks[0]({ sessionID: "noop" }), /could not confirm its model switch/)
-  await assert.rejects(hooks[0]({ sessionID: "unread" }), /could not read session ownership/)
+  await hooks[0]({ sessionID: "unread" })
+  await hooks[0]({ sessionID: "other" })
+  await hooks[0]({ sessionID: "blank" })
+  assert.deepEqual(sessions.get("unread")?.model, { providerID: "composer", id: "default" }, "an unreadable session is left untouched")
+  assert.deepEqual(sessions.get("other")?.model, { providerID: "composer", id: "default" }, "an agent without a Quartermaster binding is left untouched")
+  assert.deepEqual(sessions.get("blank")?.model, { providerID: "composer", id: "default" }, "a session with no agent is left untouched")
   await assert.rejects(hooks[0]({ sessionID: "confirm-unread" }), /could not confirm its model switch/)
   await hooks[0]({ sessionID: "next" })
   assert.deepEqual(sessions.get("next")?.model, { providerID: "provider-a", id: "primary" }, "failed admission releases the exclusive reservation")

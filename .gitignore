@@ -22,3 +22,6 @@ Thumbs.db
 .openchamber/
 opencode-usage.json
 *.bak
+
+# Personal setup notes
+/local/
