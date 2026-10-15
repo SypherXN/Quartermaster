@@ -6,14 +6,14 @@ billing or complete event capture.
 
 ## Verified host contract
 
-The lockfile resolves `@opencode/plugin`, `@opencode/client`, and
-`@opencode/schema` to **2.0.23**. The manifest uses `latest`, so this records
-the locked schema, not a runtime version gate; reverify upgrades. The upstream
+The manifest pins `@opencode/plugin` and `@opencode/client` to **2.0.23**.
+The lockfile also resolves `@opencode/schema` to **2.0.23**. This records
+the locked schema, not a runtime host version gate; reverify upgrades. The upstream
 event/server source links below were reviewed against OpenCode tag
 [`v2.0.18`](https://github.com/anomalyco/opencode/tree/v2.0.18) and are retained
 as historical source references, not a claim that the current host runs that tag.
-Telemetry tests use the locked 2.0.23 types and synthetic events. The cited source commit is
-commit [`cd9a14a6b688d4021bee381dfd39d2cef9c0f862`](https://github.com/anomalyco/opencode/commit/cd9a14a6b688d4021bee381dfd39d2cef9c0f862):
+Telemetry tests use the locked 2.0.23 types and synthetic events. The cited source
+commit is [`cd9a14a6b688d4021bee381dfd39d2cef9c0f862`](https://github.com/anomalyco/opencode/commit/cd9a14a6b688d4021bee381dfd39d2cef9c0f862):
 
 - [`session-event.ts`](https://github.com/anomalyco/opencode/blob/v2.0.18/packages/schema/src/session-event.ts)
   defines step, retry, and compaction events.
@@ -39,7 +39,8 @@ absent or incomplete counts are **missing**, never zero-filled.
 `src/telemetry/types.ts` projects only terminal step events into a whitelisted
 record. Stable identity is the host event ID; repeated delivery within one
 batch yields one record. Different step IDs remain separate even when they
-share a message ID. Persistent deduplication and restart recovery are #21.
+share a message ID. The ledger below keeps one row per host event ID across
+plugin restarts, within its retention limits.
 
 - Count a complete step token object once. Failed steps without counts remain
   `counts: null` and `usageStatus: "missing"`.
@@ -128,7 +129,8 @@ model filtering; it does not change routing cooldown behavior.
 
 ## Reporting RPC
 
-The additive V1 `report` method and `requestReport` helper return a bounded
+The `report` method and `requestReport` helper use Quartermaster API version 1
+on OpenCode V2; this is not the legacy OpenCode V1 API. They return a bounded
 project report. The project is always the plugin's active host project context;
 the caller cannot supply ownership. Requesting a different `projectID` returns
 `unsupported` (`cross-project-authorization-unavailable`). The V2 plugin RPC
@@ -175,7 +177,7 @@ provider polling. Rates are current user-configured values, so the report's
 
 ### Opt-in plugin attribution
 
-Cooperating plugins may opt in through the additive V1 `reportPluginUsage` RPC
+Cooperating plugins may opt in through the API-version-1 `reportPluginUsage` RPC
 and submit a stable self-reported `pluginID`, display `pluginName`, and 1–100
 host `sessionIDs` (include child sessions when applicable):
 

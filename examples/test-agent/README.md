@@ -2,6 +2,21 @@
 
 This isolated OpenCode project loads the local Quartermaster package, the read-only `quartermaster-test` subagent, and the existing `qm-test` primary agent. Both bind to the same two-candidate plan: `ninfer/qwen3.8-27b` first, then `opencode/space-bunny-free`.
 
+## Prepare the checkout
+
+This example loads the repository root, whose entrypoint needs compiled output.
+From the repository root, run:
+
+```sh
+npm ci
+npm run build
+```
+
+Then open `examples/test-agent` as the project. The example is not included in
+the install archive. Its provider/model IDs are examples, not guaranteed host
+registrations: check the receiving host's enabled models and adapt this isolated
+config before a live test. Do not change global config or unrelated providers.
+
 The project also probes `http://127.0.0.1:8080/v1/models` for the `ninfer`
 provider. When that loopback endpoint is offline, Quartermaster skips Qwen and
 selects Space Bunny before the primary request; when it comes back, Qwen is
@@ -49,8 +64,8 @@ unconfigured until this project's `usageSources` map selects them.
 If a test agent exists but explanation returns `no-plan`, compare its agent binding
 and plan names in this project's Quartermaster options. Project options replace
 the host/global Quartermaster options rather than merging key-by-key: this
-example binds both `qm-test` and `quartermaster-test` to `test-agent`, while the repository root binds
-`reviewer` to `review`. Bound agents route automatically by default. Use
+example binds both `qm-test` and `quartermaster-test` to `test-agent`.
+Bound agents route automatically by default. Use
 `/qm-manual` before deliberate model or variant changes; use `/qm-auto` to
 resume routing. The stock host does not reliably expose same-model reselection
 provenance, so an inherited or pre-first-prompt choice may be replaced. The
@@ -66,7 +81,13 @@ From the repository root, run the tracked admission check:
 node scripts/verify-admission-host-contract.mjs
 ```
 
-It uses a private OpenCode 2.0.25 server and loopback fake providers to start a bound session on an out-of-plan default and verify that the first primary request uses the Quartermaster model without an opt-in command. It forks that session and repeats the admission check for a bound child session. A separate `/qm-manual` session verifies the host model is preserved. It then marks the planned local provider unhealthy and verifies the automatically routed prompt is rejected with no primary request to the displaced default. It sends no external inference. This proves the stock OpenCode server hook path, not the authenticated OpenChamber UI, queued turns, or global configuration.
+Build the checkout first. The script requires an installed OpenCode 2.0.25,
+2.0.26, or 2.0.27 binary and records the actual version. It starts and stops its
+own loopback fake providers, testing first-prompt routing from an out-of-plan
+default, child sessions, later idle turns, agent changes, manual opt-out/resume
+and no-eligible rejection. It sends no external inference. This verifies the
+isolated stock server hook path—not OpenChamber UI, queued execution ordering
+or the user's global configuration.
 
 The same check verifies `/qm-status` queues its diagnostic without waking execution, and `quartermaster.diagnoseSession` returns immediate output without queuing, changing the model, probing health or sending any provider request. Stock command output stays in the inbox until later normal delivery; it is not immediate visible chat output. Initial cached diagnostics can report `not-in-registry` before provider registration; the fixture also verifies the recommendation after normal admission refreshes that cache. Actual OpenChamber command/UI proof remains separate.
 
@@ -84,7 +105,10 @@ To verify the host's retry ceiling when every candidate fails, also run:
 node scripts/verify-retry-host-contract.mjs --exhausted
 ```
 
-This expected-failure case asserts OpenCode exits after exactly 12 provider attempts (`primary → primary → fallback` ten times), with no new prompt or tool calls. The script itself exits successfully only when that bounded failure is observed; it contacts only the loopback fake provider.
+This expected-failure case asserts exactly 12 provider attempts: two to the
+primary, then ten to the fallback, with no new prompt or tool calls. The script
+exits successfully only when that bounded host failure is observed; it contacts
+only the loopback fake provider.
 
 ## Optional live `qm-test` smoke
 
@@ -94,12 +118,29 @@ Only run this if you are authorized to use both configured providers. It can sen
 opencode run --print-logs --log-level debug --agent qm-test "Reply with a short acknowledgment."
 ```
 
-If your NInfer service exposes request logs, inspect them along with OpenCode's logs to verify the actual provider/model requests; do not infer them from the agent catalog or answer text. To exercise failover, stop the NInfer endpoint while leaving its model enabled in the catalog, then submit one prompt and inspect whether OpenCode reports a retry and whether the same run reaches Space Bunny. Stopping the endpoint tests a provider failure; it does not disable Qwen or force the host to retry. Restore the endpoint afterward and allow its health/cooldown state to recover before testing Qwen again.
+Inspect provider and OpenCode request logs for serving identity; the catalog and
+answer text are not sufficient. If you are authorized to stop a test-owned
+NInfer endpoint **before** a prompt, the configured health check should select
+the backup before any primary send. That tests admission, not same-prompt retry.
+Restore only the endpoint you own and allow health/cooldown state to recover.
+Use the controlled retry fixture above to test failures after admission.
 
-Disabling `providers.ninfer.models["qwen3.8-27b"].disabled` in this isolated `opencode.json` is a different test: it removes Qwen from eligibility, so Quartermaster may assign Space Bunny immediately and there is no failed-primary retry to observe. Restore the field to `false` or remove it after that check. These edits affect only this example, never global config.
+A candidate missing from the receiving host's enabled registry is also skipped
+before sending. That is a selection test, not evidence of a failed-primary retry.
 
 ## Retry boundaries
 
-The controlled host proof establishes fallback for an OpenCode-approved clean retry before any response output. Quartermaster correlates the retry to a primary model request, records a cooldown for the failed model on HTTP 429, for the provider on HTTP 5xx, and otherwise for the failed model; it does not change OpenCode's retry decision, delay, or attempt limit. If no eligible unattempted plan candidate exists, it leaves the current host retry alone. A fallback that also fails is not cycled back to an already attempted model; OpenCode ultimately reports the failure when its native retries end. Cooldowns and model availability affect later executions, so after recovery a later prompt can select Qwen again.
+The controlled fixture proves fallback for an OpenCode-approved clean retry
+before output. Quartermaster correlates it to a bound primary request and uses
+structured failure types/statuses—not error text. Rate limits create model
+cooldowns; safe outage signals create provider cooldowns. Auth, quota and unsafe
+or unknown failures do not trigger backup selection. See the
+[classification and retry contract](../../docs/PLUGIN_INTEGRATION.md#native-same-prompt-retry-fallback).
+
+Quartermaster never changes native retry approval, delay or attempt limits. It
+does not select an already attempted provider/model again, but OpenCode may
+retry the current model. With no eligible unattempted backup, native retry
+policy continues unchanged. After recovery, a later idle prompt can select the
+primary again.
 
 OpenCode's partial-output continuation is distinct from a clean retry and is not switched mid-response. This does not roll back emitted text or guarantee exactly-once tool execution. Other plugins may also observe or modify retry decisions; Quartermaster only routes when the decision is still retryable when its hook runs, and hook ordering with other decision-changing plugins is not guaranteed by this smoke test. The automated unit/integration tests cover cancellation/denial, auxiliary and unbound routing boundaries, exhausted candidates, exclusive concurrency, switch failures, and recovery; label those as simulated tests, not live-provider evidence.

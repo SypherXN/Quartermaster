@@ -4,6 +4,9 @@ Budgets are opt-in Quartermaster configuration for warnings about observed
 token usage over rolling or calendar windows. They do not filter or reorder
 models, enforce a hard cap, or switch the active session model.
 
+These examples are Quartermaster plugin `options`, not complete OpenCode
+configuration files. Merge them into the existing options object.
+
 ```json
 {
   "budgets": [
@@ -44,13 +47,13 @@ exactly. Rows that could belong to the budget but lack required attribution,
 or have missing counts, increment `unknownRecords` instead of being guessed
 into or out of the total.
 
-Current telemetry can associate some events with a host project, but provider
-and model ownership is not reliably linked to each request, and plugin
-ownership is not recorded. Project is the only currently supported budget
-dimension when its project ID is known. Provider/model/plugin dimensions are
-accepted for forward-compatible configuration but are currently unverified;
-their ownership stays unknown, and a configured target does not create
-attribution evidence. Unknown project IDs likewise remain unknown. The live
+Current telemetry can associate some events with a host project, but the
+collector cannot reliably link provider/model identity to each step. It also
+has no verified plugin ownership: stored self-reported plugin claims are for
+reporting only and never count toward budgets. Project is the only currently
+supported budget dimension when its project ID is known. Provider/model/plugin
+targets are accepted configuration, not attribution evidence. Unknown project
+IDs likewise remain unknown. The live
 event stream has no replay/completeness watermark, so readings always report
 `complete: false`.
 `remainingTokens` is always `null`; `limitReached` is true only when the
@@ -101,10 +104,9 @@ model total:
 }
 ```
 
-Plugin budgets are also accepted by the parser but unsupported by current
-telemetry because plugin ownership is not recorded; their usage remains
-unknown. Do not interpret either configured target as evidence that its
-dimension is currently attributable.
+Plugin budgets are also accepted but unsupported: self-reported plugin claims
+do not establish verified ownership, so their usage remains unknown. A
+configured target does not make its dimension attributable.
 
 With no `budgets` configured, evaluation returns no readings and routing is
 unchanged. Invalid dimensions, targets, duplicate IDs, non-positive windows,

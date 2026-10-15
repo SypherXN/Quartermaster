@@ -49,9 +49,9 @@ permissions, MCPs, agents and plugins; merge an entry, not a whole config file.
   `~/.config/opencode/opencode.json(c)` (or its configured XDG location). Use the
   installed relative/absolute destination path, never a maintainer checkout.
   Do not also enable an autoloaded copy.
-- Project Quartermaster options replace global Quartermaster options **as a
-  whole**, not per field: repeat required plans, bindings and maps. Keep one
-  matching entry per document; ambiguous project duplicates fail closed.
+- The highest-priority Quartermaster declaration replaces lower-priority options
+  **as a whole**, not per field. Repeat required plans, bindings and maps. Keep
+  one matching entry per document; ambiguous duplicates fail closed.
 - Native discovery searches ancestors and applies `.opencode` layers after
   direct files. The current source options writer consumes the receiving
   server's ordered native documents rather than guessing that order. It accepts
@@ -85,8 +85,10 @@ markers, not working fixture providers.
 This is a project-root example, not a replacement for an existing config. Bound
 agents route automatically before the first provider request and on later idle
 prompts. `/qm-manual` preserves that session/agent's deliberate model and variant;
-`/qm-auto` resumes routing. Unbound agents and auxiliary requests are untouched.
-No eligible candidate or an unconfirmed switch rejects automatic admission.
+`/qm-auto` resumes routing. Unbound agents keep their host-selected model, and
+auxiliary requests are not routed. If `exclusiveModels` is configured, its lease
+gate still applies to listed primary requests, including manual and unbound
+ones. No eligible candidate or an unconfirmed switch rejects automatic admission.
 
 Usage integration is optional. Map actual provider IDs with `usageSources` only
 after verifying `opencode-usage.status({})`: `opencode-go -> go`, OAuth
@@ -117,10 +119,10 @@ recover credentials or bypass authentication.
 
 Keep the old archive/hash and exact config backup. Install the chosen replacement
 archive with the same npm flags/path, preserving unrelated settings and files.
-Then verify imports and the receiving runtime. Plans/bindings can be adopted at
-idle boundaries, but startup-built services (health, quota, cooldown, exclusivity,
-reporting and auxiliary reviewer configuration) may require an **authorized**
-reload of that receiving runtime. Do not restart live servers merely to test.
+Then verify imports and the receiving runtime. Existing routing hooks can adopt
+plans and bindings at idle boundaries. Changes to startup-built services or hook
+registration, such as budgets, reporting or exclusivity, may require an
+**authorized** reload. Do not restart live servers merely to test.
 The current source options-save RPC resolves native precedence when provenance
 is available and backs up only its writable winning project file. Roll back the archive and only changed plugin
 entry/options, not somebody else's later edits. Verify the reloaded instance.
@@ -153,7 +155,7 @@ reselection regression deliberately fails; do not count it as a passing gate.
 
 Queued execution cannot transparently reselect on stock 2.0.26. An eligible
 captured model may persist; an ineligible automatic request rejects before
-sending and must be resent while idle. This is the accepted #42 limitation,
+sending and must be resent while idle. This is the accepted queued-model limitation,
 not reselection support. Failed 429 attempts have no separate completed UI row;
 the wire trace is authoritative. Exhaustion can show a generic stopped-turn
 message; native failed-idle history supplies the outcome. Do not infer serving

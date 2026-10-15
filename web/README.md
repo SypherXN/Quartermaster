@@ -1,19 +1,79 @@
 # Opt-in local tools
 
-## Live report gateway
+These tools require a repository checkout; they are not included in the installed
+plugin archive and do not start with the plugin.
 
-#16 is completed. Offline report import still works. The separately started gateway reads the configured project's plans, availability, and read-only `quartermaster/report` result. It does not follow active-project switches.
+## Reports and local gateway
 
-From the project root, set `OPENCODE_URL` to the local OpenCode server URL (for example `http://127.0.0.1:4096`), `OPENCODE_TOKEN` to its local-service password, and `QUARTERMASTER_PROJECT_DIR` to the intended project directory. Then run `npm run local-ui` and open the printed `http://127.0.0.1:4175/` URL. Override the port with `QUARTERMASTER_LOCAL_UI_PORT` if needed. Stop the process when finished.
+Open `index.html` to import a saved report without a server. For live reports and
+explicit configuration editing, start the local gateway instead. It stays bound
+to one configured project; it does not follow active-project switches.
 
-The gateway binds only to IPv4 loopback, rejects non-loopback upstream URLs, keeps credentials in the server process, and sends them as Basic `opencode:<token>` auth. It resolves the configured directory to a project id and rejects a report for a different project. It exposes fixed report and project-options load/apply routes, not a general proxy. Other local processes or users can access these loopback reads and writes; use only on a trusted machine, do not forward the port, and do not put credentials in the browser or shared shell history. Reports and options are sensitive. The browser does not write files directly; explicit Apply uses the server-side writer and does not mutate active sessions or models.
+From the repository root, configure these environment variables:
 
-The assignment editor disables its fields and Load, Apply and Cancel buttons while loading or saving. Cancel discards unsaved edits only when the editor is idle; it does not cancel a submitted Apply request. Controls are restored after either success or failure, and a failed Apply leaves the draft available to review or discard.
+| Variable | Value |
+| --- | --- |
+| `OPENCODE_URL` | Existing server URL using `127.0.0.1`, such as `http://127.0.0.1:4096` |
+| `OPENCODE_TOKEN` | That server's local-service password; keep it out of shared history |
+| `QUARTERMASTER_PROJECT_DIR` | Absolute directory of the intended project |
+| `QUARTERMASTER_LOCAL_UI_PORT` | Optional gateway port; defaults to `4175` |
+
+Run `npm run local-ui`, open the printed loopback URL, and choose **Load live
+report**. Stop the gateway when finished. It does not start an OpenCode server.
+
+The gateway listens on IPv4 loopback and accepts only a `127.0.0.1` upstream. It
+keeps credentials server-side, using Basic `opencode:<token>` authentication.
+It validates the fixed directory's project ID and rejects mismatched reports.
+Its routes are limited to reports and project-options load/apply, not arbitrary
+proxy requests.
+
+**Use only on a trusted machine.** Other local processes or users can access
+these reads and writes. Do not forward the port or put credentials in the
+browser. Reports and options are sensitive. Reports are read-only, but explicit
+**Apply** can write project configuration through the server-side writer; it
+does not switch active session models.
+
+## Live options editing
+
+Choose **Load project options**, edit the returned options, then choose
+**Apply project options** to save.
+Fields and Load, Apply and Cancel buttons are disabled during loading or saving.
+Cancel discards idle, unsaved edits; it cannot cancel a submitted Apply request.
+Controls return after success or failure, and a failed Apply keeps the draft for
+review or discard.
+
+### Options safety
+
+OpenCode's ordered configuration documents determine the winning options object.
+Global, ancestor and pathless inline winners are readable but not writable here.
+Apply requires an existing project-contained winning entry. Missing provenance
+or ambiguous declarations stop the save; the writer does not guess a file.
+
+The shared writer validates Quartermaster options, checks the returned revision,
+backs up to `.quartermaster.bak`, and replaces only `plugins[].options`. Unrelated
+settings and comments outside that object are preserved. Stale content, changed
+effective sources, duplicate keys, escaping links and invalid options fail closed.
+Saved options are reread for later routing/selection. Changes to startup services
+or hooks may require an authorized restart; Apply itself does not restart a host.
 
 ## Offline config draft
 
-`config.html` remains an offline syntax-only JSON draft exporter. It does not run Quartermaster semantic validation, preserve JSONC comments, resolve OpenCode config precedence, or apply changes. Review and manually merge drafts into the intended project-owned plugin options, validate through OpenCode, and keep a backup. Do not paste secrets into the page.
+`config.html` only checks JSON syntax and exports a draft. It does not validate
+Quartermaster options, preserve JSONC comments, resolve configuration precedence
+or apply changes. Review and manually merge the draft into the intended plugin
+options, validate it through OpenCode, and keep a backup. Do not paste secrets
+into either page.
 
-The opted-in local gateway page (#17) loads and applies options through the shared writer (#33). Its authenticated connection validates the fixed project directory and obtains OpenCode's ordered configuration documents, including ancestor/global layers. The last matching declaration supplies the whole options object; matches in different documents are normal overrides. Global, ancestor and pathless inline winners are readable but not writable through this editor. Apply requires a winning project-contained entry with an existing `options` object, validates with `parseConfig`, checks the opaque content-and-path revision, backs up to `.quartermaster.bak`, and replaces only `plugins[].options`. Unrelated settings, comments and trailing commas outside that object are preserved. Ambiguous entries within one document, duplicate keys, stale content or changed effective sources, escaping links and invalid options fail closed. Unavailable provenance does not trigger a filesystem guess. The plugin rereads saved options before later routing/selection, but does not rebuild all startup services/hooks; structural changes can require a restart. The active session model is unchanged. The offline exporter still requires manual review and merge.
+## Optional OpenChamber integration
 
-Quartermaster also exposes project-bound `readOptions` and `applyOptions` RPC methods backed by the same writer. The calling host must authorize options access. The completed OpenChamber editor (#29) uses the separately implemented host-mediated bridge (#36) and requires `quartermaster-options`; its `quartermaster` report grant remains read-only. The fixed-directory local gateway does not provide that active-project bridge. See the [options RPC contract](../docs/PLUGIN_INTEGRATION.md#configuration-editing-capability) and [OpenChamber bridge evidence](../docs/OPENCHAMBER_BRIDGE.md).
+The separately implemented OpenChamber editor requires a host build supporting
+the `quartermaster-options` capability and an explicit grant. Its `quartermaster`
+report grant remains read-only. This local gateway does not provide that
+active-project bridge. See the [options RPC contract](../docs/PLUGIN_INTEGRATION.md#configuration-editing-capability)
+and [historical bridge evidence](../docs/OPENCHAMBER_BRIDGE.md).
+
+## Verification limits
+
+Automated tests cover the gateway's loopback API, security checks and browser
+DOM behavior. They do not establish a fresh live OpenCode-to-browser smoke test
+or painted layout/accessibility verification.

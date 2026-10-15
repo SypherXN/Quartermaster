@@ -1,4 +1,10 @@
-# OpenChamber bridge feasibility
+# Optional OpenChamber bridge
+
+This bridge is maintained in a separate OpenChamber checkout, not shipped in
+Quartermaster. Native routing in stock OpenChamber does not require it. An
+extension needs a host build that supports the capability and an explicit grant.
+The results below are dated evidence, not a compatibility promise for every
+current OpenChamber release.
 
 **Verified result (2026-10-01): a maintainer-authorized OpenChamber checkout
 contains a host-mediated bridge to the active project's Quartermaster RPC, and
@@ -8,12 +14,14 @@ authenticates through its OpenCode runtime, and permits only read-only `select`,
 `explain`, `status`, and `report` calls. The guest cannot choose project scope,
 an endpoint, an RPC ID, or credentials. The bridge does not use `host.request`
 or `serviceRequest`, add a proxy or listener, or expose OpenCode credentials.
-The published-SDK finding below remains historical; this is a new first-party
-OpenChamber capability in the authorized checkout.
+The published-SDK finding below describes an earlier snapshot, not the current
+upstream SDK. The reviewed bridge was a first-party capability in the authorized
+OpenChamber checkout.
 
-## Published SDK surface reviewed
+## Published SDK snapshot (2026-09-30)
 
-Official source reviewed: [OpenChamber SDK host docs](https://github.com/openchamber/openchamber/blob/main/packages/docs/content/docs/sdk/host.mdx),
+The following upstream links use `main` and may have changed since review:
+[OpenChamber SDK host docs](https://github.com/openchamber/openchamber/blob/main/packages/docs/content/docs/sdk/host.mdx),
 [SDK API](https://github.com/openchamber/openchamber/blob/main/packages/sdk/API.md),
 [contract.ts](https://github.com/openchamber/openchamber/blob/main/packages/sdk/src/contract.ts),
 [host.ts](https://github.com/openchamber/openchamber/blob/main/packages/sdk/src/host.ts),
@@ -32,7 +40,7 @@ The source snapshot reviewed on 2026-09-30 reports `@openchamber/sdk` 2.0.4, man
 envelope v1. Web and desktop load guests; VS Code and mobile are unsupported.
 The docs/examples also mention SDK `^1.24.0`; no OpenChamber host-version
 compatibility matrix was found, so the published version story is inconsistent.
-These are current-source findings, not a tested OpenChamber installation.
+These are findings from that published snapshot, not a tested OpenChamber installation.
 
 `connectHost()` exposes active directory/session events and project/session
 metadata APIs. Its `GuestConnection` is only `{ connected, account }`
@@ -92,18 +100,25 @@ the live host.
   only the `quartermaster` grant and reopening the panel, a fresh report
   succeeded for project B.
 
-The OpenChamber maintainers own the bridge implementation. The maintainer
-authorized the #36 work in the OpenChamber checkout under `packages/sdk` and
-`packages/ui`; Quartermaster owns the RPC contract and this evidence. The
-2026-10-01 smoke did not itself finish #28 or #29. Those tasks are completed
-separately; their panel, permission, and accessibility evidence is recorded on
-each task. The smoke proves
-active-project switching and disconnect isolation, not every stale-response
-permutation. Directory/runtime/frame stale-result checks were source-reviewed,
-and the automated UI test covers grant revocation while a call is in flight.
+OpenChamber maintainers own the implementation in `packages/sdk` and
+`packages/ui`; Quartermaster owns the RPC contract and this evidence. The smoke
+proves active-project switching and disconnect isolation, not the full panel,
+options editor, accessibility or every stale-response case. Directory/runtime/
+frame stale-result checks were source-reviewed; an automated UI test covers
+grant revocation while a call is in flight.
 
-## Active-project options capability for #29
+## Separate options capability
 
-The options editor uses a distinct `quartermaster-options` capability. It does not widen #36's read-only `quartermaster` grant. The host checks the new grant and enabled state, binds each request to the active project, and exposes only fixed `readOptions` and `applyOptions` RPC methods. Guest input contains Quartermaster options and the revision returned by `read`; it cannot supply a path, project ID, endpoint, credential, or RPC ID.
+The options editor uses a distinct `quartermaster-options` capability; it does
+not widen the read-only `quartermaster` grant. The host checks the grant and
+enabled state, binds requests to the active project, and exposes only fixed
+`readOptions` and `applyOptions` methods. Guest input contains options and the
+revision returned by `readOptions`, never a path, project ID, endpoint,
+credential or RPC ID.
 
-Quartermaster routes these methods through the existing #33 project-options reader and writer. The writer validates options, refuses stale revisions, preserves unrelated project configuration, and rolls the original file back if the RPC AbortSignal cancels the write before its commit point. No absolute path or backup path is returned to the extension. #28 and #29 are completed; this section records the options capability boundary.
+These methods use Quartermaster's shared project-options reader and writer.
+It validates options, rejects stale revisions, backs up the winning file and
+preserves unrelated configuration. If cancellation or an error interrupts a
+write, it attempts to restore the original text; this is not a transactional
+filesystem guarantee. No absolute or backup path is returned to the extension.
+See the [options contract](PLUGIN_INTEGRATION.md#configuration-editing-capability).

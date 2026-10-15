@@ -138,9 +138,16 @@ and writer directly for its fixed directory. The offline draft at
 
 The OpenCode V2 2.0.23 plugin surface used by this project does not provide this server plugin a web UI/router/static-asset mount; `app` is metadata, and the CLI/TUI router is not a server web mount. CORS is not authentication. Quartermaster does not claim an authenticated OpenCode UI mount or browser-safe active-project session.
 
-The completed gateway (`npm run local-ui`) is started separately from the plugin and binds to IPv4 loopback. It keeps credentials server-side, uses Basic local-service auth, fixes location at startup, checks that the report belongs to that directory, and exposes the report request plus project-options load and apply, not a general proxy. Local processes can still access the listener; stop it when finished and treat telemetry as sensitive. It does not follow the host's active-project switches. See [`web/README.md`](../web/README.md).
+The optional gateway (`npm run local-ui`) starts separately from the plugin and
+binds to IPv4 loopback. It keeps credentials server-side, uses Basic local-service
+auth, fixes the directory at startup and checks report ownership. Its routes load
+reports and read/apply project options; it is not a general proxy. Local processes
+can access the listener, including its writer. Stop it when finished and treat
+telemetry as sensitive. It does not follow host project switches. See
+[`web/README.md`](../web/README.md).
 
-#33 project writing is completed through that gateway. #36's host-mediated OpenChamber handoff is implemented separately; this gateway does not provide it.
+The optional [OpenChamber bridge](OPENCHAMBER_BRIDGE.md) is a separate integration,
+not supplied by this gateway or required for native routing.
 
 ## Results and fallback
 
@@ -167,6 +174,8 @@ create a model-switch loop. Use `apiVersion` for protocol compatibility and
 - Send the registered agent ID. If a work type is known, pass it explicitly;
   otherwise omit it and Quartermaster uses the agent binding. It does not infer
   work from prompts. An unknown work type falls back to the agent binding.
+- The public selection input is `{ agent, workType? }`; it does not accept an
+  explicit model override. The consumer must preserve its own explicit choices.
 - Quartermaster checks its own registered/eligible models and tries plan
   candidates in order. A manual pin is considered before plan candidates, but
   still has to be registered and eligible.
@@ -178,13 +187,13 @@ create a model-switch loop. Use `apiVersion` for protocol compatibility and
 
 ## Native same-prompt retry fallback
 
-The following isolated retry matrix is historical OpenCode **2.0.24** evidence,
-not certification of a new archive. The current package pins `@opencode/plugin`
-**2.0.23**; stock managed OpenCode **2.0.26** request/UI proof also passed (#43).
-Use the exact installed artifact and [deployment gate](DEPLOYMENT.md) for release
-claims. For the historical matrix, run
-`node scripts/verify-retry-host-contract.mjs` when changing either version; the
-loopback fake-provider fixture never contacts a configured or paid provider.
+The isolated retry matrix below is historical OpenCode **2.0.24** evidence,
+not certification of a new archive. The package pins `@opencode/plugin`
+**2.0.23**; that dependency version is not the server version. See the exact
+installed artifact and tested hosts in the [deployment record](DEPLOYMENT.md).
+To reproduce this matrix, build the checkout and run
+`node scripts/verify-retry-host-contract.mjs` with an installed **2.0.24** binary.
+The script rejects other versions and contacts only its loopback fake provider.
 Rate-limit is the default; `--failure=internal` and `--failure=transport` prove
 additional safe failures reach the backup in the original prompt. Auth, quota,
 missing-model, and context-overflow modes prove no model switch (the host may
@@ -204,8 +213,11 @@ auth, and permission errors do not create outage cooldowns or switch models.
 Missing-model/no-route errors may cool down that model for later assignments
 but remain terminal in the current execution. Context overflow, content
 filtering, unsupported operations, invalid output, timeouts, and unknown errors
-remain terminal. Failure cooldowns and recovered availability affect only a
-later assignment; a failed fallback is never retried again in that execution.
+remain terminal for Quartermaster selection; the host may still retry the same
+model under its own policy. Cooldowns affect subsequent selection, including
+safe retry selection and later prompt admission. Quartermaster excludes already
+attempted provider/model IDs when choosing another backup; it does not prevent
+OpenCode from retrying the current model or reset the native attempt limit.
 
 Only clean pre-output retries are fallback evidence. Partial-output continuation
 is separate: Quartermaster does not roll back output or switch mid-response.
@@ -228,6 +240,13 @@ operations:
   RPC callers cannot request owner-aware exclusive-model availability; omitted
   session identity treats an occupied model as busy.
 - `status({})` returns Quartermaster's current status.
+- `diagnoseSession({ sessionID })` reads bounded session/runtime diagnostics and
+  cached availability without changing routing or sending inference. See the
+  [diagnostic guide](../README.md#diagnose-the-handling-runtime).
+- `report({ since?, until?, limit?, offset?, refresh? })` reads the active
+  project's bounded telemetry summary. `requestReport` adds timeout/response
+  validation. Plugin attribution uses the separate `reportPluginUsage` method;
+  see [telemetry contracts and limits](TOKEN_TELEMETRY.md).
 - `pin({ agent, model })` and `unpin({ agent })` manage a manual agent
   preference. Call these only for an explicit user action; pins remain subject
   to model registration and current eligibility.

@@ -2,9 +2,17 @@
 
 OpenCode V2 plugin that assigns agent models from named plans and provider availability.
 
+A **plan** is an ordered list of models: Quartermaster uses the first eligible
+candidate and returns to higher-priority candidates when they recover. Bind a
+plan to an existing agent to enable automatic routing. Unbound agents keep their
+host-selected models.
+
 ## Install
 
-Requires Node.js 23.6 or newer. The portable package is `opencode-quartermaster@0.1.0`; the plugin and RPC ID stay `quartermaster`. It is not published. `private: true` deliberately blocks registry publishing; local packing and installation still work. The npm name returned 404 on 2026-10-08, which is not a reservation. Do not install the unrelated npm package named `quartermaster`.
+Requires Node.js 23.6 or newer. The package is `opencode-quartermaster@0.1.0`;
+the plugin and RPC ID are `quartermaster`. It is **not published to npm**.
+`private: true` blocks publication, but local archives can be built and installed.
+Do not install the unrelated npm package named `quartermaster`.
 
 Build and verify an archive from a checkout:
 
@@ -26,6 +34,9 @@ Add exactly one plugin entry to the destination project's OpenCode config:
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
+  "agents": {
+    "reviewer": { "mode": "all", "model": "provider-a/quality-model" }
+  },
   "plugins": [
     {
       "package": "./.quartermaster/node_modules/opencode-quartermaster",
@@ -38,7 +49,23 @@ Add exactly one plugin entry to the destination project's OpenCode config:
 }
 ```
 
-Replace the model ids with enabled `providerID/modelID` values from `opencode models`. Settings live only in that entry's `options` object. [`examples/quartermaster.json`](examples/quartermaster.json) is the options object alone, not a full OpenCode config, so it does not replace unrelated settings.
+This example belongs in a project-root `opencode.json(c)`. Merge it into an
+existing config rather than replacing that file. Model IDs are placeholders:
+replace them with enabled `providerID/modelID` values from the receiving host's
+`opencode models` output. A binding does not create an agent; the example defines
+`reviewer` explicitly. Quartermaster settings go inside the plugin's `options`.
+[`examples/quartermaster.json`](examples/quartermaster.json) contains options
+alone, not a full OpenCode config. For other config locations, see
+[registration scope](docs/DEPLOYMENT.md#registration-scope).
+
+### Documentation guide
+
+- [Deployment](docs/DEPLOYMENT.md): installation, updates and dated host evidence.
+- [Plugin integration](docs/PLUGIN_INTEGRATION.md): selection and options RPCs.
+- [Telemetry](docs/TOKEN_TELEMETRY.md) and [budgets](docs/TOKEN_BUDGETS.md):
+  observed usage, unknown attribution and advisory limits.
+- [Local tools](web/README.md): offline reports and opt-in configuration editing.
+- [Test agents](examples/test-agent/README.md): isolated routing checks.
 
 On an OpenChamber build that includes the Quartermaster panel, allow `quartermaster` to read reports and `quartermaster-options` to save. The read grant cannot save. The panel is part of OpenChamber, not this package. See [the bridge](docs/OPENCHAMBER_BRIDGE.md).
 
@@ -46,7 +73,16 @@ A checkout can also start the optional local page with `npm run local-ui`. See [
 
 ### Package policy and updates
 
-The archive includes compiled JavaScript, type declarations, public docs and the MIT license; it excludes source/tests, examples, web UI, user config, usage files, plans, logs and credentials. Documentation links to examples/web refer to the repository, not archive contents. Checkout installs require `npm ci` then `npm run build` before pointing OpenCode at the checkout. The runtime dependency is pinned to the tested `@opencode/plugin` 2.0.23, not `latest`; the standalone host smoke accepts OpenCode 2.0.25 or 2.0.26 and records the actual version. The packaged clean install was verified on 2.0.25; the updated checkout fixture also passes on 2.0.26. Other host/Node versions and Unix deployment remain unverified until the dual-host gate.
+The archive includes compiled JavaScript, type declarations, public docs and the
+MIT license. It excludes source/tests, examples, the web UI and local state.
+Links to examples/web refer to the repository, not archive contents. To load a
+checkout directly, run `npm ci` and `npm run build` first.
+
+The plugin/client dependencies are pinned to 2.0.23. This is not the running
+OpenCode server version. The recorded private archive passed Windows standalone
+OpenCode 2.0.27, Ubuntu standalone 2.0.26, and stock OpenChamber 2.3.1 with managed
+OpenCode 2.0.27. See the [exact archive and tested matrix](docs/DEPLOYMENT.md#verified-private-artifact-2026-10-13).
+That historical record does not certify later source changes or untested hosts.
 
 For updates, retain the previous archive/hash and back up the exact destination config. Install a specific replacement archive, verify its root/RPC imports and receiving-runtime diagnostics, then restart only with authorization if required. Roll back by reinstalling the retained archive and restoring only the changed plugin entry/options from the backup. After a separately authorized registry release, `opencode-quartermaster@<exact-version>` will be the npm entry; it is not an available install route yet. Publishing, removing the private guard, credentials, registry uploads and release tags require separate approval.
 
@@ -54,7 +90,12 @@ For updates, retain the previous archive/hash and back up the exact destination 
 
 OpenChamber uses the same native OpenCode server plugin; no panel, bridge, fork or proxy is required for routing. Define the agent in OpenCode and bind that exact agent ID under Quartermaster `options.agents`. A plan binding does not create the agent. Check enabled model IDs in the receiving project's registry rather than assuming a provider/model name is available.
 
-Use one Quartermaster entry per config document. A project-local Quartermaster options object replaces the global Quartermaster options as a whole, not per key; repeat every binding/map needed at that location. Duplicate entries are rejected by the project-options reader. Keep unrelated host settings intact, back up the exact file before an authorized edit, and restart the actual receiving server only with authorization when startup-fixed settings change. The options-save RPC makes a `.quartermaster.bak` backup; it is not permission to edit user configuration automatically.
+Use one Quartermaster entry per config document. The highest-priority declaration
+replaces lower-priority Quartermaster options **as a whole**, not per key;
+repeat all required plans, bindings and maps. The project-options reader rejects
+ambiguous duplicates. Preserve unrelated host settings and back up config before
+an authorized edit. The options-save RPC also creates a `.quartermaster.bak`
+backup. Startup-fixed changes may require an authorized receiving-server restart.
 
 Confirm the handling process with `/qm-status` or the immediate diagnostic RPC below, then correlate its PID with host process ownership. A host name of `cli` can also describe an OpenChamber-managed child; neither that label nor matching session IDs proves which server handled the chat. An unbound `build` agent is expected to stay on its host model: select an already defined bound agent rather than adding bindings implicitly. Missing RPC/commands mean checking plugin loading and location scope before diagnosing selection.
 
@@ -65,7 +106,7 @@ Quota integration is optional: verify `opencode-usage.status({})` exposes `go`, 
 Maintainer checks, not part of install:
 
 ```sh
-npm install
+npm ci
 npm test
 npm run typecheck
 ```
@@ -74,15 +115,45 @@ npm run typecheck
 
 ## Configuration
 
-Candidates are ordered `providerID/modelID` strings or `{ "id": "providerID/modelID", "variant": "..." }` objects. Bindings must reference a configured plan; each plan must have unique, non-empty candidates. `usageSources` maps actual provider IDs to `go`, `codex`, or `cursor` usage sources. A confirmed limited source skips every mapped model; `quotaExemptModels` lists fully qualified models (all variants) that do not use that quota. Unknown or stale usage is not treated as exhausted, and estimated reset times alone do not restore eligibility. Durations are positive integer milliseconds (`providerCooldownMs` defaults to 300000; `localHealthTimeoutMs` to 2000). `localEndpoints` accepts loopback HTTP(S) URLs only and explicitly opts those providers into a bodyless GET health check with credentials omitted. Results are cached for five seconds; a failed check skips only models from that local provider. Managed agents refresh eligibility at prompt admission, selection/explanation, and safe retry-selection boundaries, not on every model dispatch; quota reads use the usage plugin's cached `status({})` and leave provider polling to that plugin. `exclusiveModels` lists `providerID/modelID` values guarded by an in-memory lease held across the owning session's turn. The lease manager is per plugin instance, not shared between project instances or processes. Another session handled by that same router skips a busy exclusive model and takes the next eligible candidate. Only primary model requests take the lease; compaction, title, and generate requests are not gated. The slot expires 15 minutes after acquisition or the last streamed step event.
+All settings belong in the plugin entry's `options` object:
 
-An absent agent/work-type binding means Quartermaster has no plan for that request, so the host-selected model remains unchanged. For explicit resolver/RPC inputs, precedence is explicit user model > eligible manual pin > supplied work type > agent binding > original host/Slim model. Automatic session admission instead follows the bound plan unless `/qm-manual` opts that session out; picker choices are not resolver overrides. Pins never bypass eligibility, and Quartermaster does not infer work type from prompt text.
+- **Plans:** ordered `providerID/modelID` strings or
+  `{ "id": "providerID/modelID", "variant": "..." }` objects. Plans must be
+  non-empty with unique candidates; bindings must name an existing plan.
+- **Quota:** `usageSources` maps provider IDs to `go`, `codex`, or `cursor`.
+  Limits skip all mapped models except explicit `quotaExemptModels` (fully
+  qualified IDs, all variants). Unknown/stale usage is skipped as unknown, not
+  exhausted. Estimated resets alone do not restore eligibility. Unmapped
+  providers are unaffected by quota status.
+- **Health:** `localEndpoints` opts local providers into credential-free,
+  bodyless loopback HTTP(S) GET checks, cached for five seconds. Failure skips
+  only that provider; remote providers are not health-probed.
+- **Durations:** positive integer milliseconds. `providerCooldownMs` defaults
+  to 300000; `localHealthTimeoutMs` to 2000.
+- **Exclusive models:** `exclusiveModels` lists fully qualified model IDs.
+  Automatic selection skips busy models. All primary requests using a listed
+  model acquire its lease, including manual/unbound requests; auxiliary
+  compaction/title/generate requests are not gated. Leases belong to one plugin
+  instance, not multiple projects/processes. Automatic reservations span the
+  turn; abandoned leases expire after 15 minutes without renewal.
+
+Eligibility refreshes at prompt admission, selection/explanation, and safe retry
+selection—not on every dispatch. Quota reads use cached
+`opencode-usage.status({})`; Quartermaster never forces provider polling.
+
+The public `select({ agent, workType? })` RPC uses a known work-type binding
+before the agent binding; an unknown alias falls back to the agent binding.
+Without either binding it returns `no-plan`. An eligible agent pin is considered
+before the chosen plan's candidates. The RPC recommends a model; it does not
+accept an explicit model override or switch a session. Quartermaster never
+infers work type from prompt text.
 
 Bound agents use Quartermaster automatic routing by default. In OpenCode's stock TUI, use `/qm-manual` before a deliberate model/variant change to leave that session's choices to the host; use `/qm-auto` to resume Quartermaster routing. Stock host hooks do not expose reliable provenance for same-model re-selection, so the default may replace an inherited or pre-first-prompt model/variant choice. The prompt hook awaits any needed model switch before admission and rejects the prompt if no eligible model can be selected or the switch fails.
 
 Pins are validated against the agent's configured plan and enabled model registry when loaded or set. They persist under a project-scoped plugin-storage key and are revalidated after project-option adoption and registry refresh. The legacy shared key is used only when no project identity is available; its values are not imported into project namespaces. A pin changes the next selection, not an active turn. Selection explanations expose stable reason codes and per-candidate skip reasons.
 
-The internal plan resolver accepts a caller-supplied work-type alias before the agent binding. An unknown alias falls back to that agent's binding with an `unknown-work-type-agent-fallback` reason; without an agent binding it returns `no-plan` with `unknown-work-type`. Explicit user model overrides bypass plan resolution.
+An agent pin is a preference within automatic routing, not a session opt-out.
+Use `/qm-manual` when the host should control the session's model instead.
 
 ### Diagnose the handling runtime
 
@@ -92,7 +163,12 @@ Both paths report the loaded plugin version, host-reported app version, local pr
 
 Availability is the active router's cached snapshot, not a forced refresh or configuration reread. Snapshot age, refresh interval, health-cache duration and available quota timestamps are shown. Quota `unconfigured` means no source mapping; `local-offline` means a configured health probe failed; `not-in-registry` means a candidate is not enabled. Recommendations do not switch models or guarantee a send. Primary evidence is only a `model.request` hook observation since this instance loaded, not an HTTP-send/success claim; auxiliary requests are excluded. Session and ownership reads are bounded; unknown reads do not expose raw errors or credentials.
 
-If the command is absent, inspect the actual receiving server's project-scoped `/api/plugin` and `/api/command` through normal host authentication. Check plugin loading, effective project options and server version; a separate CLI server is not OpenChamber-runtime proof. Startup-fixed options may need an authorized restart. Do not recover credentials or bypass authentication. Native OpenChamber command/display proof remains part of the stock-host verification gate.
+If the command is absent, inspect the actual receiving server's project-scoped
+`/api/plugin` and `/api/command` through normal host authentication. Check plugin
+loading, effective project options and server version; a separate CLI server is
+not OpenChamber-runtime proof. Startup-fixed options may need an authorized
+restart. Do not recover credentials or bypass authentication. A queued command
+response is not proof that a client displayed it immediately.
 
 ## Cross-plugin API
 
@@ -113,7 +189,10 @@ RPC responses carry `apiVersion: 1`; selection returns the model reference and s
 
 ## Native routing boundaries
 
-Quartermaster preloads enabled models, cached usage status, and configured local endpoint health before applying bound choices through OpenCode V2's synchronous agent transform. It edits only the agent's model field; prompts, permissions, and other agent settings are retained. The client reads `opencode-usage.status({})` with a bounded timeout and normalizes its versioned snapshot; it never forces refresh or polls provider APIs. Configured mapped models with unknown usage are skipped as unknown, not classified as exhausted; unmapped models are unaffected by quota status, and remote providers are never health-probed. A changed eligibility snapshot takes effect after the router refreshes and calls the supported agent reload, for the next assignment only.
+Quartermaster preloads the enabled registry and availability before OpenCode's
+synchronous agent transform. It edits only the model field, retaining prompts,
+permissions and other settings. Registry/availability changes refresh the agent
+catalog for later assignments, not an active response.
 
 OpenCode keeps a session's selected model separate from its agent. At an idle prompt boundary, Quartermaster selects from a bound agent's current plan, awaits `switchModel` if needed, and confirms the authoritative selection before admission. An out-of-plan default or changed model/variant does not imply a manual opt-out. `/qm-manual` preserves host choices at admission and retry selection until `/qm-auto` resumes; the opt-out is scoped to the stored project/session/agent and survives plugin reload. Agent changes and session deletion clear old ownership. Failed ownership reads, no eligible model or an unconfirmed switch reject automatic admission and release reservations.
 
@@ -123,13 +202,24 @@ Safe, correlated primary failures can select a remaining eligible backup during 
 
 ### Managed-host verification limits
 
-**Current status (2026-10-13):** #43 and #46 are complete for the exact private archive and tested Windows/Ubuntu/stock-managed combinations in [Deployment](docs/DEPLOYMENT.md#verified-private-artifact-2026-10-13). Packaged request/source identity, painted desktop/mobile UI, keyboard and cleanup checks passed. The dated 2026-10-09 notes below are historical; accepted queued behavior and native UI limits remain. Other combinations and publication are not implied.
+The [2026-10-13 deployment record](docs/DEPLOYMENT.md#verified-private-artifact-2026-10-13)
+identifies the exact private archive, tested hosts, provider-request traces,
+desktop/mobile-emulated UI, keyboard and cleanup checks. It is historical
+evidence, not certification of the current checkout or every host version.
 
-**Accepted known behavior (2026-10-09):** Queued input from users or automation is not automatically rerouted at execution time. It can keep a still-eligible prior model; an ineligible automatic selection is rejected before sending and must be resent when idle. The user accepted this limitation, closing #42 with seven verified criteria plus one accepted exception, not eight verified criteria. `--case=queuedSafety` proved zero additional sends after offline health-cache expiry, reservation recovery and unchanged manual/unbound choices. Failed-idle history can disagree with the host's succeeded session summary. Ownership, cancellation, native child, reload/deletion/isolation and injected-switch cleanup checks passed with the changed compiled plugin; all 177 tests, typecheck and build passed. No host source, permission policy or upstream issue/comment changed. #43/#46 and full dual-host certification remain pending.
+**Queued-input limitation:** stock OpenCode 2.0.26 does not support transparent
+reselection when queued input begins execution. It can retain a still-eligible
+captured model; an ineligible automatic selection is rejected before sending
+and must be resent when idle. Queue safety is not queue reselection.
 
-On 2026-10-09, stock OpenChamber-managed OpenCode 2.0.26 passed loopback checks for automatic first-send routing, manual opt-out/resume, separate-fork ownership, unbound pass-through, no-eligible rejection, and a native tool-created subagent's first provider request. A test-only adapter injected one client-side `switchModel` exception: admission sent zero provider requests, and a different session acquired the exclusive model, proving reservation release. This is not a naturally occurring host switch rejection. Queued reselection remains unsupported but is now an accepted #42 limitation; full dual-host certification still requires #43/#46. All test-owned servers were stopped; no OpenChamber source or permission rules changed.
+Earlier managed-host checks on 2.0.26 covered automatic routing, manual
+opt-out/resume, native children and rejected admission. Switch-failure cleanup
+used an injected client exception, not a naturally occurring host rejection.
 
-Further managed checks passed persistent manual same-model/variant and out-of-plan choices, agent-change resets, separate-session ownership, native child later idle/manual/resume turns, busy exclusive-model fallback and cancellation cleanup. Scoped location reload preserved manual choices in a new plugin instance; deletion cleared observations and a new session routed automatically. Two project/plugin instances in the same receiving process independently acquired the same exclusive model. This proves instance isolation, not cross-process coordination. Approved quota mappings and the offline NInfer health URL were verified against backups and effective project options. Each fixture uses unique provider IDs to avoid persisted test cooldown contamination; production state is not cleared.
+The recorded lifecycle checks cover persistent manual choices, child idle turns,
+cancellation, reload/deletion and independent project/plugin instances. They do
+not establish cross-instance lease coordination or live quota-driven recovery.
+Fixtures use unique provider IDs rather than clearing production cooldowns.
 
 With explicit authorization and `OPENCODE_PERMISSION_REVIEWER_HOST_URL` pointing at the actual loopback receiving server, run `node scripts/verify-managed-host-boundaries.mjs` for queued/tool-child checks, append `--ownership-only` for ownership/child idle-turn/cancellation checks, or `--failed-switch-only` for injected failure/cleanup. `--case=ownership`, `--case=cancellation` or `--case=toolChild` narrows the ownership run. These use the normal authenticated CLI, create disposable project sessions, write `boundary-proof.json` in the printed project directory, and stop their own fake provider. The default run currently exits nonzero for the known queue failure; it is a regression check, not a passing support claim.
 
@@ -137,10 +227,18 @@ Append `--lifecycle-only` for backed-up scoped reload, deletion and two-project 
 
 Keep one Quartermaster entry per document; ambiguous duplicates fail closed. Higher-priority declarations replace the whole lower-priority options object, not individual keys. The current source project-options reader uses the receiving server's ordered native documents, including ancestor/global layers, when exact-server provenance is available. Inherited and inline winners are read-only; unavailable provenance refuses editing without guessing files or starting another server. See the [options RPC contract](docs/PLUGIN_INTEGRATION.md#configuration-editing-capability) for discovery and JSONC boundaries. This repair does not re-certify historical deployment archives. Back up config before authorized changes. The stock config watcher can reload other locations after a global edit; a scoped disposable-location eviction is preferable for fixture-only reloads. Auxiliary reviewer config is startup-read and needs an authorized runtime reload.
 
-Queued reselection is an accepted known limitation, not a supported capability. In [stock v2.0.26](https://github.com/anomalyco/opencode/tree/9b4ec5714d481559990db0a816d5dec19541a814), `packages/core/src/session/runner/llm.ts` resolves the model before promoting queued input. The awaited `prompt` hook runs only during enqueue; execution hooks cannot override the captured model. Transparent reselection would need a supported selection hook after promotion and before resolution. No upstream issue or host patch is planned; event races, retry-after-send and HTTP rewriting are not substitutes.
+The queued-input limit comes from [stock v2.0.26](https://github.com/anomalyco/opencode/tree/9b4ec5714d481559990db0a816d5dec19541a814):
+`packages/core/src/session/runner/llm.ts` resolves the model before promoting
+queued input. Transparent reselection needs a supported host selection hook at
+execution, not event races, retry-after-send or HTTP rewriting.
 
 ## Dynamic test agent
 
-The read-only `qm-test` primary agent and isolated host config are in [`examples/test-agent`](examples/test-agent/README.md). The checked-in model IDs are fixture placeholders; replace them with two enabled `providerID/modelID` entries before testing in a real host. To inspect the actual transformed agent without sending a model request, run `opencode api get /api/agent` from that example directory and inspect `data[]` for `qm-test.model`. Open the same directory in OpenChamber to expose the agent there; launching it sends inference and may use provider quota.
+The deny-all-tools `qm-test` primary agent, `quartermaster-test` subagent and
+isolated host config are in [`examples/test-agent`](examples/test-agent/README.md).
+Build the checkout first and replace example model IDs with enabled models.
+From that directory, `opencode api get /api/agent` inspects catalog assignments
+without inference. Running either agent uses inference; catalog labels and
+model replies alone do not prove which provider served a request.
 
-`npm test` exercises synthetic assignments (primary → backup → recovered primary), automatic replacement of host defaults/variants, explicit manual opt-out, failed admission and ownership isolation. These fixtures do not modify live host state. After `npm run build`, run `node scripts/verify-admission-host-contract.mjs` for the private loopback admission fixture. It verifies automatic primary/child routing, manual preservation/resume, unbound pass-through and no-eligible rejection on OpenCode 2.0.25 and 2.0.26; the 2.0.26 run additionally verifies later idle turns and unbound-to-bound agent changes. This is not actual OpenChamber-managed request evidence or proof of queued execution ordering. Quota-aware refresh is implemented, but no live quota-driven recovery cycle is claimed; do not exhaust real quotas to test it.
+`npm test` exercises synthetic assignments (primary → backup → recovered primary), automatic replacement of host defaults/variants, explicit manual opt-out, failed admission and ownership isolation. These fixtures do not modify live host state. After `npm run build`, run `node scripts/verify-admission-host-contract.mjs` for the private loopback admission fixture. It accepts the installed OpenCode 2.0.25, 2.0.26, or 2.0.27 binary and records that version. It verifies automatic primary and child routing, later idle turns, unbound-to-bound agent changes, manual preservation and resume, unbound pass-through, and no-eligible rejection. This is not actual OpenChamber-managed request evidence or proof of queued execution ordering. Quota-aware refresh is implemented, but no live quota-driven recovery cycle is claimed; do not exhaust real quotas to test it.
