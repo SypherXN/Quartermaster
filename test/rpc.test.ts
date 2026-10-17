@@ -5,13 +5,14 @@ import { join } from "node:path"
 import test from "node:test"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import { parseConfig } from "../src/config.ts"
-import { QUARTERMASTER_RPC, registerQuartermasterRpc, requestReport, requestSelection } from "../src/rpc.ts"
+import { QUARTERMASTER_RPC, registerQuartermasterRpc, requestReport, requestSelection, requestPlanSelection, requestModuleSelection, reportModuleCooldown } from "../src/rpc.ts"
+import { ModuleCooldowns } from "../src/modules.ts"
 import { fixtureConfiguration } from "./configuration-fixture.ts"
 
 const config = parseConfig({ plans: { p: ["provider-a/primary"] }, agents: { reviewer: "p" }, workTypes: { review: "p" }, usageSources: { "provider-a": "codex" } })
 const model = { providerID: "provider-a", modelID: "primary", variant: "thinking" }
 
-function context(routing?: unknown, reporting?: unknown, optionsDirectory?: string) {
+function context(routing?: unknown, reporting?: unknown, optionsDirectory?: string, modules?: ModuleCooldowns) {
   let handlers: Record<string, (input: unknown, call: never) => unknown> | undefined
   let disposed = false
   const rpc = Object.assign((definition: { id: string }) => {
@@ -30,10 +31,90 @@ function context(routing?: unknown, reporting?: unknown, optionsDirectory?: stri
   return {
     ctx,
     disposed: () => disposed,
-    register: () => registerQuartermasterRpc(ctx as unknown as Pick<Context, "rpc" | "model">, config, routing as never, undefined, reporting as never, optionsDirectory, fixtureConfiguration),
+    register: () => registerQuartermasterRpc(ctx as unknown as Pick<Context, "rpc" | "model">, config, routing as never, undefined, reporting as never, optionsDirectory, fixtureConfiguration, modules),
     client: () => ctx.rpc(QUARTERMASTER_RPC) as Record<string, (input: unknown, options?: { signal?: AbortSignal }) => Promise<Record<string, unknown>>>,
   }
 }
+
+test("module RPC validates exact scope without a native registry and preserves version one", async () => {
+  const modules = await ModuleCooldowns.load(parseConfig({ modules: { direct: { models: ["external/decision"], cooldownMs: 100 } } }),
+    { get: async () => undefined, set: async () => {} }, "fixture", () => 10)
+  const fixture = context(undefined, undefined, undefined, modules)
+  fixture.ctx.model.list = async () => { throw new Error("must not list native models") }
+  await fixture.register()
+  const ctx = fixture.ctx as never
+  const selected = await requestModuleSelection(ctx, { module: "direct" })
+  assert.equal(selected.status, "selected")
+  if (selected.status === "selected") assert.deepEqual(selected.selected, { providerID: "external", modelID: "decision" })
+  const input = { module: "direct", providerID: "external", modelID: "decision", reason: "rate-limit" as const }
+  assert.deepEqual(await reportModuleCooldown(ctx, input), { apiVersion: 1, accepted: true, module: "direct", providerID: "external", modelID: "decision", blockedUntil: 110 })
+  assert.equal((await requestModuleSelection(ctx, { module: "direct" })).status, "no-eligible")
+  assert.equal((await requestModuleSelection(ctx, { module: "absent" })).status, "no-module")
+  assert.deepEqual(await reportModuleCooldown(ctx, { ...input, modelID: "absent" }), { apiVersion: 1, accepted: false, reason: "unknown-model" })
+  assert.deepEqual(await reportModuleCooldown(ctx, { ...input, module: "absent" }), { apiVersion: 1, accepted: false, reason: "unknown-module" })
+  for (const invalid of [null, {}, { ...input, modelID: undefined }, { ...input, durationMs: 100 }, { ...input, error: "raw" }, { ...input, reason: "auth" }]) {
+    await assert.rejects(fixture.client().reportModuleCooldown(invalid), { code: "invalid_input" })
+  }
+  for (const invalid of [{ module: " " }, { module: "direct", agent: "reviewer" }]) {
+    await assert.rejects(fixture.client().selectModule(invalid), { code: "invalid_input" })
+  }
+})
+
+test("module helpers reject malformed selection metadata and mismatched acknowledgements", async () => {
+  const candidate = { providerID: "external", modelID: "decision", reason: "declared", quota: "unknown", health: "unknown" }
+  const good = { apiVersion: 1, module: "direct", status: "selected", evaluatedAt: 10, candidates: [candidate], selected: { providerID: "external", modelID: "decision" } }
+  const fake = (value: unknown) => ({ rpc: () => ({ selectModule: async () => value, reportModuleCooldown: async () => value }) }) as never
+  const tracked = { ...candidate, providerID: "opencode-go", quota: "available" }
+  const limited = { providerID: "cursor", modelID: "composer", reason: "limited", quota: "limited", health: "unknown" }
+  const accepted = { ...good, candidates: [limited, tracked], selected: { providerID: "opencode-go", modelID: "decision" } }
+  assert.equal((await requestModuleSelection(fake(accepted), { module: "direct" })).status, "selected")
+  const skipped = { apiVersion: 1, module: "direct", status: "no-eligible", evaluatedAt: 10, candidates: [limited, { ...candidate, reason: "usage-unavailable" }] }
+  assert.equal((await requestModuleSelection(fake(skipped), { module: "direct" })).status, "no-eligible")
+  const cooling = { apiVersion: 1, module: "direct", status: "no-eligible", evaluatedAt: 10, nextEligibleAt: 20, candidates: [{ ...candidate, reason: "cooldown", quota: "available", blockedUntil: 20, remainingMs: 10 }] }
+  assert.equal((await requestModuleSelection(fake(cooling), { module: "direct" })).status, "no-eligible")
+  for (const value of [null, { ...good, apiVersion: 2 }, { ...good, module: "wrong" }, { ...good, evaluatedAt: NaN },
+    { ...good, selected: { ...good.selected, variant: 2 } }, { ...good, candidates: [candidate, candidate] },
+    { ...good, candidates: [{ ...candidate, reason: "cooldown", blockedUntil: 9, remainingMs: -1 }] },
+    { ...good, status: "no-module" }, { ...good, status: "no-eligible" },
+    { ...good, candidates: [{ ...candidate, quota: "plenty" }] },
+    { ...accepted, selected: { providerID: "cursor", modelID: "composer" } }]) {
+    assert.equal((await requestModuleSelection(fake(value), { module: "direct" })).status, "unavailable")
+  }
+  const input = { module: "direct", providerID: "external", modelID: "decision", reason: "rate-limit" as const }
+  const ack = { apiVersion: 1, accepted: true, module: "direct", providerID: "external", modelID: "decision", blockedUntil: 110 }
+  for (const value of [null, { ...ack, module: "wrong" }, { ...ack, modelID: "wrong" }, { ...ack, blockedUntil: Infinity },
+    { ...ack, apiVersion: 2 }, { apiVersion: 1, accepted: false, reason: "arbitrary" }]) {
+    const result = await reportModuleCooldown(fake(value), input)
+    assert.equal(result.accepted, false)
+    assert.equal("status" in result && result.status, "unavailable")
+  }
+})
+
+test("module helpers bound hanging calls and propagate caller cancellation", async () => {
+  let received: AbortSignal | undefined
+  let calls = 0
+  const hanging = { rpc: () => ({ selectModule: (_: unknown, options: { signal: AbortSignal }) => {
+    calls++; received = options.signal; return new Promise(() => {})
+  } }) } as never
+  const controller = new AbortController()
+  const pending = requestModuleSelection(hanging, { module: "direct" }, 2000, controller.signal)
+  controller.abort()
+  assert.deepEqual(await pending, { status: "unavailable", reasonCode: "cancelled" })
+  assert.equal(received?.aborted, true)
+  await requestModuleSelection(hanging, { module: "direct" }, 2000, controller.signal)
+  assert.equal(calls, 1)
+  assert.deepEqual(await requestModuleSelection(hanging, { module: "direct" }, 5), { status: "unavailable", reasonCode: "timeout" })
+  assert.equal(received?.aborted, true)
+  assert.equal((await requestModuleSelection(context().ctx as never, { module: "direct" })).status, "unavailable")
+  const input = { module: "direct", providerID: "external", modelID: "decision", reason: "rate-limit" as const }
+  const reportContext = { rpc: () => ({ reportModuleCooldown: (_: unknown, options: { signal: AbortSignal }) => {
+    received = options.signal; return new Promise(() => {})
+  } }) } as never
+  assert.deepEqual(await reportModuleCooldown(reportContext, input, 5), { status: "unavailable", accepted: false, reasonCode: "timeout" })
+  assert.equal(received?.aborted, true)
+  assert.equal((await reportModuleCooldown(context().ctx as never, input)).accepted, false)
+  assert.equal((await reportModuleCooldown(reportContext, input, 2000, controller.signal)).accepted, false)
+})
 
 test("session diagnostics RPC validates input and returns the snapshot without selecting or queueing", async () => {
   const requested: string[] = []
@@ -51,8 +132,37 @@ test("session diagnostics RPC validates input and returns the snapshot without s
   await assert.rejects(missing.client().diagnoseSession({ sessionID: "session-a" }), (error: Error & { code?: string }) => error.code === "unavailable")
 })
 
+test("public docs describe module delivery without claiming live provider serving", async () => {
+  const guide = (await readFile(new URL("../docs/PLUGIN_INTEGRATION.md", import.meta.url), "utf8")).replaceAll("\r\n", "\n")
+  const readme = (await readFile(new URL("../README.md", import.meta.url), "utf8")).replaceAll("\r\n", "\n")
+  const deployment = (await readFile(new URL("../docs/DEPLOYMENT.md", import.meta.url), "utf8")).replaceAll("\r\n", "\n")
+  const moduleGuide = guide.split("## Direct-call module profiles\n")[1]?.split("\n## ")[0] ?? ""
+  for (const phrase of [
+    "selectModule", "reportModuleCooldown", "requestModuleSelection", "out of rotation", "Retry-After",
+    "moduleRouting.enabled", "allowPaid", "permission-reviewer.jsonc", "fail closed", "OpenCode V1",
+    "does not fall back",
+  ]) assert.match(moduleGuide, new RegExp(phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")))
+  for (const phrase of ["usageSources", "quotaExemptModels", "usage-unavailable", "cooldown-only"]) {
+    assert.match(moduleGuide, new RegExp(phrase))
+  }
+  const recommendations = guide.split("## Plugin recommendations\n")[1]?.split("\n## ")[0] ?? ""
+  for (const phrase of ["selectPlan", "requestPlanSelection", "requestSelection", "The caller applies"]) {
+    assert.match(recommendations, new RegExp(phrase.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")))
+  }
+  assert.match(readme, /requestPlanSelection/)
+  assert.match(readme, /quotaExemptModels/)
+  assert.match(readme, /docs\/PLUGIN_INTEGRATION\.md#direct-call-module-profiles/)
+  assert.match(readme, /docs\/PLUGIN_INTEGRATION\.md#permission-reviewer-example/)
+  assert.doesNotMatch(readme.split("### Direct-call module profiles")[1]?.split("\n### ")[0] ?? "", /"agents"/)
+  assert.match(deployment, /permission-reviewer\.jsonc/)
+  assert.match(deployment, /does not build, install, or activate/)
+  assert.match(deployment, /Retry-After/)
+  assert.match(deployment, /2026-10-13 archive/)
+  assert.doesNotMatch(`${guide}\n${deployment}`, /live Jev provider (is|was) verified|real Jev rate limit passed/i)
+})
+
 test("plugin integration docs describe the project-options RPC contract", async () => {
-  const docs = await readFile(new URL("../docs/PLUGIN_INTEGRATION.md", import.meta.url), "utf8")
+  const docs = (await readFile(new URL("../docs/PLUGIN_INTEGRATION.md", import.meta.url), "utf8")).replaceAll("\r\n", "\n")
   const section = docs.split("## Configuration editing capability\n")[1]?.split("\n## ")[0]
   assert.ok(section)
   assert.match(section, /`readOptions\(\{\}\)`/)
@@ -64,7 +174,7 @@ test("plugin integration docs describe the project-options RPC contract", async 
   assert.match(section, /`quartermaster-options`/)
   assert.match(section, /`quartermaster` grant remains read-only/)
   assert.doesNotMatch(docs, /has no project-configuration write RPC|not an RPC, writes/)
-  const readme = await readFile(new URL("../web/README.md", import.meta.url), "utf8")
+  const readme = (await readFile(new URL("../web/README.md", import.meta.url), "utf8")).replaceAll("\r\n", "\n")
   assert.match(readme, /`quartermaster-options`/)
   assert.doesNotMatch(readme, /no live project-config writer|no general proxy or write route|bridge is likewise not implemented|still needs the OpenChamber bridge/i)
 })
@@ -72,18 +182,25 @@ test("plugin integration docs describe the project-options RPC contract", async 
 test("project-options RPC uses its bound directory and never returns a path", async () => {
   const directory = await mkdtemp(join(tmpdir(), "qm-rpc-options-"))
   const otherDirectory = await mkdtemp(join(tmpdir(), "qm-rpc-options-other-"))
-  const text = JSON.stringify({ plugins: [{ package: "quartermaster", options: { plans: { review: ["provider-a/old"] } } }] })
+  const registration = JSON.stringify({ plugins: [{ package: "quartermaster" }] })
+  const settings = { plans: { review: ["provider-a/old"] } }
+  const settingsText = JSON.stringify(settings, null, 2) + "\n"
   try {
     const path = join(directory, "opencode.json")
+    const settingsPath = join(directory, "quartermaster.jsonc")
     const otherPath = join(otherDirectory, "opencode.json")
-    await writeFile(path, text)
-    await writeFile(otherPath, text)
+    const otherSettingsPath = join(otherDirectory, "quartermaster.jsonc")
+    await writeFile(path, registration)
+    await writeFile(settingsPath, settingsText)
+    await writeFile(otherPath, registration)
+    await writeFile(otherSettingsPath, settingsText)
     const originalOther = await readFile(otherPath, "utf8")
+    const originalOtherSettings = await readFile(otherSettingsPath, "utf8")
     const testContext = context(undefined, undefined, directory)
     await testContext.register()
     const client = testContext.client()
     const current = await client.readOptions({})
-    assert.deepEqual(current.options, JSON.parse(text).plugins[0].options)
+    assert.deepEqual(current.options, settings)
     assert.equal(current.status, "ok")
     assert.equal(Number.isSafeInteger(current.revision), true)
     assert.equal("path" in current, false)
@@ -94,20 +211,24 @@ test("project-options RPC uses its bound directory and never returns a path", as
     assert.deepEqual(saved.options, nextOptions)
     assert.equal(saved.status, "saved")
     assert.notEqual(saved.revision, current.revision)
-    assert.deepEqual(JSON.parse((await readFile(path, "utf8")).replace(/\/\/[^\n]*/g, "" )).plugins[0].options, nextOptions)
+    assert.equal(await readFile(path, "utf8"), registration)
+    assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), nextOptions)
     assert.equal(await readFile(otherPath, "utf8"), originalOther)
+    assert.equal(await readFile(otherSettingsPath, "utf8"), originalOtherSettings)
     assert.equal("path" in current, false)
 
     const stale = await client.readOptions({})
-    await writeFile(path, text + "\n")
+    await writeFile(settingsPath, settingsText + "\n")
     await assert.rejects(client.applyOptions({ options: nextOptions, revision: stale.revision }), (error: Error & { code?: string }) => error.code === "unavailable")
     await assert.rejects(client.applyOptions({ options: nextOptions, revision: 0, extra: true }), (error: Error & { code?: string }) => error.code === "invalid_input")
 
-    const beforeCancelledWrite = await readFile(path, "utf8")
+    const beforeCancelledWrite = await readFile(settingsPath, "utf8")
+    const beforeRegistration = await readFile(path, "utf8")
     const controller = new AbortController()
     controller.abort()
-    await assert.rejects(client.applyOptions({ options: nextOptions, revision: (await stat(path)).mtimeMs }, { signal: controller.signal }))
-    assert.equal(await readFile(path, "utf8"), beforeCancelledWrite)
+    await assert.rejects(client.applyOptions({ options: nextOptions, revision: (await stat(settingsPath)).mtimeMs }, { signal: controller.signal }))
+    assert.equal(await readFile(settingsPath, "utf8"), beforeCancelledWrite)
+    assert.equal(await readFile(path, "utf8"), beforeRegistration)
   } finally {
     await rm(directory, { recursive: true, force: true })
     await rm(otherDirectory, { recursive: true, force: true })
@@ -272,4 +393,70 @@ test("status omits upstream error text and RPC registration is disposable", asyn
   assert.equal(JSON.stringify(status).includes('"stale":true'), true)
   await registration.dispose()
   assert.equal(testContext.disposed(), true)
+})
+
+test("plan selection returns a recommendation the caller applies itself", async () => {
+  const calls: string[] = []
+  const skip = { model, code: "limited", reason: "provider-a/primary skipped: provider quota is confirmed limited." }
+  const routing = {
+    select: async () => {
+      calls.push("agent")
+      return { status: "selected", selected: model, reasonCode: "highest-priority-eligible", reason: "Primary eligible.", skipped: [] }
+    },
+    selectPlan: async (plan: string) => {
+      calls.push("plan:" + plan)
+      if (plan === "missing") return { status: "no-plan", reasonCode: "unknown-plan", reason: "No model plan is configured with this name.", skipped: [] }
+      if (plan === "empty") return {
+        status: "no-eligible", reasonCode: "no-eligible", reason: "No candidate in the configured plan is eligible.",
+        skipped: [skip], plan: { id: plan, source: "named-plan", reasonCode: "named-plan" },
+      }
+      return {
+        status: "selected", selected: model, reasonCode: "highest-priority-eligible",
+        reason: "Selected as the highest-priority eligible candidate.", skipped: [skip],
+        plan: { id: plan, source: "named-plan", reasonCode: "named-plan" },
+      }
+    },
+    explain: () => ({ status: "no-plan", reasonCode: "unbound-agent", reason: "No plan.", skipped: [] }),
+    status: () => ({ apiVersion: 1, status: "ok", sources: {} }),
+  }
+  const testContext = context(routing)
+  let listed = 0
+  testContext.ctx.model.list = async () => { listed += 1; return { data: [] } }
+  await testContext.register()
+  const picked = await requestPlanSelection(testContext.ctx as never, { plan: "review" })
+  assert.equal(picked.status, "selected")
+  if (picked.status === "selected") {
+    assert.deepEqual(picked.selected, model)
+    assert.equal(picked.plan.id, "review")
+    assert.equal(picked.plan.source, "named-plan")
+    const firstSkip = picked.skipped[0] as { code?: string }
+    assert.equal(firstSkip.code, "limited")
+  }
+  assert.deepEqual(calls, ["plan:review"])
+  assert.equal(listed, 0, "plan selection does not list or assign models")
+  assert.equal((await requestSelection(testContext.ctx as never, { agent: "reviewer" })).status, "selected")
+  assert.equal((await requestPlanSelection(testContext.ctx as never, { plan: "missing" })).reasonCode, "unknown-plan")
+  const exhausted = await requestPlanSelection(testContext.ctx as never, { plan: "empty" })
+  assert.equal(exhausted.status, "no-eligible")
+  if (exhausted.status === "no-eligible") assert.equal(exhausted.plan.id, "empty")
+  assert.equal((await requestPlanSelection(testContext.ctx as never, { plan: " " })).reasonCode, "invalid-input")
+  assert.equal((await requestPlanSelection(testContext.ctx as never, { plan: "review", agent: "reviewer" } as never)).reasonCode, "invalid-input")
+  assert.deepEqual(calls.filter((call) => call.startsWith("plan:")), ["plan:review", "plan:missing", "plan:empty"])
+  await assert.rejects(testContext.client().selectPlan({ plan: " " }), (error: Error & { code?: string }) => error.code === "invalid_input")
+  await assert.rejects(testContext.client().selectPlan({ plan: "review", sessionID: "session" }), (error: Error & { code?: string }) => error.code === "invalid_input")
+  const absent = context()
+  await absent.register()
+  assert.equal((await absent.client().selectPlan({ plan: "review" })).reasonCode, "unknown-plan")
+  assert.equal((await absent.client().select({ agent: "reviewer" })).reasonCode, "unbound-agent")
+  const bad = await requestPlanSelection({
+    rpc: () => ({ selectPlan: async () => ({ status: "selected", apiVersion: 1, reasonCode: "ok", reason: "ok", selected: model, skipped: [], plan: { id: "review", source: "agent", reasonCode: "agent" } }) }),
+  } as never, { plan: "review" })
+  assert.equal(bad.reasonCode, "invalid-response")
+  assert.equal((await requestPlanSelection({ rpc: () => { throw new Error("missing") } } as never, { plan: "review" })).reasonCode, "service-unavailable")
+  let signal: AbortSignal | undefined
+  const timed = await requestPlanSelection({
+    rpc: () => ({ selectPlan: async (_input: unknown, options: { signal: AbortSignal }) => { signal = options.signal; return new Promise(() => {}) } }),
+  } as never, { plan: "review" }, 5)
+  assert.equal(timed.reasonCode, "timeout")
+  assert.equal(signal?.aborted, true)
 })

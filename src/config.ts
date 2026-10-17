@@ -4,6 +4,15 @@ export interface ModelRef {
   variant?: string
 }
 
+export interface ModuleModelRef extends ModelRef {
+  cooldownMs: number
+}
+
+export interface ModuleProfile {
+  models: ModuleModelRef[]
+  cooldownMs: number
+}
+
 export type TokenBudgetDimension = "project" | "provider" | "model" | "plugin"
 
 export interface TokenBudgetCalendarWindow {
@@ -37,6 +46,7 @@ export interface QuartermasterConfig {
   agents: Record<string, string>
   workTypes: Record<string, string>
   usageSources: Record<string, string>
+  modules?: Record<string, ModuleProfile>
   budgets?: TokenBudgetConfig[]
   tokenRates?: TokenRateConfig[]
   quotaExemptModels: string[]
@@ -139,6 +149,33 @@ function duration(value: unknown, path: string, fallback: number): number {
     throw new Error(`${path}: expected a positive safe integer number of milliseconds`)
   }
   return value
+}
+
+function modulesFrom(value: unknown, fallback: number): Record<string, ModuleProfile> {
+  return Object.fromEntries(Object.entries(record(value, "modules")).map(([id, value]) => {
+    const path = `modules.${id}`
+    string(id, path)
+    const profile = record(value, path)
+    for (const key of Object.keys(profile)) {
+      if (key !== "models" && key !== "cooldownMs") throw new Error(`${path}.${key}: unknown field`)
+    }
+    const cooldownMs = duration(profile.cooldownMs, `${path}.cooldownMs`, fallback)
+    if (!Array.isArray(profile.models) || profile.models.length === 0) {
+      throw new Error(`${path}: expected a non-empty models array`)
+    }
+    const seen = new Set<string>()
+    const models = profile.models.map((value, index) => {
+      const modelPath = `${path}.models[${index}]`
+      const item: Record<string, unknown> = isRecord(value) ? value : { id: value }
+      const { cooldownMs: override, ...reference } = item
+      const ref = modelRef(reference, modelPath)
+      const key = JSON.stringify([ref.providerID, ref.modelID])
+      if (seen.has(key)) throw new Error(`${modelPath}: duplicate model candidate`)
+      seen.add(key)
+      return { ...ref, cooldownMs: duration(override, `${modelPath}.cooldownMs`, cooldownMs) }
+    })
+    return [id, { models, cooldownMs }]
+  }))
 }
 
 function budgetsFrom(value: unknown): TokenBudgetConfig[] {
@@ -283,7 +320,7 @@ export function parseConfig(input: unknown = {}): QuartermasterConfig {
   const options = record(input, "options")
   const fields = new Set([
     "plans", "agents", "workTypes", "usageSources", "quotaExemptModels", "exclusiveModels", "providerCooldownMs",
-    "localHealthTimeoutMs", "localEndpoints", "budgets", "tokenRates",
+    "localHealthTimeoutMs", "localEndpoints", "budgets", "tokenRates", "modules",
   ])
   for (const key of Object.keys(options)) {
     if (!fields.has(key)) throw new Error(`options.${key}: unknown field`)
@@ -295,6 +332,8 @@ export function parseConfig(input: unknown = {}): QuartermasterConfig {
   const usageSources = options.usageSources === undefined ? {} : stringMap(options.usageSources, "usageSources")
   const budgets = options.budgets === undefined ? undefined : budgetsFrom(options.budgets)
   const tokenRates = options.tokenRates === undefined ? undefined : tokenRatesFrom(options.tokenRates)
+  const providerCooldownMs = duration(options.providerCooldownMs, "providerCooldownMs", DEFAULTS.providerCooldownMs)
+  const modules = options.modules === undefined ? undefined : modulesFrom(options.modules, providerCooldownMs)
   for (const [provider, source] of Object.entries(usageSources)) {
     if (!["go", "codex", "cursor"].includes(source)) {
       throw new Error(`usageSources.${provider}: expected one of go, codex, cursor`)
@@ -318,9 +357,10 @@ export function parseConfig(input: unknown = {}): QuartermasterConfig {
     usageSources,
     ...(budgets === undefined ? {} : { budgets }),
     ...(tokenRates === undefined ? {} : { tokenRates }),
+    ...(modules === undefined ? {} : { modules }),
     quotaExemptModels: exemptModels,
     exclusiveModels: exclusive,
-    providerCooldownMs: duration(options.providerCooldownMs, "providerCooldownMs", DEFAULTS.providerCooldownMs),
+    providerCooldownMs,
     localHealthTimeoutMs: duration(options.localHealthTimeoutMs, "localHealthTimeoutMs", DEFAULTS.localHealthTimeoutMs),
     localEndpoints: local,
   }

@@ -147,14 +147,15 @@ await writeFile(join(directory, "opencode.json"), JSON.stringify({
     [providers.initial]: provider("composer"),
     [providers.selected]: provider("selected"),
   },
-  plugins: [{ package: pluginPackage, options: {
-    plans: { admission: [selected], queued: [selected, initial], broken: [selected], ...(routingProof ? { recover: [selected, initial] } : {}) },
-    agents: { build: "admission", "qm-managed-test": "admission", "qm-managed-child": "admission", "qm-managed-broken": "broken", "qm-managed-queued": "queued", ...(routingProof ? { "qm-managed-recover": "recover" } : {}) },
-    exclusiveModels: [selected],
-    localEndpoints: { [providers.selected]: `${baseURL}/health` },
-    ...(routingProof ? { providerCooldownMs: 30_000 } : {}),
-  } }],
+  plugins: [{ package: pluginPackage }],
 }, null, 2))
+await writeFile(join(directory, "quartermaster.jsonc"), `${JSON.stringify({
+  plans: { admission: [selected], queued: [selected, initial], broken: [selected], ...(routingProof ? { recover: [selected, initial] } : {}) },
+  agents: { build: "admission", "qm-managed-test": "admission", "qm-managed-child": "admission", "qm-managed-broken": "broken", "qm-managed-queued": "queued", ...(routingProof ? { "qm-managed-recover": "recover" } : {}) },
+  exclusiveModels: [selected],
+  localEndpoints: { [providers.selected]: `${baseURL}/health` },
+  ...(routingProof ? { providerCooldownMs: 30_000 } : {}),
+}, null, 2)}\n`)
 console.log(JSON.stringify({ directory, pluginRoot, pluginPackage, providers, baseURL, traceURL: `${baseURL}/trace`, processID: process.pid }, null, 2))
 console.log("Use this project in stock OpenChamber. Send qm-managed-auto; expect selected, never composer. No external provider is part of this fixture.")
 for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => server.close(() => process.exit(0)))

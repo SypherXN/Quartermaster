@@ -71,7 +71,8 @@ try {
     const { readFile, writeFile } = await import('node:fs/promises');
     const { join } = await import('node:path');
     const options = { plans: { check: ['fake/model'] }, agents: { reviewer: 'check' } };
-    await writeFile('opencode.json', JSON.stringify({ plugins: [{ package: 'opencode-quartermaster@0.1.0', options }] }));
+    await writeFile('opencode.json', JSON.stringify({ plugins: [{ package: 'opencode-quartermaster@0.1.0' }] }));
+    await writeFile('quartermaster.jsonc', JSON.stringify(options));
     const sources = async directory => [{ type: 'document', path: join(directory, 'opencode.json'), info: JSON.parse(await readFile(join(directory, 'opencode.json'), 'utf8')) }];
     assert.deepEqual((await readProjectQuartermasterOptions(process.cwd(), sources)).options, options);
     console.log('Installed root/RPC imports and versioned project-options recognition passed');

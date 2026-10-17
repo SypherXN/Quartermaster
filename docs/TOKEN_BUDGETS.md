@@ -4,8 +4,7 @@ Budgets are opt-in Quartermaster configuration for warnings about observed
 token usage over rolling or calendar windows. They do not filter or reorder
 models, enforce a hard cap, or switch the active session model.
 
-These examples are Quartermaster plugin `options`, not complete OpenCode
-configuration files. Merge them into the existing options object.
+These examples are the contents of `quartermaster.jsonc`, not an OpenCode plugin entry and not a complete OpenCode configuration file. Merge them into the existing settings file. Do not put them in `plugins[].options`.
 
 ```json
 {

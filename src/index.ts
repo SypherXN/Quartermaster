@@ -1,7 +1,8 @@
 import { Plugin } from "@opencode/plugin"
 import { registerAgentRouting } from "./agent-routing.ts"
 import { parseConfig } from "./config.ts"
-import { adoptProjectQuartermasterOptions } from "./project-options.ts"
+import { ModuleCooldowns } from "./modules.ts"
+import { adoptProjectQuartermasterOptions, type ConfigurationReader } from "./project-options.ts"
 import { readUsageStatus, type UsageReadResult } from "./usage.ts"
 import { registerQuartermasterRpc } from "./rpc.ts"
 import { startTokenCollector } from "./telemetry/collector.ts"
@@ -10,15 +11,26 @@ import { TokenLedger } from "./telemetry/ledger.ts"
 import { TokenBudgetGate } from "./telemetry/budget-gate.ts"
 import { PluginAttributionLedger } from "./telemetry/attribution.ts"
 
+function startupConfigurationReader(ctx: object): ConfigurationReader | undefined {
+  const reader = (ctx as { quartermasterConfigurationReader?: unknown }).quartermasterConfigurationReader
+  return typeof reader === "function" ? reader as ConfigurationReader : undefined
+}
+
 export default Plugin.define({
   id: "quartermaster",
   async setup(ctx) {
-    const config = parseConfig(ctx.options)
-    if (ctx.location.directory) await adoptProjectQuartermasterOptions(config, ctx.location.directory).catch(() => undefined)
+    if (ctx.options && typeof ctx.options === "object" && !Array.isArray(ctx.options) && Object.keys(ctx.options).length > 0)
+      throw new Error("Quartermaster settings belong in quartermaster.jsonc beside the OpenCode config that registers the plugin, not in plugins[].options")
+    const config = parseConfig({})
+    const readConfiguration = startupConfigurationReader(ctx)
+    if (ctx.location.directory) await adoptProjectQuartermasterOptions(config, ctx.location.directory, readConfiguration).catch(() => undefined)
     const ledger = new TokenLedger(ctx.storage)
     const errorLedger = new ProviderErrorLedger(ctx.storage)
     const attributionLedger = new PluginAttributionLedger(ctx.storage)
     const projectID = ctx.location.project.id
+    const modules = await ModuleCooldowns.load(config, ctx.storage, projectID, Date.now,
+      ctx.location.directory ? () => adoptProjectQuartermasterOptions(config, ctx.location.directory, readConfiguration) : undefined,
+      () => readUsageStatus(ctx))
     const budgetGate = config.budgets?.length
       ? new TokenBudgetGate(config.budgets, projectID, await ledger.list({ projectID }))
       : undefined
@@ -29,7 +41,7 @@ export default Plugin.define({
         console.warn(`[quartermaster] opencode-usage status unavailable: ${usage.reason}`)
       }
     }
-    const routing = await registerAgentRouting(ctx, config, usage, budgetGate)
+    const routing = await registerAgentRouting(ctx, config, usage, budgetGate, readConfiguration)
     try {
       const rpc = await registerQuartermasterRpc(ctx, config, routing, usage, {
         projectID,
@@ -38,7 +50,7 @@ export default Plugin.define({
         attributionLedger,
         budgets: config.budgets,
         tokenRates: config.tokenRates,
-      }, ctx.location.directory)
+      }, ctx.location.directory, undefined, modules)
       const collector = startTokenCollector(ctx, ledger, async () => {
         if (!budgetGate) return
         const changed = budgetGate.update(await ledger.list({ projectID }))
@@ -46,7 +58,9 @@ export default Plugin.define({
       })
       let errorCollector
       try {
-        errorCollector = await startProviderErrorCollector(ctx, errorLedger)
+        errorCollector = typeof ctx.session?.hook === "function"
+          ? await startProviderErrorCollector(ctx, errorLedger)
+          : undefined
       } catch (error) {
         await collector.dispose()
         await rpc.dispose()
@@ -54,7 +68,7 @@ export default Plugin.define({
       }
       return async () => {
         try {
-          await errorCollector.dispose()
+          await errorCollector?.dispose()
         } finally {
           try {
             await rpc.dispose()

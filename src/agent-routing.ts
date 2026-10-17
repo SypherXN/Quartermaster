@@ -11,7 +11,7 @@ import { bindExclusive, ExclusiveLeases } from "./exclusive.ts"
 import { explainSelection, type SelectionExplanation } from "./explain.ts"
 import { AgentPins } from "./pins.ts"
 import { adoptProjectQuartermasterOptions, readNativeConfiguration, type ConfigurationReader } from "./project-options.ts"
-import { modelKey, resolvePlan, selectAgentModel, selectModel, type ModelEligibility } from "./select.ts"
+import { modelKey, resolvePlan, selectAgentModel, selectModel, selectNamedPlan, type ModelEligibility } from "./select.ts"
 import { readUsageStatus, type UsageReadResult, type UsageSourceID } from "./usage.ts"
 import type { TokenBudgetGate, TokenBudgetReason } from "./telemetry/budget-gate.ts"
 
@@ -113,6 +113,7 @@ export async function registerAgentRouting(
 ) {
   if (
     config.exclusiveModels.length === 0 &&
+    Object.keys(config.plans).length === 0 &&
     Object.keys(config.agents).length === 0 &&
     Object.keys(config.workTypes).length === 0 &&
     !(ctx.command && ctx.session)
@@ -610,6 +611,29 @@ export async function registerAgentRouting(
     return { ...explainSelection(selection), plan: { id: resolution.planID, source: resolution.source, reasonCode: resolution.reason.code } }
   }
 
+  const selectPlan = async (planID: string): Promise<SelectionExplanation & { plan?: { id: string; source: "named-plan"; reasonCode: "named-plan" } }> => {
+    const now = Date.now()
+    const selection = selectNamedPlan(
+      config,
+      planID,
+      registry,
+      failures.apply(baseSnapshot(), registry, now),
+      now,
+      (model) => leases.taken(model),
+    )
+    if (selection.status === "no-plan") {
+      return {
+        ...explainSelection(selection),
+        reasonCode: "unknown-plan",
+        reason: "No model plan is configured with this name.",
+      }
+    }
+    return {
+      ...explainSelection(selection),
+      plan: { id: planID, source: "named-plan" as const, reasonCode: "named-plan" },
+    }
+  }
+
   const plans = () => ({ plans: config.plans, agents: config.agents, workTypes: config.workTypes })
   const status = async () => {
     await ensureProjectOptions()
@@ -656,6 +680,7 @@ export async function registerAgentRouting(
       return explainSelection(selectedFor(agentID, sessionID))
     },
     select,
+    selectPlan,
     status,
     diagnoseSession,
     refresh(nextEligibility?: ReadonlyMap<string, ModelEligibility>) {

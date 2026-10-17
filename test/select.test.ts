@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { modelKey, selectAgentModel, selectModel } from "../src/select.ts"
+import { modelKey, selectAgentModel, selectModel, selectNamedPlan } from "../src/select.ts"
 import type { ModelEligibility } from "../src/select.ts"
 import type { ModelRef } from "../src/config.ts"
 
@@ -120,5 +120,36 @@ test("a busy exclusive model is skipped, including a pin, unless this agent hold
   if (pinned.status === "selected") {
     assert.equal(pinned.model, backup)
     assert.equal(pinned.skipped[0]?.reason.code, "exclusive-busy")
+  }
+})
+
+test("named plan follows plan order and does not borrow an agent pin", () => {
+  const plans = { review: [primary, backup], other: [backup] }
+  const eligible = new Map<string, ModelEligibility>([
+    [modelKey(primary), { status: "available" }],
+    [modelKey(backup), { status: "available" }],
+  ])
+  const named = selectNamedPlan({ plans }, "review", registry, eligible, 100)
+  const pinned = selectAgentModel({ plans, agents: { reviewer: "review" } }, "reviewer", registry, eligible, 100, backup)
+  assert.deepEqual(named, selectModel(plans.review, registry, eligible, 100))
+  assert.equal(named.status, "selected")
+  if (named.status === "selected") assert.equal(named.model, primary)
+  assert.equal(pinned.status, "selected")
+  if (pinned.status === "selected") assert.equal(pinned.model, backup)
+  assert.deepEqual(selectNamedPlan({ plans }, "missing", registry, eligible, 100), {
+    status: "no-plan", reason: { code: "unknown-plan" }, skipped: [],
+  })
+  assert.equal(selectNamedPlan({ plans }, "toString", registry, eligible, 100).reason.code, "unknown-plan")
+  const exhausted = selectNamedPlan({ plans }, "review", registry, new Map([
+    [modelKey(primary), { status: "limited" }],
+    [modelKey(backup), { status: "limited" }],
+  ]), 100)
+  assert.equal(exhausted.status, "no-eligible")
+  if (exhausted.status === "no-eligible") assert.deepEqual(exhausted.skipped.map((skip) => skip.reason.code), ["limited", "limited"])
+  const busy = selectNamedPlan({ plans }, "review", registry, eligible, 100, (model) => model.modelID === primary.modelID)
+  assert.equal(busy.status, "selected")
+  if (busy.status === "selected") {
+    assert.equal(busy.model, backup)
+    assert.equal(busy.skipped[0]?.reason.code, "exclusive-busy")
   }
 })

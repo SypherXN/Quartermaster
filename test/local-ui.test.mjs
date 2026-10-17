@@ -107,11 +107,21 @@ test("local gateway applies options only for its project", async (t) => {
   const other = await mkdtemp(join(tmpdir(), "qm-ui-other-"))
   const text = `{
     "model": "keep",
-    "plugins": [{ "package": "quartermaster", "options": { "plans": { "review": ["provider-a/old"] } } }]
+    "plugins": [{ "package": "quartermaster" }]
   }
+`
+  const settingsText = `{
+  "plans": {
+    "review": [
+      "provider-a/old"
+    ]
+  }
+}
 `
   await writeFile(join(root, "opencode.json"), text)
   await writeFile(join(other, "opencode.json"), text)
+  await writeFile(join(root, "quartermaster.jsonc"), settingsText)
+  await writeFile(join(other, "quartermaster.jsonc"), settingsText)
   let locationDirectory = root
   let configReads = 0
   const upstream = createServer(async (request, response) => {
@@ -150,24 +160,27 @@ test("local gateway applies options only for its project", async (t) => {
     body: JSON.stringify({ revision: current.revision, options: { plans: { review: ["provider-a/new"] } } }),
   })
   assert.equal(applied.status, 200)
-  assert.match(await readFile(join(root, "opencode.json"), "utf8"), /provider-a\/new/)
-  assert.match(await readFile(join(root, "opencode.json"), "utf8"), /"model": "keep"/)
+  assert.equal(await readFile(join(root, "opencode.json"), "utf8"), text)
+  assert.match(await readFile(join(root, "quartermaster.jsonc"), "utf8"), /provider-a\/new/)
   assert.equal(await readFile(join(other, "opencode.json"), "utf8"), text)
-  const before = await readFile(join(root, "opencode.json"), "utf8")
+  assert.equal(await readFile(join(other, "quartermaster.jsonc"), "utf8"), settingsText)
+  const before = await readFile(join(root, "quartermaster.jsonc"), "utf8")
   const stale = await fetch(`${origin}/api/options`, {
     method: "POST",
     headers: { ...headers, "content-type": "application/json" },
     body: JSON.stringify({ revision: 1, options: { plans: { review: ["provider-a/stale"] } } }),
   })
   assert.equal(stale.status, 409)
-  assert.equal(await readFile(join(root, "opencode.json"), "utf8"), before)
+  assert.equal(await readFile(join(root, "opencode.json"), "utf8"), text)
+  assert.equal(await readFile(join(root, "quartermaster.jsonc"), "utf8"), before)
   const denied = await fetch(`${origin}/api/options`, {
     method: "POST",
     headers: { origin: "http://attacker.invalid", "sec-fetch-site": "cross-site", "content-type": "application/json" },
     body: JSON.stringify({ revision: current.revision, options: { plans: { review: ["provider-a/stolen"] } } }),
   })
   assert.equal(denied.status, 403)
-  assert.equal(await readFile(join(root, "opencode.json"), "utf8"), before)
+  assert.equal(await readFile(join(root, "opencode.json"), "utf8"), text)
+  assert.equal(await readFile(join(root, "quartermaster.jsonc"), "utf8"), before)
   locationDirectory = other
   const previousReads = configReads
   assert.equal((await fetch(`${origin}/api/options`, { headers })).status, 409)
@@ -176,8 +189,10 @@ test("local gateway applies options only for its project", async (t) => {
     body: JSON.stringify({ revision: current.revision, options: {} }),
   })).status, 400)
   assert.equal(configReads, previousReads, "wrong location never reaches configuration sources")
-  assert.equal(await readFile(join(root, "opencode.json"), "utf8"), before)
+  assert.equal(await readFile(join(root, "opencode.json"), "utf8"), text)
+  assert.equal(await readFile(join(root, "quartermaster.jsonc"), "utf8"), before)
   assert.equal(await readFile(join(other, "opencode.json"), "utf8"), text)
+  assert.equal(await readFile(join(other, "quartermaster.jsonc"), "utf8"), settingsText)
 })
 
 test("local gateway rejects non-loopback upstreams and unsupported routes", () => {

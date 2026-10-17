@@ -110,6 +110,87 @@ test("allows no bindings and accepts custom durations", () => {
   assert.equal(parseConfig({ providerCooldownMs: 30, localHealthTimeoutMs: 50 }).providerCooldownMs, 30)
 })
 
+test("normalizes ordered module models with entry, module, and provider cooldowns", () => {
+  const config = parseConfig({
+    providerCooldownMs: 60_000,
+    modules: {
+      "opr-jev": {
+        cooldownMs: 120_000,
+        models: [{ id: "opencode/jev-1.13-free", cooldownMs: 900_000 }, "opencode/jev-1.13"],
+      },
+      generic: { models: [{ id: "openrouter/vendor/model", variant: "fast" }, "other/backup"] },
+    },
+  })
+  assert.deepEqual(config.modules, {
+    "opr-jev": {
+      cooldownMs: 120_000,
+      models: [
+        { providerID: "opencode", modelID: "jev-1.13-free", cooldownMs: 900_000 },
+        { providerID: "opencode", modelID: "jev-1.13", cooldownMs: 120_000 },
+      ],
+    },
+    generic: {
+      cooldownMs: 60_000,
+      models: [
+        { providerID: "openrouter", modelID: "vendor/model", variant: "fast", cooldownMs: 60_000 },
+        { providerID: "other", modelID: "backup", cooldownMs: 60_000 },
+      ],
+    },
+  })
+  const { modules, ...native } = config
+  assert.deepEqual(native, parseConfig({ providerCooldownMs: 60_000 }), "module models create no native plans, bindings, or exemptions")
+  assert.equal(parseConfig().modules, undefined)
+  const { modules: empty, ...defaults } = parseConfig({ modules: {} })
+  assert.deepEqual(empty, {})
+  assert.deepEqual(defaults, parseConfig())
+  assert.equal(parseConfig({ modules: { example: { models: ["p/m"] } } }).modules?.example.models[0].cooldownMs, 300_000)
+})
+
+test("validates module names, profile shape, model references, and duplicate models", () => {
+  for (const modules of [null, [], "opr-jev"]) {
+    assert.throws(() => parseConfig({ modules }), /modules: expected an object/)
+  }
+  for (const id of ["", " ", " opr-jev", "opr-jev "]) {
+    assert.throws(() => parseConfig({ modules: { [id]: { models: ["p/m"] } } }), /expected a non-empty string without surrounding whitespace/)
+  }
+  for (const profile of [null, [], "p/m", {}, { models: [] }, { models: "p/m" }]) {
+    assert.throws(() => parseConfig({ modules: { example: profile } }), /modules\.example: expected/)
+  }
+  assert.throws(() => parseConfig({ modules: { example: { models: ["p/m"], timeoutMs: 100 } } }), /modules\.example\.timeoutMs: unknown field/)
+  for (const model of [null, {}, 1, "unqualified", "/model", "p/", "p/white space", { id: "p/m", variant: " " }]) {
+    assert.throws(() => parseConfig({ modules: { example: { models: [model] } } }), /modules\.example\.models\[0\]/)
+  }
+  assert.throws(() => parseConfig({ modules: { example: { models: [{ id: "p/m", extra: true }] } } }), /models\[0\]\.extra: unknown field/)
+  for (const models of [["p/m", "p/m"], [{ id: "p/m", variant: "fast" }, { id: "p/m", variant: "slow" }]]) {
+    assert.throws(() => parseConfig({ modules: { example: { models } } }), /models\[1\]: duplicate model candidate/)
+  }
+  assert.throws(() => parseConfig({ plans: { review: [{ id: "p/m", cooldownMs: 10 }] } }), /plans\.review\[0\]\.cooldownMs: unknown field/)
+  assert.equal(parseConfig({ plans: { review: [{ id: "p/m", variant: "fast" }, { id: "p/m", variant: "slow" }] } }).plans.review.length, 2)
+})
+
+test("validates every module cooldown even when a model overrides it", () => {
+  for (const cooldownMs of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1, "100", null]) {
+    assert.throws(() => parseConfig({ modules: { example: { cooldownMs, models: [{ id: "p/m", cooldownMs: 1 }] } } }), /modules\.example\.cooldownMs: expected a positive safe integer/)
+    assert.throws(() => parseConfig({ modules: { example: { models: [{ id: "p/m", cooldownMs }] } } }), /modules\.example\.models\[0\]\.cooldownMs: expected a positive safe integer/)
+    assert.throws(() => parseConfig({ providerCooldownMs: cooldownMs, modules: { example: { cooldownMs: 1, models: ["p/m"] } } }), /providerCooldownMs: expected a positive safe integer/)
+  }
+  assert.equal(parseConfig({ modules: { example: { models: [{ id: "p/m", cooldownMs: Number.MAX_SAFE_INTEGER }] } } }).modules?.example.models[0].cooldownMs, Number.MAX_SAFE_INTEGER)
+})
+
+test("module examples in public docs parse with the documented cooldowns", async () => {
+  for (const path of ["../README.md", "../docs/PLUGIN_INTEGRATION.md"]) {
+    const text = await readFile(new URL(path, import.meta.url), "utf8")
+    const section = text.split("Direct-call module profiles")[1]
+    const example = section?.match(/```json\r?\n([\s\S]*?)\r?\n```/)?.[1]
+    assert.ok(example, `${path} must include a module configuration example`)
+    const profile = parseConfig(JSON.parse(example)).modules?.["opr-jev"]
+    assert.deepEqual(profile?.models, [
+      { providerID: "opencode", modelID: "jev-1.13-free", cooldownMs: 900_000 },
+      { providerID: "opencode", modelID: "jev-1.13", cooldownMs: 300_000 },
+    ])
+  }
+})
+
 test("rejects empty plans, malformed refs, duplicate candidates, and invalid variants", () => {
   assert.throws(() => parseConfig({ plans: { review: [] } }), /plans\.review: expected a non-empty array/)
   assert.throws(() => parseConfig({ plans: { review: ["not-qualified"] } }), /plans\.review\[0\]\.id: expected providerID\/modelID/)

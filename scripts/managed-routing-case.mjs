@@ -8,8 +8,10 @@ import { setTimeout as delay } from "node:timers/promises"
 export async function runRoutingProof({ fixture, proof, api, trace, control, diagnose, session, prompt, idle, until }) {
   const cooldownMs = 30_000
   const config = JSON.parse(await readFile(join(fixture.directory, "opencode.json"), "utf8"))
-  assert.equal(config.plugins[0].options.providerCooldownMs, cooldownMs)
-  assert.equal(config.plugins[0].options.usageSources, undefined, "the main fixture must not read live quota")
+  const settings = JSON.parse(await readFile(join(fixture.directory, "quartermaster.jsonc"), "utf8"))
+  assert.equal(config.plugins[0].options, undefined)
+  assert.equal(settings.providerCooldownMs, cooldownMs)
+  assert.equal(settings.usageSources, undefined, "the main fixture must not read live quota")
   const info = api("get", "/api/info")
   // Record separate boundary runs for this artifact; old checkout proofs are not release evidence.
   const snap = (id) => {
@@ -77,16 +79,18 @@ export async function runRoutingProof({ fixture, proof, api, trace, control, dia
   }
   const quotaDirectory = await mkdtemp(join(dirname(fixture.directory), "qm-quota-"))
   const quotaConfig = structuredClone(config)
+  const quotaSettings = structuredClone(settings)
   const quotaAdapter = join(quotaDirectory, "quota-adapter")
   await mkdir(quotaAdapter)
   const wrapper = await readFile(new URL("./managed-routing-proof/index.ts", import.meta.url), "utf8")
   await writeFile(join(quotaAdapter, "index.ts"), wrapper.replace('"../../index.js"', JSON.stringify(pathToFileURL(join(fixture.pluginRoot, "index.js")).href)))
   quotaConfig.plugins[0].package = quotaAdapter
-  quotaConfig.plugins[0].options.usageSources = { [fixture.providers.selected]: "go" }
-  quotaConfig.plugins[0].options.plans.quota = [`${fixture.providers.selected}/selected`, `${fixture.providers.initial}/composer`]
-  quotaConfig.plugins[0].options.agents["qm-managed-quota"] = "quota"
+  quotaSettings.usageSources = { [fixture.providers.selected]: "go" }
+  quotaSettings.plans.quota = [`${fixture.providers.selected}/selected`, `${fixture.providers.initial}/composer`]
+  quotaSettings.agents["qm-managed-quota"] = "quota"
   quotaConfig.agents["qm-managed-quota"] = { ...quotaConfig.agents["qm-managed-test"] }
   await writeFile(join(quotaDirectory, "opencode.json"), JSON.stringify(quotaConfig, null, 2))
+  await writeFile(join(quotaDirectory, "quartermaster.jsonc"), `${JSON.stringify(quotaSettings, null, 2)}\n`)
   const quotaStatus = api("post", "/api/rpc/quartermaster/status", { input: {} }, false, quotaDirectory).output
   const quotaSource = quotaStatus.sources?.[fixture.providers.selected]
   assert.equal(quotaSource?.availability, "limited", "synthetic quota must be visible before claiming a skip")

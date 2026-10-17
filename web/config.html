@@ -11,9 +11,9 @@
 </style>
 <h1>Quartermaster config draft</h1>
 <p class="warning"><strong>Opt-in, offline tool.</strong> This page does not connect to OpenCode or write files. It only validates JSON syntax and downloads a draft for manual review and paste. It does not validate Quartermaster semantics or preserve JSONC comments.</p>
-<label for="options">Quartermaster plugin options JSON</label>
+<label for="options">Quartermaster settings JSON</label>
 <textarea id="options" spellcheck="false" aria-describedby="help"></textarea>
-<p id="help">Paste only the contents of Quartermaster's <code>plugins[].options</code>.</p>
+<p id="help">Paste the contents of the project's <code>quartermaster.jsonc</code>.</p>
 <button id="download" type="button">Validate JSON and download draft</button>
 <p id="status" role="status" aria-live="polite">No draft downloaded.</p>
 <script>

@@ -10,9 +10,8 @@ const readJson = async (path: string) =>
   JSON.parse(await readFile(new URL(path, import.meta.url), "utf8"))
 
 async function fixtureConfig() {
-  const hostConfig = await readJson("../../examples/test-agent/opencode.json")
   const fixture = await readJson("../fixtures/availability-cycle.json")
-  const options = hostConfig.plugins[0].options
+  const options = await readJson("../../examples/test-agent/quartermaster.jsonc")
   const config = parseConfig({
     ...options,
     plans: { ...options.plans, "test-agent": fixture.models },

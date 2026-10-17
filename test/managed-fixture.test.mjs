@@ -35,9 +35,11 @@ test("managed fixture observes multipart markers and bounded held responses", { 
       })
     })
     const config = JSON.parse(await readFile(join(fixture.directory, "opencode.json"), "utf8"))
+    const settings = JSON.parse(await readFile(join(fixture.directory, "quartermaster.jsonc"), "utf8"))
     assert.deepEqual(Object.keys(config.providers), [fixture.providers.initial, fixture.providers.selected])
     assert.ok(fixture.providers.selected.includes(basename(fixture.directory)))
-    assert.deepEqual(config.plugins[0].options.plans.admission, [`${fixture.providers.selected}/selected`])
+    assert.equal(config.plugins[0].options, undefined)
+    assert.deepEqual(settings.plans.admission, [`${fixture.providers.selected}/selected`])
     const request = (path, options) => fetch(fixture.baseURL + path, { ...options, signal: AbortSignal.timeout(5_000) })
     await request("/hold", { method: "POST" })
     const response = await request("/v1/chat/completions", { method: "POST", headers: { "content-type": "application/json", "x-qm-fixture-variant": "deliberate" },
@@ -105,13 +107,15 @@ test("routing-proof fixture keeps the default package and adds a recoverable pla
       })
     })
     const config = JSON.parse(await readFile(join(fixture.directory, "opencode.json"), "utf8"))
+    const settings = JSON.parse(await readFile(join(fixture.directory, "quartermaster.jsonc"), "utf8"))
     const selected = `${fixture.providers.selected}/selected`
     const composer = `${fixture.providers.initial}/composer`
     assert.equal(config.plugins.length, 1)
-    assert.deepEqual(config.plugins[0].options.plans.recover, [selected, composer])
-    assert.equal(config.plugins[0].options.agents["qm-managed-recover"], "recover")
-    assert.equal(config.plugins[0].options.providerCooldownMs, 30_000)
-    assert.equal(config.plugins[0].options.usageSources, undefined)
+    assert.equal(config.plugins[0].options, undefined)
+    assert.deepEqual(settings.plans.recover, [selected, composer])
+    assert.equal(settings.agents["qm-managed-recover"], "recover")
+    assert.equal(settings.providerCooldownMs, 30_000)
+    assert.equal(settings.usageSources, undefined)
     assert.equal(config.agents["qm-managed-recover"].model, composer)
     const request = (path, body) => fetch(fixture.baseURL + path, { method: "POST", signal: AbortSignal.timeout(5_000),
       headers: { "content-type": "application/json" }, body: JSON.stringify(body) })

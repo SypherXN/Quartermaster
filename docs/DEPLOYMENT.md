@@ -49,17 +49,8 @@ permissions, MCPs, agents and plugins; merge an entry, not a whole config file.
   `~/.config/opencode/opencode.json(c)` (or its configured XDG location). Use the
   installed relative/absolute destination path, never a maintainer checkout.
   Do not also enable an autoloaded copy.
-- The highest-priority Quartermaster declaration replaces lower-priority options
-  **as a whole**, not per field. Repeat required plans, bindings and maps. Keep
-  one matching entry per document; ambiguous duplicates fail closed.
-- Native discovery searches ancestors and applies `.opencode` layers after
-  direct files. The current source options writer consumes the receiving
-  server's ordered native documents rather than guessing that order. It accepts
-  comments and trailing-comma JSONC, but edits only a winning project-contained
-  entry; inherited or inline winners are read-only. Unavailable exact-server
-  provenance makes editing unavailable. See the [options RPC contract](PLUGIN_INTEGRATION.md#configuration-editing-capability)
-  for the same-PID, no-start discovery boundary. This source repair does not
-  re-certify previously recorded deployment archives.
+- The highest-priority Quartermaster registration wins. Its sibling `quartermaster.jsonc` replaces lower-priority settings **as a whole**, not per field. Repeat required plans, bindings and maps. Keep one matching entry per document; ambiguous duplicates fail closed. Non-empty `plugins[].options` is rejected. Omit plugin options, or leave them empty.
+- Native discovery searches ancestors and applies `.opencode` layers after direct files. The current source settings writer consumes the receiving server's ordered native documents rather than guessing that order. It reads comments and trailing-comma JSONC. It rewrites only `quartermaster.jsonc` beside a winning registration inside the project. Global, ancestor, and pathless winners are read-only. A pathless winner has no sibling file, so its settings are empty. A missing settings file means `{}`. The OpenCode config bytes stay unchanged. Unavailable exact-server provenance makes editing unavailable. See the [options RPC contract](PLUGIN_INTEGRATION.md#configuration-editing-capability) for the same-PID, no-start discovery boundary. This source repair does not re-certify previously recorded deployment archives.
 
 Define the agent **and** bind its exact ID; bindings do not create agents. Replace
 every `YOUR_...` below with enabled `providerID/modelID` values from the receiving
@@ -73,12 +64,17 @@ markers, not working fixture providers.
     "reviewer": { "mode": "all", "model": "YOUR_PROVIDER/YOUR_DEFAULT_MODEL" }
   },
   "plugins": [{
-    "package": "./.quartermaster/node_modules/opencode-quartermaster",
-    "options": {
-      "plans": { "review": ["YOUR_PROVIDER/YOUR_PRIMARY_MODEL", "YOUR_BACKUP_PROVIDER/YOUR_BACKUP_MODEL"] },
-      "agents": { "reviewer": "review" }
-    }
+    "package": "./.quartermaster/node_modules/opencode-quartermaster"
   }]
+}
+```
+
+Settings in the sibling `quartermaster.jsonc`:
+
+```jsonc
+{
+  "plans": { "review": ["YOUR_PROVIDER/YOUR_PRIMARY_MODEL", "YOUR_BACKUP_PROVIDER/YOUR_BACKUP_MODEL"] },
+  "agents": { "reviewer": "review" }
 }
 ```
 
@@ -97,6 +93,34 @@ quota from an absent mapping. No provider polling or forced refresh is required.
 `localEndpoints` optionally maps a local provider to its existing loopback
 HTTP(S) GET health URL; probes omit credentials and cache for five seconds.
 A stopped inference server is offline; installation never requires starting it.
+
+## Direct-call modules
+
+`modules` is optional and compatible with existing native plans and bindings. Omit it, or set `{}`, to leave chat routing unchanged. A profile does not register models, bind agents or authorize payment. When a higher-priority registration wins, repeat `modules` in that registration's `quartermaster.jsonc` with the plans and bindings that file must keep.
+
+Turning on a consumer is separate from installing Quartermaster. The
+permission-reviewer route stays off unless global `permission-reviewer.jsonc`
+sets `moduleRouting.enabled` to true. A project OpenCode file, prompt, command
+or repository file cannot enable that route or permit a paid model. This
+package does not build, install, or activate the reviewer plugin. Build and
+enable that package on its own, and do not bind its runtime agent in
+Quartermaster's `agents` map.
+
+Quartermaster stores only the configured cooldown: model `cooldownMs`, otherwise
+the module default, otherwise `providerCooldownMs`. That is time out of
+rotation, not the consumer's review deadline and not a discovered `Retry-After`
+or provider quota window. The consumer owns its deadline. Module helpers default
+to a two-second RPC budget and share the caller's abort signal.
+
+The [2026-10-13 archive](#verified-private-artifact-2026-10-13) predates
+`selectModule` and `reportModuleCooldown`. This checkout's `npm test`,
+`npm run typecheck` and `npm run build` cover the current source. Artifact
+creation was not rerun for the module work, so that historical hash is not
+evidence for the new exports. Permission-reviewer checks that mock Quartermaster
+and the System One client are not a live Quartermaster process, a real Jev
+limit or an activated install. OpenCode V1 has no Quartermaster RPC client;
+enabling the reviewer route there fails closed. Publishing, restarts and paid
+live validation were not run.
 
 ## Receiving runtime and updates
 
@@ -123,9 +147,7 @@ Then verify imports and the receiving runtime. Existing routing hooks can adopt
 plans and bindings at idle boundaries. Changes to startup-built services or hook
 registration, such as budgets, reporting or exclusivity, may require an
 **authorized** reload. Do not restart live servers merely to test.
-The current source options-save RPC resolves native precedence when provenance
-is available and backs up only its writable winning project file. Roll back the archive and only changed plugin
-entry/options, not somebody else's later edits. Verify the reloaded instance.
+The current source options-save RPC resolves native precedence when provenance is available and backs up only an existing winning project `quartermaster.jsonc`. It leaves the OpenCode config unchanged. Roll back the archive and only the changed registration and settings file, not somebody else's later edits. Verify the reloaded instance.
 
 ## Release checklist
 
@@ -169,7 +191,7 @@ The local release gate passed for `opencode-quartermaster@0.1.0`, SDK dependency
 `6f23194e7ceb56e78bacba602426a73bd2bfda926ba9d891de4c1c24a68ff0a1`
 
 This applies only to the exact private archive and tested combinations recorded
-below. Its embedded docs are a pre-verification snapshot; final evidence is
+below. That archive does not include the direct-call module API. Its embedded docs are a pre-verification snapshot; final evidence is
 recorded externally without changing the archive's bytes/hash. Other versions,
 macOS, Linux-managed OpenChamber and physical mobile devices remain untested.
 The queue/UI limitations above remain; no fork/proxy workaround, universal tool

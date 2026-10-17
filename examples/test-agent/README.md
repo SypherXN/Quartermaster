@@ -61,9 +61,7 @@ but no usage source is configured for Quartermaster in this project. The separat
 its cached provider status can be healthy while Quartermaster remains
 unconfigured until this project's `usageSources` map selects them.
 
-If a test agent exists but explanation returns `no-plan`, compare its agent binding
-and plan names in this project's Quartermaster options. Project options replace
-the host/global Quartermaster options rather than merging key-by-key: this
+If a test agent exists but explanation returns `no-plan`, compare its agent binding and plan names in this project's `quartermaster.jsonc`. That file replaces the host/global Quartermaster settings rather than merging key-by-key: this
 example binds both `qm-test` and `quartermaster-test` to `test-agent`.
 Bound agents route automatically by default. Use
 `/qm-manual` before deliberate model or variant changes; use `/qm-auto` to

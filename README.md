@@ -29,7 +29,7 @@ Copy the archive to the destination machine and install it locally:
 npm install --prefix .quartermaster --ignore-scripts --no-audit --no-fund /path/to/opencode-quartermaster-0.1.0.tgz
 ```
 
-Add exactly one plugin entry to the destination project's OpenCode config:
+Add exactly one plugin entry to the destination project's OpenCode config, and put Quartermaster settings in `quartermaster.jsonc` beside that file:
 
 ```jsonc
 {
@@ -39,29 +39,36 @@ Add exactly one plugin entry to the destination project's OpenCode config:
   },
   "plugins": [
     {
-      "package": "./.quartermaster/node_modules/opencode-quartermaster",
-      "options": {
-        "plans": { "review": ["provider-a/quality-model", "provider-b/backup-model"] },
-        "agents": { "reviewer": "review" }
-      }
+      "package": "./.quartermaster/node_modules/opencode-quartermaster"
     }
   ]
 }
 ```
 
-This example belongs in a project-root `opencode.json(c)`. Merge it into an
+Settings beside that file:
+
+```jsonc
+{
+  "plans": { "review": ["provider-a/quality-model", "provider-b/backup-model"] },
+  "agents": { "reviewer": "review" }
+}
+```
+
+This registration belongs in a project-root `opencode.json(c)`. Merge it into an
 existing config rather than replacing that file. Model IDs are placeholders:
 replace them with enabled `providerID/modelID` values from the receiving host's
 `opencode models` output. A binding does not create an agent; the example defines
-`reviewer` explicitly. Quartermaster settings go inside the plugin's `options`.
-[`examples/quartermaster.json`](examples/quartermaster.json) contains options
+`reviewer` explicitly. A missing `quartermaster.jsonc` means no settings. Do not
+also put settings in `plugins[].options`: a non-empty options object is rejected,
+while an omitted or empty options object is valid.
+[`examples/quartermaster.json`](examples/quartermaster.json) contains settings
 alone, not a full OpenCode config. For other config locations, see
 [registration scope](docs/DEPLOYMENT.md#registration-scope).
 
 ### Documentation guide
 
 - [Deployment](docs/DEPLOYMENT.md): installation, updates and dated host evidence.
-- [Plugin integration](docs/PLUGIN_INTEGRATION.md): selection and options RPCs.
+- [Plugin integration](docs/PLUGIN_INTEGRATION.md): native selection, direct-call modules and options RPCs.
 - [Telemetry](docs/TOKEN_TELEMETRY.md) and [budgets](docs/TOKEN_BUDGETS.md):
   observed usage, unknown attribution and advisory limits.
 - [Local tools](web/README.md): offline reports and opt-in configuration editing.
@@ -84,18 +91,13 @@ OpenCode 2.0.27, Ubuntu standalone 2.0.26, and stock OpenChamber 2.3.1 with mana
 OpenCode 2.0.27. See the [exact archive and tested matrix](docs/DEPLOYMENT.md#verified-private-artifact-2026-10-13).
 That historical record does not certify later source changes or untested hosts.
 
-For updates, retain the previous archive/hash and back up the exact destination config. Install a specific replacement archive, verify its root/RPC imports and receiving-runtime diagnostics, then restart only with authorization if required. Roll back by reinstalling the retained archive and restoring only the changed plugin entry/options from the backup. After a separately authorized registry release, `opencode-quartermaster@<exact-version>` will be the npm entry; it is not an available install route yet. Publishing, removing the private guard, credentials, registry uploads and release tags require separate approval.
+For updates, retain the previous archive/hash and back up the exact destination config. Install a specific replacement archive, verify its root/RPC imports and receiving-runtime diagnostics, then restart only with authorization if required. Roll back by reinstalling the retained archive and restoring the changed plugin registration and `quartermaster.jsonc` from the backup. After a separately authorized registry release, `opencode-quartermaster@<exact-version>` will be the npm entry; it is not an available install route yet. Publishing, removing the private guard, credentials, registry uploads and release tags require separate approval.
 
 ### Stock OpenChamber setup
 
-OpenChamber uses the same native OpenCode server plugin; no panel, bridge, fork or proxy is required for routing. Define the agent in OpenCode and bind that exact agent ID under Quartermaster `options.agents`. A plan binding does not create the agent. Check enabled model IDs in the receiving project's registry rather than assuming a provider/model name is available.
+OpenChamber uses the same native OpenCode server plugin; no panel, bridge, fork or proxy is required for routing. Define the agent in OpenCode and bind that exact agent ID under `agents` in `quartermaster.jsonc`. A plan binding does not create the agent. Check enabled model IDs in the receiving project's registry rather than assuming a provider/model name is available.
 
-Use one Quartermaster entry per config document. The highest-priority declaration
-replaces lower-priority Quartermaster options **as a whole**, not per key;
-repeat all required plans, bindings and maps. The project-options reader rejects
-ambiguous duplicates. Preserve unrelated host settings and back up config before
-an authorized edit. The options-save RPC also creates a `.quartermaster.bak`
-backup. Startup-fixed changes may require an authorized receiving-server restart.
+Use one Quartermaster registration per config document. The highest-priority registration wins, and its sibling `quartermaster.jsonc` replaces lower-priority settings **as a whole**, not per key; repeat all required plans, bindings and maps. A pathless registration has no sibling file, so its settings are empty. The project-options reader rejects ambiguous duplicates. Preserve unrelated host settings and back up config before an authorized edit. The options-save RPC copies an existing settings file to `quartermaster.jsonc.quartermaster.bak`, then rewrites that file. It leaves the OpenCode config unchanged. Startup-fixed changes may require an authorized receiving-server restart.
 
 Confirm the handling process with `/qm-status` or the immediate diagnostic RPC below, then correlate its PID with host process ownership. A host name of `cli` can also describe an OpenChamber-managed child; neither that label nor matching session IDs proves which server handled the chat. An unbound `build` agent is expected to stay on its host model: select an already defined bound agent rather than adding bindings implicitly. Missing RPC/commands mean checking plugin loading and location scope before diagnosing selection.
 
@@ -115,7 +117,7 @@ npm run typecheck
 
 ## Configuration
 
-All settings belong in the plugin entry's `options` object:
+All settings belong in `quartermaster.jsonc` next to the OpenCode config that registers the plugin:
 
 - **Plans:** ordered `providerID/modelID` strings or
   `{ "id": "providerID/modelID", "variant": "..." }` objects. Plans must be
@@ -155,6 +157,63 @@ Pins are validated against the agent's configured plan and enabled model registr
 An agent pin is a preference within automatic routing, not a session opt-out.
 Use `/qm-manual` when the host should control the session's model instead.
 
+### Direct-call module profiles
+
+The optional `modules` map defines independent profiles for third-party plugins
+that call models outside OpenCode's chat hooks. A module is configuration, not
+executable code or a provider client. Example `quartermaster.jsonc`:
+
+```json
+{
+  "modules": {
+    "opr-jev": {
+      "cooldownMs": 300000,
+      "models": [
+        { "id": "opencode/jev-1.13-free", "cooldownMs": 900000 },
+        "opencode/jev-1.13"
+      ]
+    }
+  }
+}
+```
+
+Each profile requires a nonempty, ordered `models` list of strings or
+`{ id, variant?, cooldownMs? }` objects. Module names must be nonempty without
+surrounding whitespace; provider/model candidates must be unique within a
+module, even across variants. Model IDs may contain `/`.
+
+Cooldowns are positive safe-integer milliseconds: entry `cooldownMs` overrides
+module `cooldownMs`, then `providerCooldownMs` (default 300000). This is time
+**out of rotation**, not an HTTP request timeout; the consumer owns its request
+deadline. Omitting `modules` or using `{}` leaves native routing unchanged.
+Native plan entries still accept only `id` and optional `variant`.
+
+Only the declared models are candidates for that module. They may be absent
+from the host chat registry; declaring them does not register native models,
+bind agents, verify credentials/health/quota, or authorize paid use. The consumer
+must enforce its own trusted configuration and model allowlist.
+
+Profile validation, persisted module cooldowns and ordered recommendations are
+implemented. With profiles configured, `quartermaster.status({})`
+includes a `modules` map with current selections and cooldown reasons/deadlines.
+Recommendations do not call providers. Health stays unknown. Unmapped models,
+including Jev, and models listed in `quotaExemptModels` stay cooldown-only with
+unknown quota. A Jev-only module does not request usage. Mapped Codex, Cursor,
+and Go providers in `usageSources` also need fresh available usage; limited,
+stale, missing, or failed usage skips that model. Usage recovery does not clear
+a cooldown. After a cooldown expires, the earlier eligible candidate wins again.
+
+Modules-only startup needs no native plans, agent bindings, chat catalog entry or
+session hooks. Module queries/reports adopt effective options; edits retain active
+deadlines, while removal durably prunes module-only state. Use `selectModule` and
+`reportModuleCooldown`, or the typed `requestModuleSelection` and
+`reportModuleCooldown` helpers from `opencode-quartermaster/rpc`.
+Configuration alone starts no cooldown.
+Existing `select`/failure-feedback RPCs remain native-routing APIs. See the
+[module contract and selection semantics](docs/PLUGIN_INTEGRATION.md#direct-call-module-profiles).
+
+The `opr-jev` profile above is an example name for one direct-call consumer. Quartermaster only recommends a configured model and stores a reported cooldown. It does not contain a Jev client. The permission-reviewer plugin owns the provider call and the allow or deny decision. That route stays off unless its trusted global `permission-reviewer.jsonc` sets `moduleRouting.enabled` to true. Project config, prompts, commands and repository evidence cannot enable it or permit a paid model. Installing Quartermaster does not build or activate that plugin. Mocked reviewer tests are not a live Quartermaster process or real Jev serving. The fail-closed sequence is in the [permission-reviewer example](docs/PLUGIN_INTEGRATION.md#permission-reviewer-example).
+
 ### Diagnose the handling runtime
 
 Run `/qm-status` in the chat being diagnosed. It queues a JSON diagnostic with `delivery:"queue"` and `resume:false`, without waking execution or changing the model, ownership, pins, leases or configuration. On stock OpenCode 2.0.25 and 2.0.26 it stays in the pending inbox, not the visible history, until a later normal turn delivers it; it can then become model context. Immediate in-chat display without inference is not supported by this command API. For immediate output without queuing anything, call the read-only `quartermaster.diagnoseSession({ sessionID })` RPC through the actual receiving server's authenticated, project-scoped `/api/rpc/quartermaster/diagnoseSession` endpoint with `{ "input": { "sessionID": "ses_..." } }`.
@@ -183,7 +242,9 @@ const status = await ctx.rpc(QUARTERMASTER_RPC).status({})
 const report = await requestReport(ctx, { since: Date.now() - 86_400_000, limit: 50 })
 ```
 
-RPC responses carry `apiVersion: 1`; selection returns the model reference and structured selected/skipped reason codes. The API also exposes `explain`, `pin`, `unpin`, `reportFailure`, and `reportSuccess`. Invalid inputs and unavailable routing have typed errors. Status contains sanitized usage windows and reset metadata, never upstream error text or credentials. `select` only recommends a model; it does not switch an active session model. Consumers should handle `unavailable` by keeping their host-selected model.
+RPC responses carry `apiVersion: 1`; selection returns the model reference and structured selected/skipped reason codes. `requestPlanSelection(ctx, { plan })` evaluates a named plan without an agent binding or a session. `requestSelection(ctx, { agent, workType? })` still uses the agent binding, work type, and pin. Both return the provider, model, optional variant, and skip reasons. The caller applies that model itself; Quartermaster does not switch the session or start inference. The API also exposes `explain`, `pin`, `unpin`, `reportFailure`, and `reportSuccess`. Invalid inputs and unavailable routing have typed errors. Status contains sanitized usage windows and reset metadata, never upstream error text or credentials. `select` only recommends a model; it does not switch an active session model. Consumers should handle `unavailable` by keeping their host-selected model.
+
+Direct-call modules use the same subpath. `requestModuleSelection` and `reportModuleCooldown` recommend and remember cooldowns; they do not call a provider or decide allow or deny. See the [module contract](docs/PLUGIN_INTEGRATION.md#direct-call-module-profiles).
 
 `requestReport` reads bounded usage, budget, and observed retry-error summaries for the plugin's active project context. It never accepts caller-supplied ownership; requesting another project returns `unsupported` because this plugin API exposes no caller identity/authorization mechanism. Reports label unknown attribution and incomplete live-event coverage, and `refresh` only rereads the durable ledgers—it does not poll providers or replay events. See [telemetry reporting limits](docs/TOKEN_TELEMETRY.md).
 
@@ -225,7 +286,7 @@ With explicit authorization and `OPENCODE_PERMISSION_REVIEWER_HOST_URL` pointing
 
 Append `--lifecycle-only` for backed-up scoped reload, deletion and two-project instance-isolation checks. It evicts only its disposable location through stock `/api/debug/location`, not every loaded location. For approved setup edits, run `node scripts/verify-managed-setup.mjs <global-pre-edit-backup> <project-pre-edit-backup>`: it checks only quota-map differences, registered IDs, cached usage, direct project options and a bounded credential-free NInfer health GET. No prompts or quota refresh are sent; sanitized evidence is saved under the approved temporary root. Confirm account mappings yourself: `openai -> codex` applies to a Codex OAuth account, not an arbitrary OpenAI API-key account.
 
-Keep one Quartermaster entry per document; ambiguous duplicates fail closed. Higher-priority declarations replace the whole lower-priority options object, not individual keys. The current source project-options reader uses the receiving server's ordered native documents, including ancestor/global layers, when exact-server provenance is available. Inherited and inline winners are read-only; unavailable provenance refuses editing without guessing files or starting another server. See the [options RPC contract](docs/PLUGIN_INTEGRATION.md#configuration-editing-capability) for discovery and JSONC boundaries. This repair does not re-certify historical deployment archives. Back up config before authorized changes. The stock config watcher can reload other locations after a global edit; a scoped disposable-location eviction is preferable for fixture-only reloads. Auxiliary reviewer config is startup-read and needs an authorized runtime reload.
+Keep one Quartermaster entry per document; ambiguous duplicates fail closed. Higher-priority registrations replace the whole lower-priority settings file, not individual keys. Global, ancestor, and pathless winners are readable and not writable. A pathless winner has no sibling file, so its settings are empty. Only a winning registration inside the project can be written, and the writer rewrites that `quartermaster.jsonc` without changing the OpenCode config. The current source project-options reader uses the receiving server's ordered native documents, including ancestor/global layers, when exact-server provenance is available. Inherited and inline winners are read-only; unavailable provenance refuses editing without guessing files or starting another server. See the [options RPC contract](docs/PLUGIN_INTEGRATION.md#configuration-editing-capability) for discovery and JSONC boundaries. This repair does not re-certify historical deployment archives. Back up config before authorized changes. The stock config watcher can reload other locations after a global edit; a scoped disposable-location eviction is preferable for fixture-only reloads. Auxiliary reviewer config is startup-read and needs an authorized runtime reload.
 
 The queued-input limit comes from [stock v2.0.26](https://github.com/anomalyco/opencode/tree/9b4ec5714d481559990db0a816d5dec19541a814):
 `packages/core/src/session/runner/llm.ts` resolves the model before promoting

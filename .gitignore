@@ -25,3 +25,10 @@ opencode-usage.json
 
 # Personal setup notes
 /local/
+
+# Local configuration backup and machine-specific proof runs
+/opencode.json.bak-*
+/scripts/proof-routing-offline.mjs
+/scripts/proof-routing-quota.mjs
+/scripts/proof-routing-retry.mjs
+/scripts/proof-routing-tail.mjs

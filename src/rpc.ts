@@ -2,6 +2,7 @@ import { Rpc } from "@opencode/plugin/rpc"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import type { QuartermasterConfig } from "./config.ts"
 import type { FailureReport, SuccessReport } from "./failures.ts"
+import type { ModuleCooldowns, ModuleCooldownReport, ModuleSelection } from "./modules.ts"
 import type { registerAgentRouting } from "./agent-routing.ts"
 import type { UsageReadResult, UsageSourceID } from "./usage.ts"
 import type { TokenBudgetConfig } from "./config.ts"
@@ -38,7 +39,14 @@ const model = object({ providerID: string, modelID: string, variant: string }, [
 export const QUARTERMASTER_RPC = Rpc.define({
   id: "quartermaster",
   methods: {
+    selectModule: { input: object({ module: string }, ["module"]), output, errors },
+    reportModuleCooldown: {
+      input: object({ module: string, providerID: string, modelID: string,
+        reason: { type: "string", enum: ["rate-limit", "temporary-unavailable"] } },
+      ["module", "providerID", "modelID", "reason"]), output, errors,
+    },
     select: { input: object({ agent: string, workType: string }, ["agent"]), output, errors: { invalid_input: errors.invalid_input } },
+    selectPlan: { input: object({ plan: string }, ["plan"]), output, errors: { invalid_input: errors.invalid_input } },
     explain: { input: object({ agent: string }, ["agent"]), output, errors: { invalid_input: errors.invalid_input } },
     status: { input: object({}), output },
     diagnoseSession: { input: object({ sessionID: string }, ["sessionID"]), output, errors },
@@ -91,6 +99,114 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
 
 export type SelectionInput = { agent: string; workType?: string }
+
+const nonempty = (value: unknown): value is string =>
+  typeof value === "string" && value.length > 0 && value.trim() === value
+const timestamp = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+function moduleInput(input: unknown, report: true): input is Record<string, unknown> & ModuleCooldownReport
+function moduleInput(input: unknown, report: false): input is Record<string, unknown> & { module: string }
+function moduleInput(input: unknown, report: boolean): input is Record<string, unknown> & { module: string } {
+  const keys = report ? ["module", "providerID", "modelID", "reason"] : ["module"]
+  return isRecord(input) && Object.keys(input).every(key => keys.includes(key)) && nonempty(input.module) &&
+    (!report || (nonempty(input.providerID) && nonempty(input.modelID) &&
+      (input.reason === "rate-limit" || input.reason === "temporary-unavailable")))
+}
+const validModel = (value: unknown): value is Record<string, unknown> => isRecord(value) &&
+  nonempty(value.providerID) && nonempty(value.modelID) && (value.variant === undefined || nonempty(value.variant))
+const sameModel = (a: Record<string, unknown>, b: Record<string, unknown>) =>
+  a.providerID === b.providerID && a.modelID === b.modelID && a.variant === b.variant
+
+type ModuleUnavailable = { status: "unavailable"; reasonCode: "timeout" | "cancelled" | "service-unavailable" | "invalid-response" | "invalid-input" }
+export type SafeModuleSelectionResult = ({ apiVersion: 1 } & ModuleSelection) | ModuleUnavailable
+export type ModuleCooldownAcknowledgement = { apiVersion: 1 } & Awaited<ReturnType<ModuleCooldowns["report"]>>
+export type SafeModuleCooldownResult = ModuleCooldownAcknowledgement | (ModuleUnavailable & { accepted: false })
+
+function moduleCandidate(candidate: Record<string, unknown>, evaluatedAt: number): boolean {
+  if (!validModel(candidate) || candidate.health !== "unknown") return false
+  if (candidate.quota !== "unknown" && candidate.quota !== "available" && candidate.quota !== "limited") return false
+  if (candidate.reason === "cooldown") {
+    return timestamp(candidate.blockedUntil) && candidate.blockedUntil > evaluatedAt &&
+      candidate.remainingMs === candidate.blockedUntil - evaluatedAt
+  }
+  if (candidate.blockedUntil !== undefined || candidate.remainingMs !== undefined) return false
+  if (candidate.reason === "declared") return candidate.quota === "unknown" || candidate.quota === "available"
+  if (candidate.reason === "limited") return candidate.quota === "limited"
+  return candidate.reason === "usage-unavailable" && candidate.quota === "unknown"
+}
+
+function validModuleSelection(value: unknown, module: string): boolean {
+  if (!isRecord(value) || value.apiVersion !== 1 || value.module !== module || !timestamp(value.evaluatedAt) || !Array.isArray(value.candidates)) return false
+  const candidates = value.candidates
+  const seen = new Set<string>()
+  let earliest = Infinity
+  for (const candidate of candidates) {
+    if (!isRecord(candidate) || !moduleCandidate(candidate, value.evaluatedAt)) return false
+    const key = JSON.stringify([candidate.providerID, candidate.modelID])
+    if (seen.has(key)) return false
+    seen.add(key)
+    if (candidate.reason === "cooldown") earliest = Math.min(earliest, candidate.blockedUntil as number)
+  }
+  const first = candidates.find(candidate => isRecord(candidate) && candidate.reason === "declared")
+  const nextEligibleAt = Number.isFinite(earliest) ? earliest : undefined
+  if (value.status === "selected") return !!first && isRecord(first) && validModel(value.selected) && sameModel(first, value.selected) && value.nextEligibleAt === undefined
+  if (value.selected !== undefined) return false
+  if (value.status === "no-module") return candidates.length === 0 && value.nextEligibleAt === undefined
+  return value.status === "no-eligible" && candidates.length > 0 && !first && value.nextEligibleAt === nextEligibleAt
+}
+
+async function moduleRequest(
+  invoke: (signal: AbortSignal) => Promise<unknown>, validate: (value: unknown) => boolean,
+  timeoutMs: number, signal?: AbortSignal,
+): Promise<unknown> {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2_147_483_647) return { status: "unavailable", reasonCode: "invalid-input" }
+  const controller = new AbortController()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let reasonCode: ModuleUnavailable["reasonCode"] = "service-unavailable"
+  let abort = () => {}
+  try {
+    if (signal?.aborted) return { status: "unavailable", reasonCode: "cancelled" }
+    const cancelled = new Promise<never>((_, reject) => {
+      abort = () => { reasonCode = "cancelled"; controller.abort(); reject(new Error("cancelled")) }
+      signal?.addEventListener("abort", abort, { once: true })
+      timer = setTimeout(() => { reasonCode = "timeout"; controller.abort(); reject(new Error("timeout")) }, timeoutMs)
+    })
+    const result = await Promise.race([invoke(controller.signal), cancelled])
+    if (controller.signal.aborted) return { status: "unavailable", reasonCode }
+    return validate(result) ? result : { status: "unavailable", reasonCode: "invalid-response" }
+  } catch {
+    return { status: "unavailable", reasonCode }
+  } finally {
+    clearTimeout(timer)
+    signal?.removeEventListener("abort", abort)
+  }
+}
+
+export async function requestModuleSelection(
+  ctx: Pick<Context, "rpc">, input: { module: string }, timeoutMs = 2_000, signal?: AbortSignal,
+): Promise<SafeModuleSelectionResult> {
+  if (!moduleInput(input, false)) return { status: "unavailable", reasonCode: "invalid-input" }
+  return await moduleRequest(
+    signal => ctx.rpc(QUARTERMASTER_RPC).selectModule(input, { signal }),
+    value => validModuleSelection(value, input.module), timeoutMs, signal,
+  ) as SafeModuleSelectionResult
+}
+
+export async function reportModuleCooldown(
+  ctx: Pick<Context, "rpc">, input: ModuleCooldownReport, timeoutMs = 2_000, signal?: AbortSignal,
+): Promise<SafeModuleCooldownResult> {
+  if (!moduleInput(input, true)) return { status: "unavailable", accepted: false, reasonCode: "invalid-input" }
+  const result = await moduleRequest(
+    signal => ctx.rpc(QUARTERMASTER_RPC).reportModuleCooldown(input, { signal }),
+    value => isRecord(value) && value.apiVersion === 1 && (
+      value.accepted === false && ["unknown-module", "unknown-model"].includes(String(value.reason)) ||
+      value.accepted === true && value.module === input.module && value.providerID === input.providerID &&
+      value.modelID === input.modelID && timestamp(value.blockedUntil) && value.blockedUntil > 0
+    ), timeoutMs, signal,
+  )
+  return isRecord(result) && result.status === "unavailable"
+    ? { ...result, accepted: false } as SafeModuleCooldownResult
+    : result as SafeModuleCooldownResult
+}
 
 type SelectionMetadata = {
   apiVersion: typeof QUARTERMASTER_API_VERSION
@@ -149,6 +265,79 @@ export async function requestSelection(
       status: "unavailable",
       reasonCode: timedOut ? "timeout" : "service-unavailable",
       reason: timedOut ? "Quartermaster selection timed out." : "Quartermaster service is unavailable.",
+    }
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
+
+export type SafePlanSelectionResult =
+  | ({
+      status: "selected"
+      selected: { providerID: string; modelID: string; variant?: string }
+      plan: { id: string; source: "named-plan"; reasonCode: string }
+    } & SelectionMetadata)
+  | ({
+      status: "no-eligible"
+      plan: { id: string; source: "named-plan"; reasonCode: string }
+    } & SelectionMetadata)
+  | ({ status: "no-plan" } & SelectionMetadata)
+  | {
+      status: "unavailable"
+      reasonCode: "invalid-input" | "timeout" | "service-unavailable" | "invalid-response"
+      reason: string
+    }
+
+function validSkip(value: unknown): boolean {
+  if (!isRecord(value) || !isRecord(value.model) || typeof value.code !== "string" || typeof value.reason !== "string") return false
+  return nonempty(value.model.providerID) && nonempty(value.model.modelID) &&
+    (value.model.variant === undefined || nonempty(value.model.variant))
+}
+
+function validPlanSelection(value: unknown, planID: string): boolean {
+  if (!isRecord(value) || value.apiVersion !== QUARTERMASTER_API_VERSION || typeof value.reasonCode !== "string" ||
+    typeof value.reason !== "string" || !Array.isArray(value.skipped) || !value.skipped.every(validSkip)) return false
+  if (value.status === "no-plan") return value.selected === undefined && value.plan === undefined
+  if (!isRecord(value.plan) || value.plan.id !== planID || value.plan.source !== "named-plan" || typeof value.plan.reasonCode !== "string") return false
+  if (value.status === "no-eligible") return value.selected === undefined
+  return value.status === "selected" && isRecord(value.selected) && nonempty(value.selected.providerID) &&
+    nonempty(value.selected.modelID) && (value.selected.variant === undefined || nonempty(value.selected.variant))
+}
+
+export async function requestPlanSelection(
+  ctx: Pick<Context, "rpc">,
+  input: { plan: string },
+  timeoutMs = 2_000,
+): Promise<SafePlanSelectionResult> {
+  if (!isRecord(input) || Object.keys(input).length !== 1 || !nonempty(input.plan) || input.plan.length > 256) {
+    return { status: "unavailable", reasonCode: "invalid-input", reason: "Expected a plan name." }
+  }
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2_147_483_647) {
+    return { status: "unavailable", reasonCode: "invalid-input", reason: "Expected a request timeout." }
+  }
+  const controller = new AbortController()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let timedOut = false
+  try {
+    const result = await Promise.race([
+      ctx.rpc(QUARTERMASTER_RPC).selectPlan(input, { signal: controller.signal }),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          timedOut = true
+          controller.abort()
+          reject(new Error("Quartermaster plan selection timed out"))
+        }, timeoutMs)
+      }),
+    ])
+    return validPlanSelection(result, input.plan)
+      ? result as SafePlanSelectionResult
+      : { status: "unavailable", reasonCode: "invalid-response", reason: "Quartermaster returned an invalid response." }
+  } catch {
+    return {
+      status: "unavailable",
+      reasonCode: timedOut ? "timeout" : "service-unavailable",
+      reason: timedOut ? "Quartermaster plan selection timed out." : "Quartermaster service is unavailable.",
     }
   } finally {
     if (timer) clearTimeout(timer)
@@ -243,8 +432,35 @@ export async function registerQuartermasterRpc(
   reporting?: ReportingServices,
   optionsDirectory?: string,
   readConfiguration: ConfigurationReader = readNativeConfiguration,
+  modules?: ModuleCooldowns,
 ) {
   return ctx.rpc.register(QUARTERMASTER_RPC, {
+    async selectModule(input, call) {
+      if (!moduleInput(input, false)) throw call.error("invalid_input", "Invalid module selection.", { path: "module", message: "expected only a non-empty module" })
+      call.signal.throwIfAborted()
+      if (!modules) throw call.error("unavailable", "Module runtime unavailable.", { reason: "not-configured" })
+      const result = await modules.query(input.module)
+      call.signal.throwIfAborted()
+      return { apiVersion: 1, ...result }
+    },
+    async reportModuleCooldown(input, call) {
+      if (!moduleInput(input, true)) throw call.error("invalid_input", "Invalid module cooldown report.", { path: "report", message: "expected exact module/model scope and supported reason" })
+      call.signal.throwIfAborted()
+      if (!modules) throw call.error("unavailable", "Module runtime unavailable.", { reason: "not-configured" })
+      const result = await modules.report(input)
+      call.signal.throwIfAborted()
+      return { apiVersion: 1, ...result }
+    },
+    async selectPlan(input, call) {
+      if (!isRecord(input) || Object.keys(input).some((key) => key !== "plan") || !nonempty(input.plan) || input.plan.length > 256) {
+        throw call.error("invalid_input", "plan is required", { path: "plan", message: "expected only a non-empty plan name" })
+      }
+      call.signal.throwIfAborted()
+      if (!routing) return { apiVersion: QUARTERMASTER_API_VERSION, status: "no-plan", reasonCode: "unknown-plan", reason: "No model plan is configured with this name.", skipped: [] }
+      const result = await routing.selectPlan(input.plan)
+      call.signal.throwIfAborted()
+      return { apiVersion: QUARTERMASTER_API_VERSION, ...result }
+    },
     async select(input, call) {
       if (!isRecord(input) || typeof input.agent !== "string" || !input.agent.trim()) throw call.error("invalid_input", "agent is required", { path: "agent", message: "expected a non-empty string" })
       const agent = input.agent
@@ -259,7 +475,12 @@ export async function registerQuartermasterRpc(
       return { apiVersion: 1, ...(routing ? await routing.explain(input.agent, typeof input.sessionID === "string" ? input.sessionID : undefined) : { status: "no-plan", reasonCode: "unbound-agent", reason: "No model plan is configured for this agent.", skipped: [] }) }
     },
     async status() {
-      return routing ? await routing.status() : statusFallback(config, usage)
+      await modules?.refresh()
+      const status = routing ? await routing.status() : statusFallback(config, usage)
+      return modules && Object.keys(config.modules ?? {}).length ? {
+        ...status,
+        modules: await modules.selections(),
+      } : status
     },
     async diagnoseSession(input, call) {
       if (!isRecord(input) || Object.keys(input).some((key) => key !== "sessionID") ||

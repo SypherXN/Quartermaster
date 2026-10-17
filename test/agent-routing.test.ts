@@ -664,9 +664,10 @@ test("adopting project options revalidates and persists project-scoped pins", as
   let routing: Awaited<ReturnType<typeof registerAgentRouting>>
   try {
     await writeFile(join(directory, "opencode.json"), JSON.stringify({
-      plugins: [{ package: "quartermaster", options: {
-        plans: { review: ["provider-a/primary"] }, agents: { reviewer: "review" },
-      } }],
+      plugins: [{ package: "quartermaster" }],
+    }))
+    await writeFile(join(directory, "quartermaster.jsonc"), JSON.stringify({
+      plans: { review: ["provider-a/primary"] }, agents: { reviewer: "review" },
     }))
     const baseConfig = parseConfig({
       plans: { review: ["provider-a/primary", { id: "provider-b/backup", variant: "fast" }] },
@@ -1093,4 +1094,95 @@ test("manual opt-out survives reload and stays isolated by project and session",
   await reloaded.hooks[0]({ sessionID: "shared" })
   assert.deepEqual(sessions.get("shared")?.model, { providerID: "composer", id: "default" }, "manual opt-out survives plugin reload")
   await reloaded.routing?.dispose()
+})
+
+test("named plan query recommends without applying, pinning, reserving, or inferring", async () => {
+  const namedConfig = parseConfig({
+    plans: {
+      review: ["provider-a/primary", { id: "provider-b/backup", variant: "fast" }],
+      other: ["provider-b/backup"],
+      absent: ["missing/model"],
+    },
+    agents: { reviewer: "review" },
+    workTypes: { deep: "other" },
+  })
+  const calls: string[] = []
+  const { editor, agents } = editorWith({ reviewer: { id: "reviewer", model: { providerID: "host", id: "old" } } })
+  let transform: ((editor: AgentEditor) => void) | undefined
+  const routing = await registerAgentRouting({
+    model: {
+      list: async () => {
+        calls.push("models")
+        return { data: registry.map((model) => ({ providerID: model.providerID, id: model.modelID, enabled: true })) }
+      },
+    },
+    storage: {
+      get: async () => undefined,
+      set: async () => { calls.push("storage") },
+      remove: async () => {},
+      scan: async () => ({ entries: [] }),
+    },
+    rpc: () => ({ status: async () => { throw new Error("not configured") } }),
+    agent: {
+      transform: async (callback: (editor: AgentEditor) => void) => {
+        calls.push("transform")
+        transform = callback
+        callback(editor as AgentEditor)
+        return { dispose: async () => {} }
+      },
+      reload: async () => { calls.push("reload"); transform?.(editor as AgentEditor) },
+    },
+  } as never, namedConfig)
+  const before = calls.slice()
+  const picked = await routing?.selectPlan("review")
+  assert.equal(picked?.status, "selected")
+  assert.equal(picked?.selected?.modelID, "primary")
+  assert.equal(picked?.plan?.id, "review")
+  assert.equal(picked?.plan?.source, "named-plan")
+  assert.deepEqual(calls, before, "a named-plan query does not list models, reload agents, store pins, or switch models")
+  assert.deepEqual(agents.reviewer.model, { providerID: "provider-a", id: "primary" })
+  const work = await routing?.select("reviewer", "deep") as { plan?: { id?: string; source?: string }; selected?: { modelID?: string } } | undefined
+  assert.equal(work?.plan?.id, "other")
+  assert.equal(work?.plan?.source, "work-type")
+  assert.equal(work?.selected?.modelID, "backup")
+  await routing?.pin("reviewer", backup)
+  const afterPin = calls.slice()
+  const pinnedModel = { ...agents.reviewer.model }
+  const unpinned = await routing?.selectPlan("review")
+  assert.equal(unpinned?.selected?.modelID, "primary")
+  assert.equal(unpinned?.reasonCode, "highest-priority-eligible")
+  assert.deepEqual(calls, afterPin)
+  assert.deepEqual(agents.reviewer.model, pinnedModel)
+  const agentPick = await routing?.select("reviewer") as { selected?: { modelID?: string }; reasonCode?: string; plan?: { source?: string } } | undefined
+  assert.equal(agentPick?.selected?.modelID, "backup")
+  assert.equal(agentPick?.reasonCode, "manual-pin")
+  assert.equal(agentPick?.plan?.source, "agent")
+  const unknown = await routing?.selectPlan("missing")
+  assert.equal(unknown?.status, "no-plan")
+  assert.equal(unknown?.reasonCode, "unknown-plan")
+  assert.equal(unknown?.skipped.length, 0)
+  const exhausted = await routing?.selectPlan("absent")
+  assert.equal(exhausted?.status, "no-eligible")
+  assert.equal(exhausted?.skipped[0]?.code, "not-in-registry")
+  await routing?.dispose()
+})
+
+test("a named plan works without an agent binding or session", async () => {
+  let transformed = false
+  const routing = await registerAgentRouting({
+    model: { list: async () => ({ data: [{ providerID: "provider-a", id: "primary", enabled: true }] }) },
+    storage: { get: async () => undefined, set: async () => {}, remove: async () => {}, scan: async () => ({ entries: [] }) },
+    rpc: () => ({ status: async () => { throw new Error("not configured") } }),
+    agent: {
+      transform: async () => { transformed = true; return { dispose: async () => {} } },
+      reload: async () => { throw new Error("named plan must not reload agents") },
+    },
+  } as never, parseConfig({ plans: { review: ["provider-a/primary"] } }))
+  assert.equal(transformed, false)
+  const picked = await routing?.selectPlan("review")
+  assert.equal(picked?.status, "selected")
+  assert.equal(picked?.selected?.providerID, "provider-a")
+  assert.equal(picked?.selected?.modelID, "primary")
+  assert.equal((await routing?.select("anyone"))?.reasonCode, "unbound-agent")
+  await routing?.dispose()
 })

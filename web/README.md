@@ -44,24 +44,27 @@ review or discard.
 
 ### Options safety
 
-OpenCode's ordered configuration documents determine the winning options object.
+OpenCode's ordered configuration documents determine the winning registration.
+Settings live in the sibling `quartermaster.jsonc`, not in `plugins[].options`.
 Global, ancestor and pathless inline winners are readable but not writable here.
-Apply requires an existing project-contained winning entry. Missing provenance
-or ambiguous declarations stop the save; the writer does not guess a file.
+A pathless winner has no settings file. Apply requires a winning registration
+inside the project. Missing provenance or ambiguous declarations stop the save;
+the writer does not guess a file.
 
-The shared writer validates Quartermaster options, checks the returned revision,
-backs up to `.quartermaster.bak`, and replaces only `plugins[].options`. Unrelated
-settings and comments outside that object are preserved. Stale content, changed
-effective sources, duplicate keys, escaping links and invalid options fail closed.
-Saved options are reread for later routing/selection. Changes to startup services
+The shared writer validates Quartermaster settings, checks the returned revision,
+and rewrites the whole `quartermaster.jsonc` as pretty JSON. When that file
+already exists, it is copied to `quartermaster.jsonc.quartermaster.bak` first.
+The OpenCode config is left unchanged, including unrelated settings and comments.
+Comments inside the settings file are not preserved. Stale content, changed
+effective sources, duplicate keys, escaping links and invalid settings fail closed.
+Saved settings are reread for later routing and selection. Changes to startup services
 or hooks may require an authorized restart; Apply itself does not restart a host.
 
 ## Offline config draft
 
 `config.html` only checks JSON syntax and exports a draft. It does not validate
 Quartermaster options, preserve JSONC comments, resolve configuration precedence
-or apply changes. Review and manually merge the draft into the intended plugin
-options, validate it through OpenCode, and keep a backup. Do not paste secrets
+or apply changes. Review and manually merge the draft into the intended `quartermaster.jsonc`, validate it through OpenCode, and keep a backup. Do not paste secrets
 into either page.
 
 ## Optional OpenChamber integration

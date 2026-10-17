@@ -31,7 +31,7 @@ export type SelectionResult =
       reason: { code: "highest-priority-eligible" | "manual-pin" }
       skipped: SkippedCandidate[]
     }
-  | { status: "no-plan"; reason: { code: "no-plan" }; skipped: [] }
+  | { status: "no-plan"; reason: { code: "no-plan" | "unknown-plan" }; skipped: [] }
   | { status: "no-eligible"; reason: { code: "no-eligible" }; skipped: SkippedCandidate[] }
 
 export type PlanResolution =
@@ -141,6 +141,21 @@ export function selectModel(
   }
 
   return { status: "no-eligible", reason: { code: "no-eligible" }, skipped }
+}
+
+/** Plan order only. Callers supply eligibility; this does not read pins or sessions. */
+export function selectNamedPlan(
+  config: Pick<QuartermasterConfig, "plans">,
+  planID: string,
+  registry: readonly ModelRef[],
+  eligibility: ReadonlyMap<string, ModelEligibility>,
+  now: number,
+  busy?: (model: ModelRef) => boolean,
+): SelectionResult {
+  if (!Object.hasOwn(config.plans, planID)) {
+    return { status: "no-plan", reason: { code: "unknown-plan" }, skipped: [] }
+  }
+  return selectModel(config.plans[planID], registry, eligibility, now, busy)
 }
 
 export function selectAgentModel(

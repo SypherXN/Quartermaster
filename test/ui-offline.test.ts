@@ -16,6 +16,7 @@ for (const name of ["toString", "constructor", "__proto__"]) {
       agents: Object.fromEntries([[name, name], ["reviewer", name]]),
       workTypes: Object.fromEntries([[name, name], ["review", name]]),
       providerCooldownMs: 45000,
+      modules: { opr: { cooldownMs: 12000, models: [{ id: "fixture/free", cooldownMs: 5000 }, "fixture/paid"] } },
     }
     const context = createContext({
       optionsJSON: JSON.stringify(options),

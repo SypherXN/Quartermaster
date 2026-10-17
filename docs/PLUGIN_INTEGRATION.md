@@ -35,6 +35,246 @@ await ctx.agent.transform((draft) => {
 });
 ```
 
+## Direct-call module profiles
+
+`modules` is an optional map in `quartermaster.jsonc`, separate
+from native `plans`, `agents` and `workTypes`. It is intended for consumers such
+as OPR's direct System One transport, which bypasses OpenCode's chat hooks. A
+module is a static profile, not an executable loader or a Jev client.
+
+```json
+{
+  "modules": {
+    "opr-jev": {
+      "cooldownMs": 300000,
+      "models": [
+        { "id": "opencode/jev-1.13-free", "cooldownMs": 900000 },
+        "opencode/jev-1.13"
+      ]
+    }
+  }
+}
+```
+
+Configuration rules:
+
+- Module names are nonempty strings without surrounding whitespace. Each value
+  accepts only `models` and optional `cooldownMs`; `models` is a required,
+  nonempty array whose order defines priority.
+- Models use the existing `providerID/modelID` string syntax or
+  `{ id, variant?, cooldownMs? }`. The first `/` separates provider from model,
+  preserving nested model IDs. Unknown fields and duplicate provider/model
+  pairs are rejected, even if variants differ. Different modules may list the
+  same model; native plan syntax and variant rules are unchanged.
+- Each model's resolved duration is entry `cooldownMs` -> module `cooldownMs` ->
+  `providerCooldownMs` (default 300000 ms). All durations must be positive safe
+  integers. A cooldown means time **out of rotation**, not transport timeout.
+  Request deadlines and cancellation belong to the consumer.
+- Missing or empty `modules` leaves native behavior unchanged. Declared models
+  form only that module's candidate list and may be absent from the chat
+  catalog. Parsing never expands native registry eligibility or verifies
+  provider credentials, health, quota, serving capability or permission to pay.
+  Consumers must validate selected models against their own trusted allowlists;
+  a module name is not authenticated caller identity or spending authorization.
+
+**Implementation status:** Profile validation, project/module-scoped persisted
+cooldowns and ordered recommendation runtime are implemented. When profiles are
+configured, `quartermaster.status({})` adds a `modules` map keyed by
+module name. Its entries are fresh recommendations, not evidence of inference.
+Modules-only setup does not require native plans, agent bindings, chat catalog
+membership or session hooks. With no profiles, the status response is unchanged.
+
+`selectModule` and `reportModuleCooldown` are part of API version 1. Configuration
+alone starts no cooldown. The native `select({ agent, workType? })`, `reportFailure`
+and `reportSuccess` APIs do not operate on these profiles. Do not bind a runtime
+reviewer agent in Quartermaster to reach a direct-call model. Quartermaster does
+not call Jev or any other provider for a module, and it does not decide allow,
+deny or escalate. Configured cooldowns are not authoritative provider quota
+resets or automatic `Retry-After` discovery. A missing, malformed or rejected
+result is not a candidate: do not substitute a locally configured model after
+Quartermaster declines.
+
+### Module RPC and bounded consumer helpers
+
+The existing `quartermaster` service adds two version-1 methods. Inputs reject
+extra fields, blank identities and unsupported reasons; no native registry lookup
+is required. Existing native methods and their registry checks are unchanged.
+
+| Method | Exact input | Versioned result |
+|---|---|---|
+| `selectModule` | `{ module: string }` | `{ apiVersion: 1, module, evaluatedAt, candidates, status, selected?, nextEligibleAt? }` with the recommendation semantics below |
+| `reportModuleCooldown` | `{ module: string, providerID: string, modelID: string, reason: "rate-limit" \| "temporary-unavailable" }` | `{ apiVersion: 1, accepted: true, module, providerID, modelID, blockedUntil }`, or `{ apiVersion: 1, accepted: false, reason: "unknown-module" \| "unknown-model" }` |
+
+Reports require an exact configured model. Durations come only from configuration;
+never send raw errors, credentials, evidence or caller-supplied timeouts. Reports
+acknowledge successful serialized persistence. Failed/cancelled/timed-out reports
+may already have blocked a model; an ambiguous response is not retry permission.
+
+```ts
+import { requestModuleSelection, reportModuleCooldown } from "opencode-quartermaster/rpc"
+
+const first = await requestModuleSelection(ctx, { module: "my-plugin" }, 2_000, signal)
+if (first.status !== "selected") return // fail closed; do not invent a candidate
+// Consumer checks its allowlist/paid policy, calls its own transport, then only
+// on a structured rate limit (not a valid deny or arbitrary error):
+const ack = await reportModuleCooldown(ctx, {
+  module: first.module, providerID: first.selected.providerID,
+  modelID: first.selected.modelID, reason: "rate-limit",
+}, 2_000, signal)
+if (!ack.accepted) return
+const next = await requestModuleSelection(ctx, { module: first.module }, 2_000, signal)
+// At most one retry: require a selected, distinct, permitted provider/model,
+// reusing the original total deadline and abort signal. Never retry a valid deny.
+```
+
+Pass only providerID/modelID in reports (omit `variant` if selection contains it).
+Helpers default to 2 seconds, propagate optional caller cancellation and abort
+their RPC on timeout. They validate version, scope, model identity and cooldown
+metadata; malformed/missing-service responses become `status: "unavailable"`.
+Reporting helper failures also have `accepted: false`. Neither helper performs
+inference or loops. This consumer-owned bounded retry is separate from native
+one-time assignment selection and OpenCode's session retry hook.
+
+Module names are self-reported namespaces, not authenticated security principals.
+Host RPC authorization must restrict callers; namespaces prevent accidental state
+bleed, not impersonation. Consumers own trust, spending policy and decision safety.
+Quartermaster never receives review evidence or decides allow/deny/escalate.
+
+### Permission-reviewer example
+
+This is one consumer of the general contract, not a Jev client inside
+Quartermaster and not certification of live serving. The profile name is
+`opr-jev`. Quartermaster recommends from that profile and stores cooldowns. The
+permission-reviewer plugin decides allow or deny and owns the Jev call.
+
+Routing stays off unless trusted global `permission-reviewer.jsonc` sets
+`moduleRouting.enabled` to true. Project OpenCode config, prompts, commands and
+repository evidence cannot enable the route or permit a paid model. The plugin
+calls `selectModule` before it builds its direct transport. It uses the
+recommendation only when the model is on its allowlist and is a supported
+variant-free Jev model. A paid model also requires the plugin's `allowPaid: true`.
+
+A valid allow or deny finishes the loop. A deny is not retried. The only retry
+is one structured HTTP 429: the plugin waits for an accepted `rate-limit` report
+for that exact provider and model, asks again, and may call one different
+permitted model. Quartermaster chooses the cooldown length from the `opr-jev`
+profile: the model's `cooldownMs`, otherwise the module `cooldownMs`, otherwise
+`providerCooldownMs`. The plugin does not send a duration. That cooldown is time
+out of rotation. It is not the review deadline and not a discovered `Retry-After`
+or quota window.
+
+The plugin owns the review deadline and the helpers' default two-second RPC
+budget. Both calls share the original deadline and the original review evidence.
+Missing, malformed or rejected Quartermaster results fail closed. The plugin
+does not fall back to the configured free model. OpenCode V1 has no Quartermaster
+RPC client, so enabling the route there also fails closed.
+
+Mocked permission-reviewer tests and Quartermaster's in-repo fake consumer do
+not prove a live Quartermaster process or a real Jev provider. Installing this
+package does not build or activate the reviewer plugin. Publishing, service
+restarts and paid live validation remain separate actions.
+
+### Live options and cooldown retention
+
+Module queries (including status) and internal reports reread effective options
+through the same receiving-server provenance and precedence rules as the project
+writer. Profiles may be added after an empty startup. Invalid or unavailable
+configuration fails the operation rather than routing from guessed settings.
+The internal `query()` refreshes options; `select()` is the synchronous snapshot
+selector used after refresh, not a public consumer API.
+
+Reordering changes the next recommendation. Duration changes apply to subsequent
+reports without shortening an active deadline. Removing a profile/model prunes
+its module-only cooldowns and persists the removal before success; re-adding it
+does not resurrect old deadlines, including after restart. Failed pruning rejects
+the operation and is retried before later queries succeed. Native cooldowns are
+untouched. No background file watcher or per-model timer is added.
+
+`readOptions`/`applyOptions` still exchange the complete raw options object,
+including `modules`. Preserve fields not being edited, as the existing editor
+does. JSONC, revision checks, inherited read-only winners, containment and rollback
+rules are unchanged. This does not hot-create startup-fixed services such as
+usage collectors or budget gates; changing those may still require a reload.
+
+### Recommendation semantics
+
+Each module recommendation includes its `module`, server `evaluatedAt` timestamp
+and ordered `candidates`, plus one outcome:
+
+- `selected`: `selected` contains `providerID`, `modelID` and optional `variant`
+  for the first candidate that is not cooling down and is not skipped for tracked usage.
+- `no-module`: the requested profile is absent; `candidates` is empty. This is
+  also returned by `selectModule`; status lists only configured profiles.
+- `no-eligible`: no candidate is usable. When cooldown expiry determines the
+  next opportunity, `nextEligibleAt` is the earliest active deadline.
+
+Every candidate preserves its model reference and reports `health: "unknown"`.
+Provider health is not measured. `reason` is `declared`, `cooldown`, `limited`,
+or `usage-unavailable`. An active cooldown wins over usage and includes
+`blockedUntil` and positive `remainingMs` from the same query time.
+`nextEligibleAt` comes only from cooldown deadlines. A usage window, including
+an estimated subscription reset, never creates a deadline and never clears a cooldown.
+
+Quota uses the existing `usageSources` map. There is no second subscription list.
+Providers mapped to `go`, `codex`, or `cursor` are tracked. A mapped model listed
+in `quotaExemptModels` as `providerID/modelID` is exempt. Unmapped models,
+including Jev while `opencode` is unmapped, stay cooldown-only with
+`quota: "unknown"`. A module whose candidates are all unmapped or exempt does
+not request usage. An exemption does not bypass a cooldown.
+
+A mapped, non-exempt candidate is usable only when tracked usage is fresh and
+`available` and the model is not cooling down. Its quota is then `available`.
+Limited usage skips it with reason `limited` and quota `limited`. Stale, missing,
+unknown, or failed usage skips it with reason `usage-unavailable` and quota
+`unknown`. Later eligible candidates remain usable.
+
+Selection reuses the ordered selector with an inventory private to the module;
+it never registers direct models or relaxes native unknown-quota checks. State
+is scoped to project/module/provider/model; variants share that model's deadline.
+A free-model report cannot block its paid sibling or another module. Queries
+make no provider calls, probes, reservations or sticky assignments. Deadlines are
+checked on queries, with no per-model background timers: after free Jev cools
+down, paid Jev may be recommended; once free Jev's deadline expires, free wins
+again. Neither outcome proves the provider served a request or reset its quota.
+
+## Plugin recommendations
+
+Module selection and named-plan selection are the two plugin recommendation
+paths. Agent selection remains the bound form of the plan path. None of these
+calls assigns a model, reloads agents, changes a pin, reserves an exclusive
+model, or starts inference. The caller applies a selected provider, model,
+and optional variant itself.
+
+- `selectModule({ module })`, through `requestModuleSelection`, reads
+  `modules.<name>.models`. Mapped Codex, Cursor, and Go candidates also need
+  available usage, as described above. Jev-only profiles stay cooldown-only.
+- `select({ agent, workType? })`, through `requestSelection`, still resolves an
+  agent binding, work type, and that agent's pin.
+- `selectPlan({ plan })`, through `requestPlanSelection`, evaluates a named plan
+  in plan order. It does not require an agent binding or a session, and it does
+  not borrow another agent's pin. Unknown plans return `no-plan` with
+  `unknown-plan`. Exhausted plans return `no-eligible` and the skip reasons.
+
+```ts
+import { requestPlanSelection, requestSelection } from "opencode-quartermaster/rpc"
+
+const planPick = await requestPlanSelection(ctx, { plan: "review" })
+if (planPick.status === "selected") {
+  // The caller applies the recommendation. Quartermaster does not switch models.
+  await applyModel(planPick.selected.providerID, planPick.selected.modelID, planPick.selected.variant)
+}
+
+const agentPick = await requestSelection(ctx, { agent: "reviewer", workType: "review" })
+if (agentPick.status === "selected") applyModel(agentPick.selected.providerID, agentPick.selected.modelID, agentPick.selected.variant)
+```
+
+`requestPlanSelection` accepts only `{ plan }`, a nonempty name of at most 256
+characters. It bounds the call, defaults to two seconds, and returns
+`status: "unavailable"` for invalid input, timeout, a missing service, or a
+malformed response. A selected response includes `apiVersion: 1`, the model
+reference, `plan: { id, source: "named-plan", reasonCode }`, and skip reasons.
+The caller checks its own allowlist before applying the model.
+
 ## Configuration editing capability
 
 The exported `QUARTERMASTER_RPC` descriptor includes project-options reads and
@@ -54,9 +294,10 @@ settings the editor does not change. Authorized V2 plugin callers use
 
 When receiving-server provenance is available, the reader consumes OpenCode's
 ordered `GET /api/config` documents, from lowest to highest priority. The last
-matching declaration replaces the complete lower-priority options object;
-matches in different documents are normal overrides. Multiple matching entries
-in one document fail closed. A match is the package name
+matching registration wins. Its sibling `quartermaster.jsonc` is the complete
+settings object and replaces any lower-priority settings as a whole. Matches in
+different documents are normal overrides. Multiple matching entries in one
+document fail closed. A match is the package name
 `opencode-quartermaster` with an optional `@version` (legacy `quartermaster` entries
 are still recognized for existing configs, not a recommendation to install that npm name), `github:SypherXN/quartermaster`
 with an optional `#ref` or `.git` suffix, that same repository as an
@@ -64,27 +305,38 @@ with an optional `#ref` or `.git` suffix, that same repository as an
 or absolute path that resolves to this install. Another name or path is left
 unchanged, including one that only contains that word. An effective global,
 ancestor or pathless inline declaration is readable with `writable: false` and
-revision zero, but cannot be edited through the project writer. Only a winning
-document contained in the bound project directory with an existing `options`
-object is writable; the editor does not insert plugin entries or options. The writer
-validates options, checks an opaque content-and-path revision, creates a
-`.quartermaster.bak` backup, and replaces only the entry's `options` object,
-preserving unrelated configuration, comments and JSONC trailing commas outside
-that object. Pass the revision unchanged; it is not a timestamp.
+revision zero, but cannot be edited through the project writer. A pathless
+winner has no sibling file, so its settings are empty. Only a winning
+registration whose OpenCode config is contained in the bound project directory
+is writable, including when `quartermaster.jsonc` is still missing. The editor
+does not insert plugin registrations.
 
-At plugin startup, Quartermaster first parses OpenCode's resolved plugin options,
-then adopts the winning native declaration when its provenance is available.
-This is complete options replacement, not a key-by-key merge with global
-options. Invalid or unavailable provenance, no matching declaration or ambiguous
-entries in one document leave startup's host-supplied options unchanged. A
-different project may resolve a different declaration.
+The writer validates settings, checks an opaque revision of the project root,
+settings path and settings text, and rewrites the whole settings file as pretty
+JSON plus a newline. It leaves the registering OpenCode config bytes unchanged,
+including comments and unrelated plugins. When the settings file already exists,
+it is copied to `quartermaster.jsonc.quartermaster.bak` before replacement. Pass
+the revision unchanged; it is not a timestamp. Comments and trailing commas in
+the settings file are accepted on read and are not preserved on write.
+
+At plugin startup, Quartermaster parses an empty settings object, rejects
+non-empty `plugins[].options`, then adopts the winning `quartermaster.jsonc`
+when a project directory and provenance are available. Adoption failure leaves
+those empty settings in place. This is complete settings replacement, not a
+key-by-key merge. Invalid or unavailable provenance, no matching declaration or
+ambiguous entries in one document also leave startup settings empty. A
+different project may resolve a different file.
 
 The gateway uses its existing authenticated connection and validates its fixed
 directory before requesting native configuration sources. In the plugin, normal
-SDK service discovery never starts a server, and `/api/info` must identify this
-process's PID before configuration is read. Unregistered services, a different
-PID or unavailable provenance make editing unavailable; there is no filesystem
-guess or substitute server. These paths have disposable-file and authenticated
+SDK service discovery never starts a server. `Service.discover()` returns only
+the registered background service. When that process is not the receiving
+server, the reader uses this process's loopback `--hostname` and `--port`,
+authenticating with the discovered basic credentials or the receiving process's
+server password. `/api/info` must still identify this process's PID before
+configuration is read. A different PID, a non-loopback address, or unavailable
+provenance makes editing unavailable. There is no filesystem guess, and no
+substitute server is started. These paths have disposable-file and authenticated
 loopback tests, not a new live-host certification. The project root and existing
 configuration paths are
 filesystem-resolved before reading. Config and backup targets must remain inside that resolved root;
