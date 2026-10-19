@@ -83,7 +83,10 @@ A checkout can also start the optional local page with `npm run local-ui`. See [
 The archive includes compiled JavaScript, type declarations, public docs and the
 MIT license. It excludes source/tests, examples, the web UI and local state.
 Links to examples/web refer to the repository, not archive contents. To load a
-checkout directly, run `npm ci` and `npm run build` first.
+checkout directly, run `npm ci` for dependencies and register the plugin by
+path: the host loads the root `index.ts`, which re-exports the TypeScript
+source, so no build is needed. `npm run build` produces the `dist` files that
+the packaged `index.js` main and the `./rpc` export use.
 
 The plugin/client dependencies are pinned to 2.0.23. This is not the running
 OpenCode server version. The recorded private archive passed Windows standalone
@@ -122,16 +125,26 @@ All settings belong in `quartermaster.jsonc` next to the OpenCode config that re
 - **Plans:** ordered `providerID/modelID` strings or
   `{ "id": "providerID/modelID", "variant": "..." }` objects. Plans must be
   non-empty with unique candidates; bindings must name an existing plan.
+- **Work types:** `workTypes` maps a work-type name to an existing plan. The
+  `select` RPC checks the work-type binding before the agent binding; an
+  unknown alias falls back to the agent binding.
 - **Quota:** `usageSources` maps provider IDs to `go`, `codex`, or `cursor`.
   Limits skip all mapped models except explicit `quotaExemptModels` (fully
-  qualified IDs, all variants). Unknown/stale usage is skipped as unknown, not
-  exhausted. Estimated resets alone do not restore eligibility. Unmapped
+  qualified IDs, all variants). Only fresh, confirmed `limited` usage skips a
+  model; absent, stale, or unusable usage reads as available and stays a
+  candidate. Estimated resets alone do not restore eligibility. Unmapped
   providers are unaffected by quota status.
 - **Health:** `localEndpoints` opts local providers into credential-free,
   bodyless loopback HTTP(S) GET checks, cached for five seconds. Failure skips
   only that provider; remote providers are not health-probed.
 - **Durations:** positive integer milliseconds. `providerCooldownMs` defaults
   to 300000; `localHealthTimeoutMs` to 2000.
+- **Shared rate limits:** `sharedRateLimits` lists groups of fully qualified
+  model IDs that share one limit bucket. A temporary rate limit or confirmed
+  quota error on any member cools the whole group for `providerCooldownMs`.
+  OpenCode Zen reports that shared free-tier bucket as quota. Outages and a
+  later success stay on their own model or provider. A model can belong to
+  only one group.
 - **Exclusive models:** `exclusiveModels` lists fully qualified model IDs.
   Automatic selection skips busy models. All primary requests using a listed
   model acquire its lease, including manual/unbound requests; auxiliary

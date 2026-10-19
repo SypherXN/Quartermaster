@@ -29,13 +29,19 @@ export interface RetryFailureDecision {
   report?: FailureReport
 }
 
+// The host retries plain rate-limit messages itself, so a provider that reports one only as text
+// (no status, no provider.rate-limit type) must still be recognised here.
+const RATE_LIMIT_TEXT = /rate.?limit|too many requests/i
+
 export function classifyRetryFailure(
-  error: { type?: unknown; status?: unknown },
+  error: { type?: unknown; status?: unknown; message?: unknown; response?: unknown },
   providerID: string,
   modelID: string,
 ): RetryFailureDecision {
   const type = typeof error.type === "string" ? error.type : ""
   const status = typeof error.status === "number" ? error.status : undefined
+  const body = isRecord(error.response) && typeof error.response.body === "string" ? error.response.body : ""
+  const text = `${typeof error.message === "string" ? error.message : ""}\n${body}`
 
   if (type === "provider.quota" || status === 402) {
     return { fallback: false, report: { providerID, modelID, classification: "quota-exhausted" } }
@@ -43,7 +49,7 @@ export function classifyRetryFailure(
   if (type === "provider.auth" || type === "permission.rejected" || status === 401 || status === 403) {
     return { fallback: false, report: { providerID, modelID, classification: "auth" } }
   }
-  if (type === "provider.rate-limit" || status === 429) {
+  if (type === "provider.rate-limit" || status === 429 || RATE_LIMIT_TEXT.test(text)) {
     return { fallback: true, report: { providerID, modelID, classification: "temporary-rate-limit" } }
   }
   if (type === "provider.invalid-request" || type === "provider.no-route") {
@@ -63,6 +69,8 @@ export function classifyRetryFailure(
 type Scope = { providerID: string; modelID?: string }
 export interface PersistedCooldown extends Scope {
   until: number
+  occurredAt?: number
+  classification?: FailureClassification
 }
 
 function key({ providerID, modelID }: Scope): string {
@@ -74,40 +82,74 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 export class FailureCooldowns {
   private readonly until = new Map<string, number>()
+  private readonly evidence = new Map<string, { occurredAt: number; classification: FailureClassification }>()
   private durationMs: number
+  private groups: readonly ModelRef[][]
 
-  constructor(durationMs: number) {
+  constructor(durationMs: number, groups: readonly ModelRef[][] = []) {
     this.durationMs = durationMs
+    this.groups = groups
   }
 
   setDuration(durationMs: number): void {
     this.durationMs = durationMs
   }
 
-  reportFailure(report: FailureReport, now: number): boolean {
-    if (["quota-exhausted", "auth", "cancelled", "other"].includes(report.classification)) return false
+  setGroups(groups: readonly ModelRef[][]): void {
+    this.groups = groups
+  }
 
-    const scope = report.classification === "model-outage" ||
-      (report.classification === "temporary-rate-limit" && report.modelID !== undefined)
+  reportFailure(report: FailureReport, now: number): boolean {
+    if (!Number.isFinite(now) || now < 0) return false
+    for (const [id, until] of this.until) {
+      if (until <= now) {
+        this.until.delete(id)
+        this.evidence.delete(id)
+      }
+    }
+    if (["auth", "cancelled", "other"].includes(report.classification)) return false
+    if (report.classification === "quota-exhausted" && !report.modelID) return false
+
+    let changed = false
+    for (const scope of this.cooldownScopes(report)) {
+      const id = key(scope)
+      if (now + this.durationMs <= (this.until.get(id) ?? -Infinity)) continue
+      this.until.set(id, now + this.durationMs)
+      this.evidence.set(id, { occurredAt: now, classification: report.classification })
+      changed = true
+    }
+    return changed
+  }
+
+  private cooldownScopes(report: FailureReport): Scope[] {
+    const modelScoped = report.classification === "model-outage" ||
+      (["temporary-rate-limit", "quota-exhausted"].includes(report.classification) && report.modelID !== undefined)
+    const scope: Scope = modelScoped
       ? { providerID: report.providerID, modelID: report.modelID }
       : { providerID: report.providerID }
-    const id = key(scope)
-    this.until.set(id, Math.max(this.until.get(id) ?? -Infinity, now + this.durationMs))
-    return true
+    // Zen reports a shared free-tier bucket as provider.quota, often with status 429.
+    // A configured group therefore shares both temporary rate limits and quota.
+    if (!["temporary-rate-limit", "quota-exhausted"].includes(report.classification) || report.modelID === undefined) return [scope]
+    const group = this.groups.find((members) => members.some((model) =>
+      model.providerID === report.providerID && model.modelID === report.modelID))
+    return group?.map((model) => ({ providerID: model.providerID, modelID: model.modelID })) ?? [scope]
   }
 
   reportSuccess(report: SuccessReport): boolean {
-    return this.until.delete(key({
+    const id = key({
       providerID: report.providerID,
       ...(report.scope === "model" ? { modelID: report.modelID } : {}),
-    }))
+    })
+    this.evidence.delete(id)
+    return this.until.delete(id)
   }
 
-  snapshot(now: number): PersistedCooldown[] {
+  snapshot(now: number, includeEvidence = false): PersistedCooldown[] {
     return [...this.until].flatMap(([scopeKey, until]) => {
       if (until <= now) return []
       const [providerID, modelID] = JSON.parse(scopeKey) as [string, string | null]
-      return [{ providerID, ...(modelID === null ? {} : { modelID }), until }]
+      return [{ providerID, ...(modelID === null ? {} : { modelID }), until,
+        ...(includeEvidence ? this.evidence.get(scopeKey) : {}) }]
     })
   }
 
@@ -127,6 +169,11 @@ export class FailureCooldowns {
       const scope: Scope = { providerID: entry.providerID }
       if (typeof entry.modelID === "string") scope.modelID = entry.modelID
       this.until.set(key(scope), entry.until)
+      if (typeof entry.occurredAt === "number" && Number.isFinite(entry.occurredAt) &&
+        entry.occurredAt >= 0 && entry.occurredAt <= now && entry.occurredAt < entry.until &&
+        ["provider-outage", "model-outage", "temporary-rate-limit", "quota-exhausted"].includes(String(entry.classification))) {
+        this.evidence.set(key(scope), { occurredAt: entry.occurredAt, classification: entry.classification as FailureClassification })
+      }
     }
   }
 

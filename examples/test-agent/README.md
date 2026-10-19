@@ -95,7 +95,7 @@ For same-prompt retry routing, run:
 node scripts/verify-retry-host-contract.mjs
 ```
 
-It requires the installed OpenCode **2.0.24** binary, starts a loopback-only fake provider, loads this checkout's Quartermaster plugin, and asserts the actual request sequence `primary → primary → fallback` in one run. It also checks the native retry delay, identical user message, bounded primary attempts, and absence of tool calls. It sends no request to Qwen or Space Bunny.
+It requires the installed OpenCode **2.0.31** binary, starts an isolated server and loopback-only fake provider, loads this checkout's Quartermaster plugin, and asserts the actual request sequence `primary → primary → fallback` in one run. It also checks the native retry delay, identical user message, bounded primary attempts, and absence of tool calls. It sends no request to Qwen or Space Bunny. The `--failure=quota` case verifies terminal failure followed by fallback dispatch on the next explicit prompt after restarting only the isolated server.
 
 To verify the host's retry ceiling when every candidate fails, also run:
 
@@ -130,9 +130,12 @@ before sending. That is a selection test, not evidence of a failed-primary retry
 
 The controlled fixture proves fallback for an OpenCode-approved clean retry
 before output. Quartermaster correlates it to a bound primary request and uses
-structured failure types/statuses—not error text. Rate limits create model
-cooldowns; safe outage signals create provider cooldowns. Auth, quota and unsafe
-or unknown failures do not trigger backup selection. See the
+structured failure types/statuses and, for rate limits only, a narrow text check
+over the error message and response body. Rate limits and attributed quota
+failures create model cooldowns; safe outage signals create provider cooldowns.
+Quota does not permit immediate retry fallback, but its cooldown affects the
+next automatic assignment. Auth and unsafe or unknown failures do not trigger
+retry backup selection. See the
 [classification and retry contract](../../docs/PLUGIN_INTEGRATION.md#native-same-prompt-retry-fallback).
 
 Quartermaster never changes native retry approval, delay or attempt limits. It

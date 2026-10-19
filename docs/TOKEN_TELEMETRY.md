@@ -110,7 +110,7 @@ the plugin's V2 RPC.
 attempt's session, provider/model, attempt number, error status/type/message,
 and retry decision. Quartermaster does not modify that decision. It stores
 `Date.now()` as `observedAt` because the hook supplies no event timestamp. It
-stores provider/model, attempt, HTTP status, normalized classification,
+stores provider/model, attempt, HTTP status, a classification derived from that status alone,
 session project ID only when exact `Session.Info` lookup succeeds, source, and
 a locally generated ID. It does not store the error type/message, session ID,
 prompt, response body, credentials, or permission data. Failed lookups and
@@ -118,7 +118,7 @@ legacy rows remain unattributed (`projectID: null`) and are excluded from
 project reports.
 
 HTTP 429 is classified as `rate-limit`; other 4xx statuses as `request-error`,
-5xx as `provider-error`, and absent/invalid status as `unknown`. This is a
+5xx as `provider-error`, and an absent or invalid status, or any status below 400, as `unknown`. Classification reads only that HTTP status, so an error that routing itself treats as a rate limit from its type or message text, with no status present, is stored here as `unknown` with a null status. This is a
 best-effort history of failures observed by the retry hook, not a complete
 record of all server/provider errors or a substitute for quota status. The hook
 has no host event/request ID or durable replay; the local UUID distinguishes
@@ -149,7 +149,7 @@ bindings, work-type choices, pins and later config cannot prove the historical
 plan for that step. Error rows without verified
 session-to-project attribution are omitted and `unattributedExcluded` is true;
 error counts are retained observations, not a complete history.
-Budget windows use all retained project rows, not the report's since/until
+Budget windows read the most recent project rows (up to 10,000 on the report path; the assignment-warning gate reads only the newest 1,000), not the report's since/until
 filter; observed usage is a lower bound, `complete` is false, and remaining
 tokens are unknown.
 

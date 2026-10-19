@@ -14,7 +14,8 @@ ledger, and reads them through the registered reporting RPC. Its assertions
 check event-ID upsert behavior, project isolation, lower-bound totals, retry
 timestamps, incomplete budget semantics, and that the RPC response omits host
 event IDs. Other telemetry tests cover unknown project/model attribution,
-retention/restart, concurrent writes, malformed requests, and absent RPC.
+retention/restart, and concurrent writes; malformed requests and the absent-RPC
+outcome are asserted in `test/rpc.test.ts` (lines 238 and 265).
 
 ## Live-host status
 

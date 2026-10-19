@@ -32,11 +32,13 @@ export function buildQuotaEligibility(
     const sourceID = Object.hasOwn(usageSources, model.providerID)
       ? usageSources[model.providerID] as UsageSourceID
       : undefined
-    const status = sourceID === undefined
-      ? "available"
-      : usage?.status === "ok"
-        ? usage.snapshot.sources[sourceID].availability
-        : "unknown"
+    // Quota rule: only FRESH evidence of a limit blocks a model. Absent, stale or
+    // otherwise unusable usage must never block -- it reads as available here. Source
+    // state stays observable through status/diagnoseSession (src/agent-routing.ts).
+    const source = sourceID === undefined || usage?.status !== "ok"
+      ? undefined
+      : usage.snapshot.sources[sourceID]
+    const status = source?.availability === "limited" ? "limited" : "available"
     result.set(modelKey(model), { status })
   }
 

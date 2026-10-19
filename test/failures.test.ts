@@ -29,12 +29,18 @@ test("structured retry failures permit only safe transient fallback", () => {
     { error: { type: "cancelled" }, fallback: false },
     { error: { type: "provider.unknown", status: 503 }, fallback: false },
     { error: { type: "unrecognized" }, fallback: false },
+    { error: { type: "unknown", message: "Rate limit exceeded. Please try again later." }, fallback: true, classification: "temporary-rate-limit" },
+    { error: { message: "Too many requests" }, fallback: true, classification: "temporary-rate-limit" },
+    { error: { response: { body: "429 rate_limit_exceeded" } }, fallback: true, classification: "temporary-rate-limit" },
+    { error: { type: "provider.quota", status: 402, message: "rate limit exceeded" }, fallback: false, classification: "quota-exhausted" },
+    { error: { type: "unknown", message: "Something else went wrong" }, fallback: false },
   ] as const
 
   for (const item of cases) {
+    const label = "type" in item.error ? item.error.type : JSON.stringify(item.error)
     const result = classifyRetryFailure(item.error, "provider-a", "primary")
-    assert.equal(result.fallback, item.fallback, item.error.type)
-    assert.equal(result.report?.classification, "classification" in item ? item.classification : undefined, item.error.type)
+    assert.equal(result.fallback, item.fallback, label)
+    assert.equal(result.report?.classification, "classification" in item ? item.classification : undefined, label)
     if (result.report) {
       assert.equal(result.report.providerID, "provider-a")
       if ("modelID" in result.report) assert.equal(result.report.modelID, "primary")
@@ -72,7 +78,7 @@ test("model and provider outages affect only their scopes", () => {
   }
 })
 
-test("temporary rate limits are scoped while quota, auth, cancellation, and generic errors are ignored", () => {
+test("rate limits and attributed quota are model-scoped; unsafe failures are ignored", () => {
   const failures = new FailureCooldowns(100)
   for (const classification of ["quota-exhausted", "auth", "cancelled", "other"] as const) {
     assert.equal(failures.reportFailure({ providerID: "a", classification }, 0), false)
@@ -81,6 +87,50 @@ test("temporary rate limits are scoped while quota, auth, cancellation, and gene
   const result = failures.apply(eligible, registry, 1)
   assert.equal(result.get(modelKey(primary))?.cooldownUntil, 100)
   assert.equal(result.get(modelKey(spare))?.cooldownUntil, undefined)
+  const quota = new FailureCooldowns(100)
+  quota.reportFailure({ providerID: "a", modelID: "primary", classification: "quota-exhausted" }, 10)
+  quota.reportFailure({ providerID: "a", modelID: "primary", classification: "quota-exhausted" }, 10)
+  const restarted = new FailureCooldowns(100)
+  restarted.restore(quota.snapshot(20, true), 20)
+  assert.deepEqual(restarted.snapshot(20, true), [
+    { providerID: "a", modelID: "primary", until: 110, occurredAt: 10, classification: "quota-exhausted" },
+  ])
+  assert.equal(restarted.reportFailure({ providerID: "a", modelID: "primary", classification: "quota-exhausted" }, 10), false)
+  assert.deepEqual(restarted.snapshot(20), quota.snapshot(20))
+  assert.equal(restarted.apply(eligible, registry, 109).get(modelKey(primary))?.cooldownUntil, 110)
+  assert.equal(restarted.apply(eligible, registry, 109).get(modelKey(spare))?.cooldownUntil, undefined)
+  assert.equal(restarted.apply(eligible, registry, 110).get(modelKey(primary))?.cooldownUntil, undefined)
+})
+
+test("a temporary rate limit cools every model in its shared group", () => {
+  const grouped = new FailureCooldowns(100, [[primary, spare, otherProvider]])
+  assert.equal(grouped.reportFailure({
+    providerID: "a", modelID: "primary", classification: "temporary-rate-limit",
+  }, 0), true)
+  const limited = grouped.apply(eligible, registry, 1)
+  assert.equal(limited.get(modelKey(primary))?.cooldownUntil, 100)
+  assert.equal(limited.get(modelKey(spare))?.cooldownUntil, 100)
+  assert.equal(limited.get(modelKey(otherProvider))?.cooldownUntil, 100)
+  assert.equal(grouped.reportSuccess({ providerID: "a", scope: "model", modelID: "primary" }), true)
+  const afterSuccess = grouped.apply(eligible, registry, 1)
+  assert.equal(afterSuccess.get(modelKey(primary))?.cooldownUntil, undefined)
+  assert.equal(afterSuccess.get(modelKey(spare))?.cooldownUntil, 100)
+
+  const quota = new FailureCooldowns(100, [[primary, spare]])
+  quota.reportFailure({ providerID: "a", modelID: "primary", classification: "quota-exhausted" }, 0)
+  assert.equal(quota.apply(eligible, registry, 1).get(modelKey(primary))?.cooldownUntil, 100)
+  assert.equal(quota.apply(eligible, registry, 1).get(modelKey(spare))?.cooldownUntil, 100)
+  const ungrouped = new FailureCooldowns(100)
+  ungrouped.reportFailure({ providerID: "a", modelID: "primary", classification: "quota-exhausted" }, 0)
+  assert.equal(ungrouped.apply(eligible, registry, 1).get(modelKey(spare))?.cooldownUntil, undefined)
+  const outage = new FailureCooldowns(100, [[primary, otherProvider]])
+  outage.reportFailure({ providerID: "a", classification: "provider-outage" }, 0)
+  assert.equal(outage.apply(eligible, registry, 1).get(modelKey(spare))?.cooldownUntil, 100)
+  assert.equal(outage.apply(eligible, registry, 1).get(modelKey(otherProvider))?.cooldownUntil, undefined)
+  const removed = new FailureCooldowns(100, [[primary, spare]])
+  removed.setGroups([])
+  removed.reportFailure({ providerID: "a", modelID: "primary", classification: "temporary-rate-limit" }, 0)
+  assert.equal(removed.apply(eligible, registry, 1).get(modelKey(spare))?.cooldownUntil, undefined)
 })
 
 test("repeated reports extend but never shorten cooldown; expiry is exact", () => {

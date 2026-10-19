@@ -107,14 +107,15 @@ test("reuses limited usage between refreshes and estimated reset cannot restore 
   await routing?.dispose()
 })
 
-test("stale limited usage remains unknown rather than confirmed exhaustion", async () => {
+test("stale limited usage no longer blocks: only fresh evidence of a limit does", async () => {
   const staleUsage = normalizeUsageSnapshot(snapshot("limited", true))
   assert.equal(staleUsage.status, "ok")
   if (staleUsage.status === "ok") assert.equal(staleUsage.snapshot.sources.codex.availability, "unknown")
   const app = setup(staleUsage, async () => snapshot("limited", true))
   const routing = await app.start()
 
-  assert.deepEqual(app.agents.reviewer.model, { providerID: "provider-b", id: "backup" })
+  // The stale limit is not fresh evidence, so the primary stays selectable.
+  assert.deepEqual(app.agents.reviewer.model, { providerID: "provider-a", id: "primary" })
   await routing?.dispose()
 })
 

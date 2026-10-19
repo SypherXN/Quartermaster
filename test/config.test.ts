@@ -104,7 +104,7 @@ test("preserves slashes inside provider model IDs", () => {
 
 test("allows no bindings and accepts custom durations", () => {
   assert.deepEqual(parseConfig({}), {
-    plans: {}, agents: {}, workTypes: {}, usageSources: {}, quotaExemptModels: [], exclusiveModels: [],
+    plans: {}, agents: {}, workTypes: {}, usageSources: {}, quotaExemptModels: [], exclusiveModels: [], sharedRateLimits: [],
     providerCooldownMs: 300_000, localHealthTimeoutMs: 2_000, localEndpoints: {},
   })
   assert.equal(parseConfig({ providerCooldownMs: 30, localHealthTimeoutMs: 50 }).providerCooldownMs, 30)
@@ -214,6 +214,20 @@ test("rejects invalid durations and non-loopback local endpoints", () => {
   assert.throws(() => parseConfig({ localEndpoints: { ollama: "http://user:secret@localhost:11434" } }), /localEndpoints\.ollama: expected a loopback HTTP\(S\) URL/)
 })
 
+test("parses disjoint shared rate-limit groups", () => {
+  assert.deepEqual(parseConfig({
+    sharedRateLimits: [["opencode/deepseek-v4.1-flash-free", "opencode/glm-5.3-flash-free", "opencode/mimo-v2.6-flash-free"]],
+  }).sharedRateLimits, [[
+    { providerID: "opencode", modelID: "deepseek-v4.1-flash-free" },
+    { providerID: "opencode", modelID: "glm-5.3-flash-free" },
+    { providerID: "opencode", modelID: "mimo-v2.6-flash-free" },
+  ]])
+  assert.deepEqual(parseConfig({ sharedRateLimits: [] }).sharedRateLimits, [])
+  assert.throws(() => parseConfig({ sharedRateLimits: [["p/m"]] }), /sharedRateLimits\[0\]: expected at least two models/)
+  assert.throws(() => parseConfig({ sharedRateLimits: [["p/m", "p/m"]] }), /duplicate model in group/)
+  assert.throws(() => parseConfig({ sharedRateLimits: [["p/a", "p/b"], ["p/b", "p/c"]] }), /belongs to another shared rate-limit group/)
+  assert.throws(() => parseConfig({ sharedRateLimits: "p/m" }), /sharedRateLimits: expected an array of model groups/)
+})
 test("parses an optional exclusive model list", () => {
   assert.deepEqual(parseConfig({ exclusiveModels: ["ninfer/qwen3-27b"] }).exclusiveModels, [
     { providerID: "ninfer", modelID: "qwen3-27b" },

@@ -51,6 +51,7 @@ export interface QuartermasterConfig {
   tokenRates?: TokenRateConfig[]
   quotaExemptModels: string[]
   exclusiveModels: ModelRef[]
+  sharedRateLimits: ModelRef[][]
   providerCooldownMs: number
   localHealthTimeoutMs: number
   localEndpoints: Record<string, string>
@@ -124,6 +125,36 @@ function quotaExemptModels(value: unknown): string[] {
     if (seen.has(key)) throw new Error(`${path}: duplicate model exemption`)
     seen.add(key)
     return id
+  })
+}
+
+function qualifiedModel(value: unknown, path: string): ModelRef {
+  const id = string(value, path)
+  const split = id.indexOf("/")
+  if (split <= 0 || split === id.length - 1 || /\s/.test(id)) {
+    throw new Error(`${path}: expected providerID/modelID`)
+  }
+  return { providerID: id.slice(0, split), modelID: id.slice(split + 1) }
+}
+
+function sharedRateLimits(value: unknown): ModelRef[][] {
+  if (!Array.isArray(value)) throw new Error("sharedRateLimits: expected an array of model groups")
+  const membership = new Set<string>()
+  return value.map((group, index) => {
+    const path = `sharedRateLimits[${index}]`
+    if (!Array.isArray(group)) throw new Error(`${path}: expected an array of providerID/modelID strings`)
+    if (group.length < 2) throw new Error(`${path}: expected at least two models`)
+    const seen = new Set<string>()
+    return group.map((item, modelIndex) => {
+      const modelPath = `${path}[${modelIndex}]`
+      const ref = qualifiedModel(item, modelPath)
+      const key = JSON.stringify([ref.providerID, ref.modelID])
+      if (seen.has(key)) throw new Error(`${modelPath}: duplicate model in group`)
+      if (membership.has(key)) throw new Error(`${modelPath}: model belongs to another shared rate-limit group`)
+      seen.add(key)
+      membership.add(key)
+      return ref
+    })
   })
 }
 
@@ -319,7 +350,7 @@ function localEndpoints(value: unknown): Record<string, string> {
 export function parseConfig(input: unknown = {}): QuartermasterConfig {
   const options = record(input, "options")
   const fields = new Set([
-    "plans", "agents", "workTypes", "usageSources", "quotaExemptModels", "exclusiveModels", "providerCooldownMs",
+    "plans", "agents", "workTypes", "usageSources", "quotaExemptModels", "exclusiveModels", "sharedRateLimits", "providerCooldownMs",
     "localHealthTimeoutMs", "localEndpoints", "budgets", "tokenRates", "modules",
   ])
   for (const key of Object.keys(options)) {
@@ -341,6 +372,7 @@ export function parseConfig(input: unknown = {}): QuartermasterConfig {
   }
   const exemptModels = options.quotaExemptModels === undefined ? [] : quotaExemptModels(options.quotaExemptModels)
   const exclusive = options.exclusiveModels === undefined ? [] : exclusiveModels(options.exclusiveModels)
+  const sharedLimits = options.sharedRateLimits === undefined ? [] : sharedRateLimits(options.sharedRateLimits)
   const local = options.localEndpoints === undefined ? {} : localEndpoints(options.localEndpoints)
 
   for (const [agent, plan] of Object.entries(agents)) {
@@ -360,6 +392,7 @@ export function parseConfig(input: unknown = {}): QuartermasterConfig {
     ...(modules === undefined ? {} : { modules }),
     quotaExemptModels: exemptModels,
     exclusiveModels: exclusive,
+    sharedRateLimits: sharedLimits,
     providerCooldownMs,
     localHealthTimeoutMs: duration(options.localHealthTimeoutMs, "localHealthTimeoutMs", DEFAULTS.localHealthTimeoutMs),
     localEndpoints: local,

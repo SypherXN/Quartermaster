@@ -10,6 +10,7 @@ import { applyLocalHealth, LocalHealth } from "./local-health.ts"
 import { bindExclusive, ExclusiveLeases } from "./exclusive.ts"
 import { explainSelection, type SelectionExplanation } from "./explain.ts"
 import { AgentPins } from "./pins.ts"
+import { RequestEvidenceHistory } from "./request-evidence.ts"
 import { adoptProjectQuartermasterOptions, readNativeConfiguration, type ConfigurationReader } from "./project-options.ts"
 import { modelKey, resolvePlan, selectAgentModel, selectModel, selectNamedPlan, type ModelEligibility } from "./select.ts"
 import { readUsageStatus, type UsageReadResult, type UsageSourceID } from "./usage.ts"
@@ -127,7 +128,7 @@ export async function registerAgentRouting(
   const instanceID = randomUUID()
   let quotaEligibility = buildQuotaEligibility(registry, config.usageSources, config.quotaExemptModels, usage)
   let eligibility = applyLocalHealth(registry, quotaEligibility, health)
-  const failures = new FailureCooldowns(config.providerCooldownMs)
+  const failures = new FailureCooldowns(config.providerCooldownMs, config.sharedRateLimits)
   failures.restore(await ctx.storage.get(COOLDOWN_STORAGE_KEY), Date.now())
   eligibility = failures.apply(eligibility, registry, Date.now())
   const pins = await AgentPins.load(config, registry, ctx.storage, ctx.location?.project?.id)
@@ -187,7 +188,7 @@ export async function registerAgentRouting(
   }
 
   const persistCooldowns = () => {
-    const state = JSON.parse(JSON.stringify({ cooldowns: failures.snapshot(Date.now()) }))
+    const state = JSON.parse(JSON.stringify({ cooldowns: failures.snapshot(Date.now(), true) }))
     persistence = persistence.catch(() => {}).then(() => ctx.storage.set(COOLDOWN_STORAGE_KEY, state))
     return persistence
   }
@@ -242,10 +243,14 @@ export async function registerAgentRouting(
   }, AVAILABILITY_REFRESH_MS)
   interval.unref?.()
   const running = new Set<string>()
+  const requestHistory = new RequestEvidenceHistory()
+  const compactionRecovery = new Map<string, { agent: string; model: ModelRef }>()
+  const failureObservations = new Map<string, { kind: string; attribution: string; occurredAt: number | null; observedAt: number; model?: ModelRef; deadline?: number; outcome: string }>()
+  const latestRequestKinds = new Map<string, string>()
   let promptHook: { dispose: () => Promise<void> } | undefined
   let runningHook: { dispose: () => Promise<void> } | undefined
   let retryHook: { dispose: () => Promise<void> } | undefined
-  const requestKinds = new Map<string, { kind: string; agent: string; model: ModelRef }>()
+  const requestKinds = new Map<string, { kind: string; agent: string; model: ModelRef; observedAt: number }>()
   const attemptedModels = new Map<string, Set<string>>()
   const lastPrimaryModels = new Map<string, { agent: string; model: ModelRef }>()
   const ownershipScope = encodeURIComponent(ctx.location?.project?.id ?? ctx.location?.directory ?? "runtime")
@@ -306,6 +311,7 @@ export async function registerAgentRouting(
         localHealth = new LocalHealth(config.localEndpoints, config.localHealthTimeoutMs)
       }
       failures.setDuration(config.providerCooldownMs)
+      failures.setGroups(config.sharedRateLimits)
     }
     await pins.revalidate()
   }
@@ -352,6 +358,7 @@ export async function registerAgentRouting(
       (model) => leases.peekBlocks(sessionID, model),
     ))
     const observed = lastPrimaryModels.get(sessionID)
+    const failureObservation = failureObservations.get(sessionID)
     const quotaConfigured = Object.keys(config.usageSources).length > 0
     const currentUsage = usage
     return {
@@ -387,6 +394,9 @@ export async function registerAgentRouting(
         })),
       },
       recommendation: { ...recommendation, applies: mode === "automatic", note: "Snapshot recommendation only; manual/unbound choices are not changed. Admission rechecks availability." },
+      failureCooldowns: scope === "mismatch" ? [] : failures.snapshot(now, true),
+      lastFailureObservation: scope === "mismatch" || !failureObservation || now - failureObservation.observedAt > 900_000 ? null : failureObservation,
+      failureObservationTimeBasis: "durable event created timestamp; no request attribution restored across restart",
       primaryRequestEvidence: {
         lastObserved: scope === "mismatch" ? "unknown" : observed ?? "unknown",
         basis: "model.request hook observed in this plugin instance; not proof of an HTTP send or successful inference",
@@ -462,6 +472,7 @@ export async function registerAgentRouting(
   if (ctx.session && Object.keys(config.agents).length > 0) {
     runningHook = await ctx.session.hook("model.request", async (input) => {
       const model = modelRef(input.model)
+      latestRequestKinds.set(input.sessionID, input.kind)
       if (input.kind === "primary" && Object.hasOwn(config.agents, input.agent) && ctx.session?.get) {
         try {
           const ownership = await ctx.storage.get(ownershipKey(input.sessionID)) as { mode?: unknown; agent?: unknown } | undefined
@@ -487,18 +498,33 @@ export async function registerAgentRouting(
           throw error
         }
       }
-      requestKinds.set(input.sessionID, { kind: input.kind, agent: input.agent, model })
+      // Only a primary request can fail over; an auxiliary request must not displace the correlation
+      // the retry hook depends on.
       if (input.kind === "primary") {
+        requestKinds.set(input.sessionID, { kind: input.kind, agent: input.agent, model, observedAt: Date.now() })
         lastPrimaryModels.set(input.sessionID, { agent: input.agent, model })
         running.add(input.sessionID)
         const attempted = attemptedModels.get(input.sessionID) ?? new Set<string>()
         attempted.add(modelKey(model))
         attemptedModels.set(input.sessionID, attempted)
       }
+      if (input.kind === "primary" || input.kind === "compaction") {
+        const observedAt = Date.now()
+        let managed = false
+        try {
+          const view = sessionView(await ctx.session!.get({ sessionID: input.sessionID } as never))
+          const ownership = await ctx.storage.get(ownershipKey(input.sessionID)) as { mode?: unknown; agent?: unknown } | undefined
+          managed = Object.hasOwn(config.agents, input.agent) && view.agent === input.agent &&
+            (!ctx.location?.project?.id || view.projectID === ctx.location.project.id) &&
+            !(ownership?.agent === input.agent && ownership.mode === "manual")
+        } catch { /* Missing ownership evidence must not authorize automatic recovery. */ }
+        requestHistory.record({ sessionID: input.sessionID, kind: input.kind, agent: input.agent, model, observedAt, managed }, observedAt)
+      }
     })
     retryHook = await ctx.session.hook("retry", async (event) => {
       const request = requestKinds.get(event.sessionID)
       if (
+        latestRequestKinds.get(event.sessionID) !== "primary" ||
         request?.kind !== "primary" ||
         request.agent !== event.agent || modelKey(request.model) !== modelKey(modelRef(event.model)) ||
         !ctx.session?.get || !ctx.session.switchModel
@@ -526,7 +552,17 @@ export async function registerAgentRouting(
         await applyCurrent()
       }
 
-      if (event.decision.retry !== true || !failure.fallback) return
+      if (event.decision.retry !== true) return
+      if (!failure.fallback) {
+        // A retried failure Quartermaster cannot classify leaves the session on the model the host gave up on.
+        if (!failure.report) {
+          const error = event.error as { type?: unknown; status?: unknown }
+          console.warn(
+            `[quartermaster] unclassified retried failure on ${modelKey(modelRef(event.model))} type=${typeof error.type === "string" ? error.type : "none"} status=${typeof error.status === "number" ? error.status : "none"}`,
+          )
+        }
+        return
+      }
 
       await refresh()
 
@@ -575,15 +611,76 @@ export async function registerAgentRouting(
   }
 
   // Validate automatic ownership/availability before acquiring an exclusive request lease.
-  const exclusiveGate = await bindExclusive(ctx, leases, config.exclusiveModels, async () => {}, async (step) => {
+  const exclusiveGate = await bindExclusive(ctx, leases, config.exclusiveModels, async () => {}, async (step, event) => {
+    const terminal = event as { type?: unknown; created?: unknown; data?: { error?: unknown } }
+    if (terminal.type === "session.execution.failed" || terminal.type === "session.compaction.failed") {
+      try {
+        const now = Date.now()
+        const occurredAt = terminal.created
+        const kind = terminal.type === "session.compaction.failed" ? "compaction" : "primary"
+        const request = typeof occurredAt === "number" ? requestHistory.match(step.sessionID, kind, occurredAt, now) : undefined
+        for (const [id, observation] of failureObservations) if (observation.observedAt < now - 900_000) failureObservations.delete(id)
+        if (failureObservations.size >= 512) failureObservations.delete(failureObservations.keys().next().value!)
+        failureObservations.set(step.sessionID, {
+          kind, attribution: request?.managed ? "model-confirmed" : "unavailable-or-unmanaged",
+          occurredAt: typeof occurredAt === "number" && Number.isFinite(occurredAt) ? occurredAt : null,
+          observedAt: now, ...(request?.managed ? { model: request.model } : {}), outcome: "not-applied",
+        })
+        if (request?.managed && typeof occurredAt === "number" &&
+          typeof terminal.data?.error === "object" && terminal.data.error !== null) {
+          const failure = classifyRetryFailure(terminal.data.error, request.model.providerID, request.model.modelID)
+          const deadline = occurredAt + config.providerCooldownMs
+          const fresh = requestHistory.claimFailure(step.sessionID, kind, occurredAt, now)
+          failureObservations.set(step.sessionID, {
+            kind, attribution: "model-confirmed", occurredAt, observedAt: now, model: request.model,
+            ...(failure.report ? { deadline } : {}),
+            outcome: !fresh ? "duplicate" : !failure.report ? "not-a-cooldown-failure" : deadline <= now ? "expired" : "next-automatic-assignment-only",
+          })
+          // Use the durable event time: observing an old failure must not renew its cooldown.
+          if (fresh && deadline > now && failure.report && failures.reportFailure(failure.report, occurredAt)) {
+            await persistCooldowns()
+            await applyCurrent()
+            if (kind === "compaction") compactionRecovery.set(step.sessionID, { agent: request.agent, model: request.model })
+          }
+        } else {
+          console.warn(`[quartermaster] ${kind} failure not attributed: missing, ambiguous, expired or unmanaged request evidence`)
+        }
+      } catch {
+        console.warn("[quartermaster] terminal failure observation failed")
+      }
+    }
+    if (typeof terminal.created === "number") {
+      if (step.kind === "finish") requestHistory.end(step.sessionID, "primary", terminal.created, Date.now())
+      if (terminal.type === "session.compaction.failed" || terminal.type === "session.compaction.ended") {
+        requestHistory.end(step.sessionID, "compaction", terminal.created, Date.now())
+      }
+    }
     if (step.kind === "finish" || step.kind === "delete") {
       running.delete(step.sessionID)
       requestKinds.delete(step.sessionID)
       attemptedModels.delete(step.sessionID)
+      latestRequestKinds.delete(step.sessionID)
     }
     if (step.kind === "delete") {
+      compactionRecovery.delete(step.sessionID)
+      failureObservations.delete(step.sessionID)
+      requestHistory.delete(step.sessionID)
       lastPrimaryModels.delete(step.sessionID)
       await clearOwnership(step.sessionID)
+    }
+    const recovery = compactionRecovery.get(step.sessionID)
+    if (recovery && !running.has(step.sessionID) && ctx.session?.get) {
+      compactionRecovery.delete(step.sessionID)
+      try {
+        const view = sessionView(await ctx.session.get({ sessionID: step.sessionID } as never))
+        // A dedicated compaction model or a later user switch must not change the primary model.
+        if (view.agent === recovery.agent && sameSessionModel(recovery.model, view.model)) {
+          if (step.kind === "finish") leases.finish(step.sessionID)
+          await assignPrompt(step.sessionID)
+        }
+      } catch {
+        console.warn("[quartermaster] compaction fallback assignment unavailable; no work replayed")
+      }
     }
   })
 
@@ -690,6 +787,10 @@ export async function registerAgentRouting(
       await requestReload()
     },
     async dispose() {
+      requestHistory.clear()
+      compactionRecovery.clear()
+      failureObservations.clear()
+      latestRequestKinds.clear()
       clearInterval(interval)
       requestKinds.clear()
       attemptedModels.clear()

@@ -229,7 +229,7 @@ unknown, or failed usage skips it with reason `usage-unavailable` and quota
 `unknown`. Later eligible candidates remain usable.
 
 Selection reuses the ordered selector with an inventory private to the module;
-it never registers direct models or relaxes native unknown-quota checks. State
+it never registers direct models or alters native selection's own quota gating. State
 is scoped to project/module/provider/model; variants share that model's deadline.
 A free-model report cannot block its paid sibling or another module. Queries
 make no provider calls, probes, reservations or sticky assignments. Deadlines are
@@ -444,7 +444,7 @@ not certification of a new archive. The package pins `@opencode/plugin`
 **2.0.23**; that dependency version is not the server version. See the exact
 installed artifact and tested hosts in the [deployment record](DEPLOYMENT.md).
 To reproduce this matrix, build the checkout and run
-`node scripts/verify-retry-host-contract.mjs` with an installed **2.0.24** binary.
+`node scripts/verify-retry-host-contract.mjs` with an installed **2.0.31** binary.
 The script rejects other versions and contacts only its loopback fake provider.
 Rate-limit is the default; `--failure=internal` and `--failure=transport` prove
 additional safe failures reach the backup in the original prompt. Auth, quota,
@@ -457,17 +457,106 @@ it switches only for a host-approved retry with an explicitly safe structured
 failure correlated to a bound agent's primary request, and excludes attempted
 models from the remaining plan.
 
-Routing classification uses structured type/status only; it ignores messages
-and response bodies and does not persist raw errors. Rate limits (429) create a
-model-scoped temporary cooldown. Retry-approved internal/transport and 408,
-409, or 5xx outage signals may switch to an eligible backup. Confirmed quota,
-auth, and permission errors do not create outage cooldowns or switch models.
+Routing classification uses the structured type/status fields and, for rate
+limits only, a narrow text check over `error.message` and `error.response.body`
+that mirrors the host's own plain-text retry rule; it persists no raw errors.
+Rate limits (429, `provider.rate-limit`, or that text) create a model-scoped
+temporary cooldown. Confirmed quota errors (`provider.quota` or 402) also
+create a model-scoped cooldown, and OpenCode Zen reports its shared free-tier
+bucket that way. Models listed together in `sharedRateLimits` copy either
+cooldown to every member, so the next selection skips the whole shared bucket.
+Model outages, provider outages, and success do not spread across the group.
+Groups are disjoint, contain at least two `providerID/modelID` strings, and
+are reread when project options are adopted.
+Retry-approved internal/transport and 408,
+409, or 5xx outage signals may switch to an eligible backup. Confirmed quota
+errors (402 or `provider.quota`) create a model-scoped cooldown for subsequent
+assignments, but do not trigger immediate retry fallback. Auth and permission
+errors neither create cooldowns nor switch models.
 Missing-model/no-route errors may cool down that model for later assignments
 but remain terminal in the current execution. Context overflow, content
 filtering, unsupported operations, invalid output, timeouts, and unknown errors
 remain terminal for Quartermaster selection; the host may still retry the same
 model under its own policy. Cooldowns affect subsequent selection, including
-safe retry selection and later prompt admission. Quartermaster excludes already
+safe retry selection and later prompt admission. Correlated terminal
+`session.execution.failed` events also record failures without approving a
+retry or resending the turn. Their original event timestamp determines expiry;
+invalid or future timestamps are ignored. Persisted unexpired cooldowns survive
+restart, but errors never observed by this plugin cannot be recovered from a
+failed session outcome alone. Quota mode also verifies a new explicit prompt
+uses fallback after restarting the isolated fixture with retained storage.
+`diagnoseSession` exposes active `failureCooldowns` with provider/model,
+classification, `occurredAt` and `until` when that evidence is available.
+For terminal events, `occurredAt` is the host event timestamp; for retry hooks
+(which provide no occurrence timestamp), it is the local observation time.
+Legacy restored cooldowns may lack that metadata. Reobserving a terminal event
+does not extend its original deadline.
+
+Compaction has its own durable `session.compaction.failed` event. On the tested
+2.0.31 host a failed compaction can leave the execution outcome **succeeded**;
+the outcome alone is not recovery evidence. Quartermaster observes this event
+without releasing primary exclusive leases or replacing primary retry state.
+Bound automatic requests retain model/variant and ownership evidence for up to
+15 minutes (512 requests maximum), including after execution cleanup. Late
+failures cool the original model, not the currently selected model or agent.
+Conflicting overlapping evidence, invalid/future timestamps, expired cooldowns
+and unmanaged requests are ignored. Equivalent overlapping model/ownership
+evidence suffices only for model cooldown attribution, not request identity.
+Capacity overflow conservatively suspends attribution for the retention window.
+Duplicate failure timestamps do not recreate a cooldown cleared by success.
+
+Request hooks and retry payloads supply no stable request ID; retries also omit
+request kind. An auxiliary request following a primary suppresses immediate
+retry switching until another primary request is observed. Arbitrarily reordered
+retry callbacks cannot be fully attributed with this host contract. Dedicated
+terminal events remain the recovery evidence; no log/database reconstruction or
+turn replay is attempted. Request correlation is not restored across restart,
+but successfully persisted cooldowns are. A separately configured compaction
+model is cooled independently; changing the primary model does not prove that
+compaction recovered. Same-turn compaction model replacement is unsupported.
+
+`diagnoseSession.lastFailureObservation` provides bounded, sanitized request kind,
+model-level attribution, durable occurrence time, observation time, deadline
+and outcome; it contains no prompt, summary or raw error. Cooldown memory is
+updated before asynchronous persistence, so admissions after observation see it;
+already-dispatched work is never replayed. Use
+`node scripts/verify-retry-host-contract.mjs --compaction --failure=quota` for
+actual next-prompt fallback and retained-storage restart proof, or
+`--compaction --failure=rate-limit` for captured-model 429 retries followed by
+next-prompt recovery. Text-only compaction classification and reordered delivery
+are covered by synthetic regressions, not claimed as real-host reproductions.
+Live activation and historical attribution of the reported incident remain
+unverified; these checks contact only the loopback fixture.
+
+`node scripts/verify-retry-host-contract.mjs --compaction --failure=quota --probe-compaction-selection`
+is an isolated selection-boundary probe, **not a production recovery feature**.
+On 2.0.31 it switches the session model inside the compaction hook and proves
+the current compact still dispatches the captured primary model. A second
+explicit compact, with no intervening prompt, dispatches fallback and completes
+native summary validation, but the session's primary model is also permanently
+changed. The user approved this primary-selection side effect for managed recovery. The installed
+hooks expose read-only request models; compaction-only selection needs a
+supported host boundary rather than an assumed effect of `switchModel`.
+
+After recording a fresh attributed compaction cooldown, QM now selects the next
+eligible primary model using the existing automatic assignment path. It waits
+for an observed active primary to finish, and only switches if the agent and
+primary model still match the failed compaction request. Current manual/unbound
+ownership and later user model changes are respected. A dedicated compaction
+model is not silently replaced. No failed compact is replayed: request compact
+again after selection finishes.
+
+`node scripts/verify-retry-host-contract.mjs --compaction --failure=quota --recover-compaction`
+proves production recovery without the observer's switch: the second compact
+dispatches fallback and completes native summary validation without a prompt.
+The same check passes with `--failure=rate-limit`. Same-attempt replacement,
+an independent dedicated compaction-model fallback, and an atomic admission hook
+for concurrent compacts remain unsupported. A compact already captured during
+asynchronous failure handling may still use the old model. Auto-compaction and
+restart directly into a compact have not been proven by this fixture (its
+retained-storage restart checks a subsequent ordinary prompt).
+
+Quartermaster excludes already
 attempted provider/model IDs when choosing another backup; it does not prevent
 OpenCode from retrying the current model or reset the native attempt limit.
 
@@ -495,8 +584,9 @@ operations:
 - `diagnoseSession({ sessionID })` reads bounded session/runtime diagnostics and
   cached availability without changing routing or sending inference. See the
   [diagnostic guide](../README.md#diagnose-the-handling-runtime).
-- `report({ since?, until?, limit?, offset?, refresh? })` reads the active
-  project's bounded telemetry summary. `requestReport` adds timeout/response
+- `report({ since?, until?, limit?, offset?, refresh?, projectID? })` reads the
+  active project's bounded telemetry summary; `projectID` must match the active
+  project and is otherwise refused. `requestReport` adds timeout/response
   validation. Plugin attribution uses the separate `reportPluginUsage` method;
   see [telemetry contracts and limits](TOKEN_TELEMETRY.md).
 - `pin({ agent, model })` and `unpin({ agent })` manage a manual agent

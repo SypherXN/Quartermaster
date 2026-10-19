@@ -215,6 +215,86 @@ test("routing picks up models registered after plugin setup", async () => {
   await routing?.dispose()
 })
 
+test("a shared rate-limit group skips every member on the next selection", async () => {
+  const grouped = parseConfig({
+    plans: { review: [
+      "opencode/deepseek-v4.1-flash-free",
+      "opencode/glm-5.3-flash-free",
+      "opencode/mimo-v2.6-flash-free",
+      "provider-b/backup",
+    ] },
+    agents: { reviewer: "review" },
+    sharedRateLimits: [[
+      "opencode/deepseek-v4.1-flash-free",
+      "opencode/glm-5.3-flash-free",
+      "opencode/mimo-v2.6-flash-free",
+    ]],
+  })
+  const models = [
+    { providerID: "opencode", id: "deepseek-v4.1-flash-free" },
+    { providerID: "opencode", id: "glm-5.3-flash-free" },
+    { providerID: "opencode", id: "mimo-v2.6-flash-free" },
+    { providerID: "provider-b", id: "backup" },
+  ]
+  const { editor, agents } = editorWith({ reviewer: { id: "reviewer" } })
+  let transform: ((editor: AgentEditor) => void) | undefined
+  const routing = await registerAgentRouting({
+    model: { list: async () => ({ data: models.map((model) => ({ ...model, enabled: true })) }) },
+    storage: { get: async () => undefined, set: async () => {}, remove: async () => {}, scan: async () => ({ entries: [] }) },
+    rpc: () => ({ status: async () => { throw new Error("not configured") } }),
+    agent: {
+      transform: async (callback: (editor: AgentEditor) => void) => { transform = callback; return { dispose: async () => {} } },
+      reload: async () => transform?.(editor as AgentEditor),
+    },
+  } as never, grouped)
+  await routing?.reportFailure({
+    providerID: "opencode", modelID: "deepseek-v4.1-flash-free", classification: "temporary-rate-limit",
+  })
+  assert.deepEqual(agents.reviewer.model, { providerID: "provider-b", id: "backup" })
+  assert.deepEqual((await routing?.explain("reviewer"))?.skipped.map(({ code }) => code), ["cooldown", "cooldown", "cooldown"])
+  await routing?.dispose()
+})
+
+test("a shared quota group skips every member on the next selection", async () => {
+  const grouped = parseConfig({
+    plans: { review: [
+      "opencode/deepseek-v4.1-flash-free",
+      "opencode/glm-5.3-flash-free",
+      "opencode/mimo-v2.6-flash-free",
+      "provider-b/backup",
+    ] },
+    agents: { reviewer: "review" },
+    sharedRateLimits: [[
+      "opencode/deepseek-v4.1-flash-free",
+      "opencode/glm-5.3-flash-free",
+      "opencode/mimo-v2.6-flash-free",
+    ]],
+  })
+  const models = [
+    { providerID: "opencode", id: "deepseek-v4.1-flash-free" },
+    { providerID: "opencode", id: "glm-5.3-flash-free" },
+    { providerID: "opencode", id: "mimo-v2.6-flash-free" },
+    { providerID: "provider-b", id: "backup" },
+  ]
+  const { editor, agents } = editorWith({ reviewer: { id: "reviewer" } })
+  let transform: ((editor: AgentEditor) => void) | undefined
+  const routing = await registerAgentRouting({
+    model: { list: async () => ({ data: models.map((model) => ({ ...model, enabled: true })) }) },
+    storage: { get: async () => undefined, set: async () => {}, remove: async () => {}, scan: async () => ({ entries: [] }) },
+    rpc: () => ({ status: async () => { throw new Error("not configured") } }),
+    agent: {
+      transform: async (callback: (editor: AgentEditor) => void) => { transform = callback; return { dispose: async () => {} } },
+      reload: async () => transform?.(editor as AgentEditor),
+    },
+  } as never, grouped)
+  await routing?.reportFailure({
+    providerID: "opencode", modelID: "deepseek-v4.1-flash-free", classification: "quota-exhausted",
+  })
+  assert.deepEqual(agents.reviewer.model, { providerID: "provider-b", id: "backup" })
+  assert.deepEqual((await routing?.explain("reviewer"))?.skipped.map(({ code }) => code), ["cooldown", "cooldown", "cooldown"])
+  await routing?.dispose()
+})
+
 test("automatic request guard rejects stale models but preserves manual, unbound and auxiliary requests", async () => {
   const hooks: Record<string, Array<(input: any) => Promise<void>>> = {}
   const commands: Record<string, { execute(input: { sessionID: string }): Promise<void> }> = {}
@@ -558,7 +638,7 @@ test("each new prompt chooses for that session and chooses again after the turn"
   } as never, promptConfig)
   const prompt = (sessionID: string) => hooks.prompt[0]({ sessionID })
   const push = (event: unknown) => new Promise<void>((done) => {
-    const item = { event, done }
+    const item = { event: { created: Date.now(), ...(event as object) }, done: () => setTimeout(done, 2) }
     if (waiting) waiting(item)
     else queued.push(item)
   })
@@ -652,7 +732,155 @@ test("each new prompt chooses for that session and chooses again after the turn"
   await push({ type: "session.execution.interrupted", data: { sessionID: "e" } })
   await prompt("a")
   assert.deepEqual(sessions.a.model, { providerID: "provider-a", id: "primary" }, "cancelling the owner releases its exclusive slot for another idle session")
+  await hooks["model.request"][0]({ sessionID: "a", kind: "primary", agent: "reviewer", model: sessions.a.model })
+  const occurredAt = Date.now()
+  const terminal = { type: "session.execution.failed", created: occurredAt, data: { sessionID: "a", error: { type: "provider.quota", status: 402 } } }
+  const beforeTerminal = stored.get("availability/cooldowns-v1")
+  await push({ ...terminal, created: occurredAt + 60000 })
+  assert.deepEqual(stored.get("availability/cooldowns-v1"), beforeTerminal, "future event timestamps cannot create a cooldown")
+  // A finish clears request correlation even when its timestamp is unusable.
+  await hooks["model.request"][0]({ sessionID: "a", kind: "primary", agent: "reviewer", model: sessions.a.model })
+  await push({ ...terminal, created: occurredAt - 60000 })
+  assert.deepEqual(stored.get("availability/cooldowns-v1"), beforeTerminal, "an old execution cannot be attributed to a newer request")
+  await hooks["model.request"][0]({ sessionID: "a", kind: "primary", agent: "reviewer", model: sessions.a.model })
+  terminal.created = Date.now()
+  await push(terminal)
+  assert.equal(sessions.a.model.id, "primary", "terminal observation must not resend or switch")
+  const persisted = stored.get("availability/cooldowns-v1")
+  assert.ok(JSON.stringify(persisted).includes(String(terminal.created + 300000)), "expiry uses original terminal time")
+  await push(terminal)
+  assert.deepEqual(stored.get("availability/cooldowns-v1"), persisted, "duplicate terminal delivery must not renew expiry")
+  await prompt("a")
+  assert.deepEqual(sessions.a.model, { providerID: "provider-b", id: "backup", variant: "fast" }, "next explicit prompt avoids terminal quota failure without a retry hook")
+  await routing?.reportSuccess({ providerID: "provider-a", scope: "model", modelID: "primary" })
+  sessions.f = { agent: "reviewer", model: { providerID: "provider-a", id: "primary" } }
+  await hooks["model.request"][0]({ sessionID: "f", kind: "compaction", agent: "reviewer", model: sessions.f.model })
+  const compactedAt = Date.now()
+  // Cleanup and a user agent/model change happen before delayed failure delivery.
+  await push({ type: "session.execution.succeeded", data: { sessionID: "f" } })
+  sessions.f = { agent: "unbound", model: { providerID: "user", id: "picked" } }
+  const compactionFailure = { type: "session.compaction.failed", created: compactedAt, data: { sessionID: "f", error: { type: "provider.quota", status: 402 } } }
+  await push(compactionFailure)
+  const afterCompaction = stored.get("availability/cooldowns-v1")
+  assert.ok(JSON.stringify(afterCompaction).includes(String(compactedAt + 300000)))
+  const diagnostic = await routing?.diagnoseSession("f")
+  assert.equal(diagnostic?.lastFailureObservation?.kind, "compaction")
+  assert.equal(diagnostic?.lastFailureObservation?.model?.modelID, "primary")
+  assert.equal(diagnostic?.lastFailureObservation?.deadline, compactedAt + 300000)
+  assert.equal(sessions.f.model.id, "picked", "late compaction failure never switches current manual/unbound work")
+  await push(compactionFailure)
+  assert.deepEqual(stored.get("availability/cooldowns-v1"), afterCompaction)
+  sessions.f = { agent: "reviewer", model: { providerID: "provider-a", id: "primary" } }
+  await prompt("f")
+  assert.equal(sessions.f.model.id, "backup", "compaction before primary supplies cooldown for the next automatic prompt")
+  for (const sessionID of ["c", "d"]) {
+    const prior = stored.get("availability/cooldowns-v1")
+    await hooks["model.request"][0]({ sessionID, kind: "compaction", agent: sessions[sessionID].agent, model: sessions[sessionID].model })
+    await push({ type: "session.compaction.failed", created: Date.now(), data: { sessionID, error: { status: 429 } } })
+    assert.deepEqual(stored.get("availability/cooldowns-v1"), prior, "manual and unbound compaction is unmanaged")
+  }
+  await routing?.reportSuccess({ providerID: "provider-a", scope: "model", modelID: "primary" })
+  await routing?.reportSuccess({ providerID: "provider-b", scope: "model", modelID: "backup" })
+  sessions.g = { agent: "reviewer", model: { providerID: "provider-a", id: "primary" } }
+  for (const callback of hooks["model.request"]) {
+    await callback({ sessionID: "g", kind: "primary", agent: "reviewer", model: sessions.g.model })
+    await callback({ sessionID: "g", kind: "compaction", agent: "reviewer", model: { providerID: "provider-b", id: "backup" } })
+  }
+  await push({ type: "session.compaction.failed", created: Date.now(), data: { sessionID: "g", error: { type: "unknown", message: "Rate limit exceeded. Please try again later." } } })
+  const separate = stored.get("availability/cooldowns-v1")
+  assert.ok(JSON.stringify(separate).includes("backup"), "text-only compaction failure cools its separate model")
+  assert.ok(!JSON.stringify(separate).includes("primary"), "compaction does not cool the unrelated primary")
+  assert.equal((await routing?.explain("reviewer", "a"))?.selected?.modelID, undefined, "compaction failure must not release the active primary exclusive lease")
+  await push({ type: "session.execution.succeeded", data: { sessionID: "g" } })
+  await routing?.reportSuccess({ providerID: "provider-a", scope: "model", modelID: "primary" })
+  await push(compactionFailure)
+  assert.ok(!JSON.stringify(stored.get("availability/cooldowns-v1")).includes("primary"), "duplicates cannot reinstate a cooldown cleared by success")
+  sessions.h = { agent: "reviewer", model: { providerID: "provider-a", id: "primary" } }
+  await hooks["model.request"][0]({ sessionID: "h", kind: "compaction", agent: "reviewer", model: sessions.h.model })
+  const expiredAt = Date.now()
+  const clock = Date.now
+  const beforeExpired = stored.get("availability/cooldowns-v1")
+  try {
+    Date.now = () => expiredAt + 300001
+    await push({ type: "session.compaction.failed", created: expiredAt, data: { sessionID: "h", error: { status: 429 } } })
+    assert.deepEqual(stored.get("availability/cooldowns-v1"), beforeExpired, "delayed expired evidence creates no fresh cooldown")
+    assert.equal((await routing?.diagnoseSession("h"))?.lastFailureObservation?.outcome, "expired")
+  } finally { Date.now = clock }
   await routing?.dispose()
+})
+
+test("ambiguous auxiliary retries do not switch the primary model", async () => {
+  const regressionConfig = parseConfig({
+    plans: { review: ["provider-a/primary", { id: "provider-b/backup", variant: "fast" }] },
+    agents: { reviewer: "review" },
+  })
+  const session: { agent: string; model: { providerID: string; id: string; variant?: string } } = {
+    agent: "reviewer", model: { providerID: "provider-a", id: "primary" },
+  }
+  const switches: Array<{ providerID: string; id: string; variant?: string }> = []
+  const stored = new Map<string, unknown>()
+  const hooks: Record<string, Array<(input: any) => Promise<void>>> = {}
+  const warnings: string[] = []
+  const originalWarn = console.warn
+  console.warn = (message?: unknown) => { warnings.push(String(message)) }
+  const routing = await registerAgentRouting({
+    model: { list: async () => ({ data: registry.map((model) => ({ providerID: model.providerID, id: model.modelID, enabled: true })) }) },
+    storage: {
+      get: async (key: string) => stored.get(key), set: async (key: string, value: unknown) => { stored.set(key, value) },
+      remove: async (key: string) => { stored.delete(key) }, scan: async () => ({ entries: [] }),
+    },
+    rpc: () => ({ status: async () => { throw new Error("not configured") } }),
+    agent: { transform: async () => ({ dispose: async () => {} }), reload: async () => {} },
+    session: {
+      hook: async (name: string, callback: (input: any) => Promise<void>) => {
+        hooks[name] ??= []
+        hooks[name].push(callback)
+        return { dispose: async () => {} }
+      },
+      get: async () => ({ data: session }),
+      switchModel: async (input: { model: { providerID: string; id: string; variant?: string } }) => {
+        switches.push(input.model)
+        session.model = input.model
+      },
+    },
+    event: { subscribe: () => (async function* () {})() },
+  } as never, regressionConfig)
+  const request = async (kind: string, model: { providerID: string; id: string; variant?: string }) => {
+    for (const callback of hooks["model.request"]) {
+      await callback({ sessionID: "a", kind, agent: "reviewer", model })
+    }
+  }
+  const retry = (model: { providerID: string; id: string; variant?: string }, event: { decision: { retry: boolean }; error: unknown }) =>
+    hooks.retry[0]({ sessionID: "a", agent: "reviewer", model, ...event })
+  const unclassified = () => warnings.filter((warning) => warning.includes("unclassified retried failure"))
+  try {
+    await request("primary", { providerID: "provider-a", id: "primary" })
+    await request("title", { providerID: "provider-a", id: "primary" })
+    await retry({ providerID: "provider-a", id: "primary" }, {
+      decision: { retry: true }, error: { status: 429 },
+    })
+    assert.deepEqual(switches, [], "retry has no request kind: do not assume the auxiliary failure is primary")
+    await request("primary", { providerID: "provider-a", id: "primary" })
+    await retry({ providerID: "provider-a", id: "primary" }, {
+      decision: { retry: true },
+      error: { type: "unknown", message: "Rate limit exceeded. Please try again later." },
+    })
+    assert.deepEqual(session.model, { providerID: "provider-b", id: "backup", variant: "fast" })
+    assert.deepEqual(switches, [{ providerID: "provider-b", id: "backup", variant: "fast" }])
+    assert.deepEqual(unclassified(), [])
+    await request("primary", { providerID: "provider-b", id: "backup", variant: "fast" })
+    await retry({ providerID: "provider-b", id: "backup", variant: "fast" }, { decision: { retry: true }, error: { type: "provider.weird" } })
+    assert.equal(unclassified().length, 1, "a retried failure Quartermaster cannot classify is reported once")
+    await retry({ providerID: "provider-b", id: "backup", variant: "fast" }, {
+      decision: { retry: false },
+      error: { type: "unknown", message: "Rate limit exceeded. Please try again later." },
+    })
+    assert.deepEqual(switches, [{ providerID: "provider-b", id: "backup", variant: "fast" }], "a host that does not retry is never switched")
+    assert.equal(unclassified().length, 1)
+  } finally {
+    console.warn = originalWarn
+    await routing?.dispose()
+  }
 })
 
 test("adopting project options revalidates and persists project-scoped pins", async () => {

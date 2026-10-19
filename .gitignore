@@ -32,3 +32,4 @@ opencode-usage.json
 /scripts/proof-routing-quota.mjs
 /scripts/proof-routing-retry.mjs
 /scripts/proof-routing-tail.mjs
+/scripts/_*.mjs

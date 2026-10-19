@@ -219,13 +219,14 @@ export class ExclusiveLeases {
   }
 }
 
-function readStep(event: unknown): { kind: "touch" | "release" | "finish" | "delete"; sessionID: string } | undefined {
+function readStep(event: unknown): { kind: "touch" | "release" | "finish" | "delete" | "observe"; sessionID: string } | undefined {
   if (typeof event !== "object" || event === null) return undefined
   const record = event as { type?: unknown; data?: unknown }
   if (typeof record.data !== "object" || record.data === null) return undefined
   const sessionID = (record.data as { sessionID?: unknown }).sessionID
   if (typeof sessionID !== "string" || sessionID.length === 0) return undefined
   if (record.type === "session.step.streamed") return { kind: "touch", sessionID }
+  if (record.type === "session.compaction.failed" || record.type === "session.compaction.ended") return { kind: "observe", sessionID }
   if (record.type === "session.step.ended" || record.type === "session.step.failed") return { kind: "release", sessionID }
   if (
     record.type === "session.execution.succeeded"
@@ -244,7 +245,7 @@ export async function bindExclusive(
   leases: ExclusiveLeases,
   models: readonly ModelRef[],
   onChange: (changed: boolean) => void | Promise<void>,
-  onStep?: (step: { kind: "touch" | "release" | "finish" | "delete"; sessionID: string }) => void | Promise<void>,
+  onStep?: (step: { kind: "touch" | "release" | "finish" | "delete" | "observe"; sessionID: string }, event: unknown) => void | Promise<void>,
 ) {
   if (!ctx.session || !ctx.event || (models.length === 0 && !onStep)) return { dispose: async () => {} }
   const listed = new Set(models.map((model) => modelKey(model)))
@@ -269,7 +270,8 @@ export async function bindExclusive(
         if (controller.signal.aborted) return
         const step = readStep(event)
         if (!step) continue
-        await onStep?.(step)
+        await onStep?.(step, event)
+        if (step.kind === "observe") continue
         if (step.kind === "touch") leases.touch(step.sessionID)
         else if (step.kind === "finish" || step.kind === "delete") await onChange(leases.finish(step.sessionID))
         else await onChange(leases.release(step.sessionID))

@@ -4,6 +4,7 @@ import type { ModelRef } from "../src/config.ts"
 import { buildQuotaEligibility } from "../src/eligibility.ts"
 import { modelKey, selectModel } from "../src/select.ts"
 import type { UsageReadResult, UsageSource, UsageSourceID } from "../src/usage.ts"
+import { normalizeUsageSnapshot } from "../src/usage.ts"
 
 const registry: ModelRef[] = [
   { providerID: "opencode-go", modelID: "paid-one" },
@@ -54,7 +55,8 @@ test("a limited shared source excludes every mapped model except explicit exempt
   assert.equal(eligibility.get(modelKey(registry[0]))?.status, "limited")
   assert.equal(eligibility.get(modelKey(registry[1]))?.status, "limited")
   assert.equal(eligibility.get(modelKey(registry[2]))?.status, "available")
-  assert.equal(eligibility.get(modelKey(registry[3]))?.status, "unknown")
+  // codex is "unknown" in this snapshot: absence of a limit must not block.
+  assert.equal(eligibility.get(modelKey(registry[3]))?.status, "available")
   assert.equal(eligibility.get(modelKey(registry[4]))?.status, "available")
 
   const selection = selectModel(registry.slice(0, 2), registry, eligibility, 1_000)
@@ -87,11 +89,53 @@ test("estimated reset does not unblock a source, but a fresh available status do
   assert.equal(recovered.get(modelKey(registry[0]))?.status, "available")
 })
 
-test("missing usage status leaves mapped providers unknown, not exhausted", () => {
+test("missing usage status leaves mapped providers available, not blocked", () => {
   const eligibility = buildQuotaEligibility(registry, { "opencode-go": "go" }, [], {
     status: "unavailable",
     reason: "rpc-error",
   })
-  assert.equal(eligibility.get(modelKey(registry[0]))?.status, "unknown")
+  assert.equal(eligibility.get(modelKey(registry[0]))?.status, "available")
   assert.equal(eligibility.get(modelKey(registry[4]))?.status, "available")
+
+  // Unusable usage must not block a plan: the mapped model is selectable.
+  const selection = selectModel([registry[0]], registry, eligibility, 1_000)
+  assert.equal(selection.status, "selected")
+})
+
+test("stale usage (limit no longer fresh) does not block, a fresh limit still does", () => {
+  const iso = (ms: number) => new Date(ms).toISOString()
+  const rawSource = (checkedAt: string, availability: string, state: string, usedPercent: number) => ({
+    authenticated: true,
+    checkedAt,
+    stale: false,
+    error: null,
+    windows: [{ name: "week", usedPercent, state, resetsAt: null }],
+    nextAvailableAt: null,
+    availability,
+  })
+  const raw = {
+    schemaVersion: 1,
+    updatedAt: iso(Date.now()),
+    models: { go: {} },
+    sources: {
+      // checkedAt 6 minutes ago: past the 5-minute freshness window -> not fresh.
+      go: rawSource(iso(Date.now() - 6 * 60_000), "limited", "rate-limited", 100),
+      codex: rawSource(iso(Date.now()), "available", "ok", 20),
+      cursor: rawSource(iso(Date.now()), "available", "ok", 20),
+    },
+  }
+  const stale = normalizeUsageSnapshot(raw)
+  assert.equal(stale.status, "ok")
+  if (stale.status === "ok") assert.equal(stale.snapshot.sources.go.availability, "unknown")
+
+  const staleEligibility = buildQuotaEligibility([registry[0]], { "opencode-go": "go" }, [], stale)
+  assert.equal(staleEligibility.get(modelKey(registry[0]))?.status, "available")
+  assert.equal(selectModel([registry[0]], registry, staleEligibility, 1_000).status, "selected")
+
+  const freshEligibility = buildQuotaEligibility([registry[0]], { "opencode-go": "go" }, [], usage("limited", "available"))
+  const blocked = selectModel([registry[0]], registry, freshEligibility, 1_000)
+  assert.equal(blocked.status, "no-eligible")
+  if (blocked.status === "no-eligible") {
+    assert.deepEqual(blocked.skipped.map(({ reason }) => reason.code), ["limited"])
+  }
 })
