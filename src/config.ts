@@ -52,12 +52,23 @@ export interface QuartermasterConfig {
   quotaExemptModels: string[]
   exclusiveModels: ModelRef[]
   sharedRateLimits: ModelRef[][]
+  /** Models the operator opted into probing for rate-limit recovery. */
+  probeRateLimits: ModelRef[]
+  /** Base probe interval in milliseconds. */
+  probeIntervalMs: number
+  /** Longest probe backoff in milliseconds. */
+  probeMaxBackoffMs: number
   providerCooldownMs: number
   localHealthTimeoutMs: number
   localEndpoints: Record<string, string>
 }
 
-const DEFAULTS = { providerCooldownMs: 300_000, localHealthTimeoutMs: 2_000 }
+const DEFAULTS = {
+  providerCooldownMs: 300_000,
+  localHealthTimeoutMs: 2_000,
+  probeIntervalMs: 300_000,
+  probeMaxBackoffMs: 3_600_000,
+}
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
 
@@ -155,6 +166,19 @@ function sharedRateLimits(value: unknown): ModelRef[][] {
       membership.add(key)
       return ref
     })
+  })
+}
+
+function probeModels(value: unknown): ModelRef[] {
+  if (!Array.isArray(value)) throw new Error("probeRateLimits: expected an array of providerID/modelID strings")
+  const seen = new Set<string>()
+  return value.map((item, index) => {
+    const path = `probeRateLimits[${index}]`
+    const ref = modelRef(item, path)
+    const key = JSON.stringify([ref.providerID, ref.modelID, ref.variant ?? null])
+    if (seen.has(key)) throw new Error(`${path}: duplicate probe model`)
+    seen.add(key)
+    return ref
   })
 }
 
@@ -351,7 +375,8 @@ export function parseConfig(input: unknown = {}): QuartermasterConfig {
   const options = record(input, "options")
   const fields = new Set([
     "plans", "agents", "workTypes", "usageSources", "quotaExemptModels", "exclusiveModels", "sharedRateLimits", "providerCooldownMs",
-    "localHealthTimeoutMs", "localEndpoints", "budgets", "tokenRates", "modules",
+    "localHealthTimeoutMs", "localEndpoints", "budgets", "tokenRates", "modules", "probeRateLimits", "probeIntervalMs",
+    "probeMaxBackoffMs",
   ])
   for (const key of Object.keys(options)) {
     if (!fields.has(key)) throw new Error(`options.${key}: unknown field`)
@@ -373,6 +398,9 @@ export function parseConfig(input: unknown = {}): QuartermasterConfig {
   const exemptModels = options.quotaExemptModels === undefined ? [] : quotaExemptModels(options.quotaExemptModels)
   const exclusive = options.exclusiveModels === undefined ? [] : exclusiveModels(options.exclusiveModels)
   const sharedLimits = options.sharedRateLimits === undefined ? [] : sharedRateLimits(options.sharedRateLimits)
+  const probeLimits = options.probeRateLimits === undefined ? [] : probeModels(options.probeRateLimits)
+  const probeIntervalMs = duration(options.probeIntervalMs, "probeIntervalMs", DEFAULTS.probeIntervalMs)
+  const probeMaxBackoffMs = duration(options.probeMaxBackoffMs, "probeMaxBackoffMs", DEFAULTS.probeMaxBackoffMs)
   const local = options.localEndpoints === undefined ? {} : localEndpoints(options.localEndpoints)
 
   for (const [agent, plan] of Object.entries(agents)) {
@@ -393,6 +421,9 @@ export function parseConfig(input: unknown = {}): QuartermasterConfig {
     quotaExemptModels: exemptModels,
     exclusiveModels: exclusive,
     sharedRateLimits: sharedLimits,
+    probeRateLimits: probeLimits,
+    probeIntervalMs,
+    probeMaxBackoffMs,
     providerCooldownMs,
     localHealthTimeoutMs: duration(options.localHealthTimeoutMs, "localHealthTimeoutMs", DEFAULTS.localHealthTimeoutMs),
     localEndpoints: local,

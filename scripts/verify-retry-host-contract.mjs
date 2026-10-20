@@ -37,7 +37,11 @@ const server = createServer(async (req, res) => {
   if (!warming && (body.model === "primary" || exhausted)) {
     if (!exhausted && failureMode === "transport") return req.socket.destroy()
     const failure = exhausted || failureMode === "rate-limit"
-      ? { status: 429, headers: { "retry-after": "0" }, error: { message: "local retry", type: "rate_limit_error", code: "rate_limit_exceeded" } }
+      ? { status: 429, headers: {
+          "retry-after": "7",
+          "x-ratelimit-remaining-requests": "0",
+          "x-ratelimit-reset": String(Math.floor(Date.now() / 1000) + 60),
+        }, error: { message: "local retry", type: "rate_limit_error", code: "rate_limit_exceeded" } }
       : failureMode === "internal"
         ? { status: 503, headers: {}, error: { message: "local retry", type: "server_error", code: "server_error" } }
         : failureMode === "auth"
@@ -100,6 +104,17 @@ export default Plugin.define({ id: "qm-contract-observer", async setup(ctx) {
     console.warn("QM_CONTRACT " + JSON.stringify({ source: "retry",
       type: e.error.type, status: e.error.status, retry: e.decision.retry }))
   })
+  let httpHook
+  try {
+    httpHook = await ctx.session.hook("http.response", async (e) => {
+      console.warn("QM_CONTRACT " + JSON.stringify({ source: "http.response", kind: e.kind, status: e.response?.status,
+        retryAfter: e.response?.headers?.get?.("retry-after") ?? null,
+        limitRemaining: e.response?.headers?.get?.("x-ratelimit-remaining-requests") ?? null,
+        reset: e.response?.headers?.get?.("x-ratelimit-reset") ?? null }))
+    })
+  } catch (err) {
+    console.warn("QM_CONTRACT " + JSON.stringify({ source: "http.response-error", message: String(err?.message ?? err) }))
+  }
   const task = (async () => {
     for await (const e of ctx.event.subscribe({}, { signal: controller.signal })) {
        if (e.type === "session.execution.failed" || e.type === "session.step.failed" || e.type === "session.compaction.failed")
@@ -108,7 +123,7 @@ export default Plugin.define({ id: "qm-contract-observer", async setup(ctx) {
            ...(${probeCompactionSelection} && e.type === "session.compaction.failed" ? { fixtureError: e.data.error?.message } : {}) }))
     }
   })().catch(() => {})
-  return async () => { controller.abort(); await selectionProbe?.dispose(); await hook.dispose(); await requestHook.dispose(); await task }
+  return async () => { controller.abort(); await selectionProbe?.dispose(); await httpHook?.dispose(); await hook.dispose(); await requestHook.dispose(); await task }
 }})
 `)
 const env = Object.fromEntries(Object.entries({
@@ -191,6 +206,11 @@ try {
       if (failureMode === "quota" || failureMode === "rate-limit") {
         const evidence = await api("POST", "/api/rpc/quartermaster/diagnoseSession", { input: { sessionID } })
         assert.match(JSON.stringify(evidence), /"failureCooldowns":\[\{[^}]*"modelID":"primary"[^}]*"until":\d+/, "compaction must persist model failure evidence")
+        const stated = JSON.stringify(evidence)
+        if (failureMode === "rate-limit") {
+          assert.match(stated, /"providerRateLimits":\[\{[^}]*"modelID":"primary"[^}]*"status":429/, "the provider's stated rate-limit state must be readable from the responses already received")
+          assert.match(stated, /"remaining":0/, "the provider's stated remaining quota must be reported")
+        }
          const before = requests.length
           if (nextCompact) {
            assert.ok(requests.every(({ model }) => model === "primary"), "switching inside compaction must not change the already captured provider request")

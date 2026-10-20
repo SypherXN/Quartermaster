@@ -99,7 +99,11 @@ export class FailureCooldowns {
     this.groups = groups
   }
 
-  reportFailure(report: FailureReport, now: number): boolean {
+  /**
+   * Record a failure. `deadline` is a provider-stated reset time: it can extend the configured
+   * cooldown but never shorten it below it.
+   */
+  reportFailure(report: FailureReport, now: number, deadline?: number): boolean {
     if (!Number.isFinite(now) || now < 0) return false
     for (const [id, until] of this.until) {
       if (until <= now) {
@@ -110,13 +114,27 @@ export class FailureCooldowns {
     if (["auth", "cancelled", "other"].includes(report.classification)) return false
     if (report.classification === "quota-exhausted" && !report.modelID) return false
 
+    const until = deadline === undefined || !Number.isFinite(deadline)
+      ? now + this.durationMs
+      : Math.max(now + this.durationMs, deadline)
     let changed = false
     for (const scope of this.cooldownScopes(report)) {
       const id = key(scope)
-      if (now + this.durationMs <= (this.until.get(id) ?? -Infinity)) continue
-      this.until.set(id, now + this.durationMs)
-      this.evidence.set(id, { occurredAt: now, classification: report.classification })
-      changed = true
+      const existing = this.until.get(id)
+      if (existing === undefined || until > existing) {
+        this.until.set(id, until)
+        this.evidence.set(id, { occurredAt: now, classification: report.classification })
+        changed = true
+        continue
+      }
+      // The deadline does not extend, but a failure of that model itself must not be masked by a
+      // shared bucket cooldown: the more specific evidence wins.
+      const current = this.evidence.get(id)?.classification
+      const spreadable = ["temporary-rate-limit", "quota-exhausted"].includes(report.classification)
+      if (current !== undefined && ["temporary-rate-limit", "quota-exhausted"].includes(current) && !spreadable) {
+        this.evidence.set(id, { occurredAt: now, classification: report.classification })
+        changed = true
+      }
     }
     return changed
   }
@@ -142,6 +160,41 @@ export class FailureCooldowns {
     })
     this.evidence.delete(id)
     return this.until.delete(id)
+  }
+
+  /**
+   * Clear the cooldown of one model and of every member of its shared rate-limit group: the
+   * bucket recovered. Only cooldown entries are removed; provider-scoped and unrelated state stay.
+   */
+  clear(providerID: string, modelID: string): boolean {
+    const group = this.groups.find((members) => members.some((model) =>
+      model.providerID === providerID && model.modelID === modelID))
+    const scopes = group?.map((model) => ({ providerID: model.providerID, modelID: model.modelID })) ?? [{ providerID, modelID }]
+    let changed = false
+    for (const scope of scopes) {
+      const id = key(scope)
+      // Only a rate-limit or quota cooldown belongs to the bucket. An outage cooldown of a group
+      // member stays: the bucket recovered, that model did not.
+      const classification = this.evidence.get(id)?.classification
+      if (classification !== undefined && !["temporary-rate-limit", "quota-exhausted"].includes(classification)) continue
+      if (this.until.delete(id)) changed = true
+      this.evidence.delete(id)
+    }
+    return changed
+  }
+
+  /**
+   * Model-scoped cooldown records, expired entries included: the models known to be rate limited.
+   * An expired record is what marks a bucket as still limited after its own floor ran out.
+   */
+  knownLimitedModels(): { providerID: string; modelID: string; until: number }[] {
+    const limited: { providerID: string; modelID: string; until: number }[] = []
+    for (const [scopeKey, until] of this.until) {
+      const [providerID, modelID] = JSON.parse(scopeKey) as [string, string | null]
+      if (modelID === null) continue
+      limited.push({ providerID, modelID, until })
+    }
+    return limited
   }
 
   snapshot(now: number, includeEvidence = false): PersistedCooldown[] {

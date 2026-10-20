@@ -143,6 +143,49 @@ test("repeated reports extend but never shorten cooldown; expiry is exact", () =
   assert.equal(failures.apply(eligible, registry, 150).get(modelKey(primary))?.cooldownUntil, undefined)
 })
 
+test("a provider-stated reset extends the cooldown but never shortens it below the configured floor", () => {
+  const failures = new FailureCooldowns(100)
+  // The provider says the window closes in an hour: the cooldown must reach that far.
+  failures.reportFailure({ providerID: "a", modelID: "primary", classification: "temporary-rate-limit" }, 0, 3_600)
+  assert.equal(failures.apply(eligible, registry, 3_599).get(modelKey(primary))?.cooldownUntil, 3_600)
+
+  // The provider says it closes sooner than the configured window: the floor still applies.
+  const floored = new FailureCooldowns(100)
+  floored.reportFailure({ providerID: "a", modelID: "primary", classification: "temporary-rate-limit" }, 0, 20)
+  assert.equal(floored.apply(eligible, registry, 99).get(modelKey(primary))?.cooldownUntil, 100)
+
+  // A later report without a stated reset never shortens an existing longer cooldown.
+  const extending = new FailureCooldowns(100)
+  extending.reportFailure({ providerID: "a", modelID: "primary", classification: "temporary-rate-limit" }, 0, 3_600)
+  extending.reportFailure({ providerID: "a", modelID: "primary", classification: "temporary-rate-limit" }, 10)
+  assert.equal(extending.apply(eligible, registry, 3_599).get(modelKey(primary))?.cooldownUntil, 3_600)
+})
+
+test("a cleared model clears its shared group and leaves unrelated cooldowns alone", () => {
+  const failures = new FailureCooldowns(300_000, [[primary, spare]])
+  assert.equal(failures.reportFailure({ providerID: "a", modelID: "primary", classification: "temporary-rate-limit" }, 0), true)
+  const limited = failures.apply(eligible, registry, 1)
+  assert.equal(limited.get(modelKey(primary))?.cooldownUntil, 300_000)
+  assert.equal(limited.get(modelKey(spare))?.cooldownUntil, 300_000, "the rate limit spreads to the shared group")
+
+  // A provider-stated reset still extends beyond the configured floor.
+  const extended = new FailureCooldowns(300_000)
+  extended.reportFailure({ providerID: "a", modelID: "primary", classification: "temporary-rate-limit" }, 0, 600_000)
+  assert.equal(extended.apply(eligible, registry, 1).get(modelKey(primary))?.cooldownUntil, 600_000)
+
+  // Clearing one model clears its shared group and leaves unrelated cooldowns alone.
+  const mixed = new FailureCooldowns(300_000, [[primary, spare]])
+  mixed.reportFailure({ providerID: "a", modelID: "primary", classification: "temporary-rate-limit" }, 0)
+  mixed.reportFailure({ providerID: "b", modelID: "model", classification: "temporary-rate-limit" }, 0)
+  assert.deepEqual(mixed.knownLimitedModels().map((entry) => `${entry.providerID}/${entry.modelID}`).sort(), ["a/primary", "a/spare", "b/model"])
+  assert.equal(mixed.clear("a", "primary"), true)
+  const cleared = mixed.apply(eligible, registry, 1)
+  assert.equal(cleared.get(modelKey(primary))?.cooldownUntil, undefined)
+  assert.equal(cleared.get(modelKey(spare))?.cooldownUntil, undefined)
+  assert.equal(cleared.get(modelKey(otherProvider))?.cooldownUntil, 300_000)
+  assert.equal(mixed.clear("a", "primary"), false)
+})
+
 test("success clears its exact scope, and persisted cooldowns restore only while active", () => {
   const failures = new FailureCooldowns(100)
   failures.reportFailure({ providerID: "a", classification: "provider-outage" }, 0)

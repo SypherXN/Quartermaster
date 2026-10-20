@@ -138,13 +138,59 @@ All settings belong in `quartermaster.jsonc` next to the OpenCode config that re
   bodyless loopback HTTP(S) GET checks, cached for five seconds. Failure skips
   only that provider; remote providers are not health-probed.
 - **Durations:** positive integer milliseconds. `providerCooldownMs` defaults
-  to 300000; `localHealthTimeoutMs` to 2000.
+  to 300000; `localHealthTimeoutMs` to 2000; `probeIntervalMs` to 300000;
+  `probeMaxBackoffMs` to 3600000.
 - **Shared rate limits:** `sharedRateLimits` lists groups of fully qualified
   model IDs that share one limit bucket. A temporary rate limit or confirmed
   quota error on any member cools the whole group for `providerCooldownMs`.
   OpenCode Zen reports that shared free-tier bucket as quota. Outages and a
   later success stay on their own model or provider. A model can belong to
   only one group.
+- **Provider-stated rate limits:** when a provider states when its limit
+  resets (`retry-after`, `x-ratelimit-reset*`), that time extends the
+  cooldown, and `providerCooldownMs` stays the floor: a stated reset can make
+  a cooldown longer, never shorter. The hint is read from responses the host
+  already received, so it costs no request and no tokens. Without
+  `probeRateLimits` Quartermaster never polls a provider to ask whether it is
+  still rate limited, because a probe against an exhausted bucket spends that
+  bucket's request quota. The stated state is reported as `providerRateLimits`
+  in the session diagnostics.
+- **Recovery probes:** `probeRateLimits` lists fully qualified model IDs
+  (`providerID/modelID`, optional `variant`) for which Quartermaster may
+  actively check whether the limit cleared. The feature is off by default and
+  the list is the safeguard: a probe spends one real provider request slot and
+  a tiny completion, so enable it only where that is acceptable, such as a
+  free tier. `probeIntervalMs` (default 300000) is the base interval; the
+  interval doubles per failed probe and is capped at `probeMaxBackoffMs`
+  (default 3600000). With the defaults the gaps between probes of a still
+  limited bucket are 10, 20, 40 and then 60 minutes, and 60 minutes after
+  that: a shared free-tier bucket can stay capped for hours, so the cap is
+  deliberately long. The trade-off is honest: a longer cap means the recovery
+  of a bucket can go unnoticed for up to the cap, so lower
+  `probeMaxBackoffMs` if you want the model back sooner. It is the
+  poll cadence, not the skip window: the first probe of a bucket waits for the
+  model's own cooldown floor to expire, later probes follow the backoff. A
+  probe is only sent when no provider reset time is pending, when no primary
+  request is running, and at most once per shared bucket. A successful probe
+  clears the cooldown of that model and of its shared group; a probe that is
+  still limited keeps the model out for the configured `providerCooldownMs`,
+  because it is fresh evidence that the model is unusable; any other failure
+  changes nothing. A probe is a separate one-shot generation through the host:
+  it never replays, resends or re-issues a user turn. It is sent by the host,
+  because the free tier rejects callers outside OpenCode. The host creates no
+  session for it and stores no chat: the call carries no session id and the
+  attribution id the host sends in `x-opencode-session` is never registered, so
+  there is nothing to remove afterwards. The host fires no session hook for a
+  session-free generation, so Quartermaster never sees or routes a probe. A
+  probe is one request: against a loopback provider reproducing the OpenCode
+  Zen free-tier 429 body, a real 2.0.31 host made exactly one provider request
+  and failed fast without retrying. A 429 that carries the limit state instead
+  (`retry-after`, `x-ratelimit-remaining-requests: 0`) is retried by the host on
+  its own delay, so that shape can spend several request slots of the bucket:
+  raise `probeIntervalMs` for it. Whether repeated probing while over the cap
+  extends the penalty window is unverified, so the backoff and the opt-in list
+  are the protection. The probe state is reported as `rateLimitProbes` in the
+  session diagnostics.
 - **Exclusive models:** `exclusiveModels` lists fully qualified model IDs.
   Automatic selection skips busy models. All primary requests using a listed
   model acquire its lease, including manual/unbound requests; auxiliary
@@ -154,7 +200,8 @@ All settings belong in `quartermaster.jsonc` next to the OpenCode config that re
 
 Eligibility refreshes at prompt admission, selection/explanation, and safe retry
 selection—not on every dispatch. Quota reads use cached
-`opencode-usage.status({})`; Quartermaster never forces provider polling.
+`opencode-usage.status({})`; Quartermaster never forces provider polling, apart
+from an enabled recovery probe for a listed model.
 
 The public `select({ agent, workType? })` RPC uses a known work-type binding
 before the agent binding; an unknown alias falls back to the agent binding.

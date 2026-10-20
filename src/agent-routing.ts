@@ -7,6 +7,8 @@ import type { ModelRef, QuartermasterConfig } from "./config.ts"
 import { buildQuotaEligibility } from "./eligibility.ts"
 import { classifyRetryFailure, FailureCooldowns, type FailureReport, type SuccessReport } from "./failures.ts"
 import { applyLocalHealth, LocalHealth } from "./local-health.ts"
+import { parseRateLimitHeaders, RateLimitObservations } from "./rate-limit.ts"
+import { bucketMembers, RateLimitProbes, type ProbeOutcome } from "./rate-limit-probe.ts"
 import { bindExclusive, ExclusiveLeases } from "./exclusive.ts"
 import { explainSelection, type SelectionExplanation } from "./explain.ts"
 import { AgentPins } from "./pins.ts"
@@ -104,7 +106,7 @@ export function applyAgentRouting(
 }
 
 export async function registerAgentRouting(
-  ctx: Pick<Context, "agent" | "model" | "rpc" | "storage"> & Partial<Pick<Context, "session" | "event" | "command" | "app">> & {
+  ctx: Pick<Context, "agent" | "model" | "rpc" | "storage"> & Partial<Pick<Context, "session" | "event" | "command" | "app" | "generate">> & {
     location?: { directory?: string; project?: { id?: string } }
   },
   config: QuartermasterConfig,
@@ -114,6 +116,7 @@ export async function registerAgentRouting(
 ) {
   if (
     config.exclusiveModels.length === 0 &&
+    config.probeRateLimits.length === 0 &&
     Object.keys(config.plans).length === 0 &&
     Object.keys(config.agents).length === 0 &&
     Object.keys(config.workTypes).length === 0 &&
@@ -129,6 +132,7 @@ export async function registerAgentRouting(
   let quotaEligibility = buildQuotaEligibility(registry, config.usageSources, config.quotaExemptModels, usage)
   let eligibility = applyLocalHealth(registry, quotaEligibility, health)
   const failures = new FailureCooldowns(config.providerCooldownMs, config.sharedRateLimits)
+  const rateLimits = new RateLimitObservations()
   failures.restore(await ctx.storage.get(COOLDOWN_STORAGE_KEY), Date.now())
   eligibility = failures.apply(eligibility, registry, Date.now())
   const pins = await AgentPins.load(config, registry, ctx.storage, ctx.location?.project?.id)
@@ -238,11 +242,100 @@ export async function registerAgentRouting(
     return refreshPromise
   }
 
+  const running = new Set<string>()
+  const probes = new RateLimitProbes()
+  let probeInFlight = false
+
+  // A probe is a separate one-shot generation through the host: it never replays a user turn.
+  const probeModel = async (model: ModelRef): Promise<{ outcome: ProbeOutcome; report?: FailureReport }> => {
+    const generate = ctx.generate
+    if (!generate?.text) return { outcome: "error" }
+    probeInFlight = true
+    try {
+      await generate.text({
+        prompt: "Reply with OK.",
+        model: {
+          id: model.modelID,
+          providerID: model.providerID,
+          ...(model.variant === undefined ? {} : { variant: model.variant }),
+        },
+      })
+      return { outcome: "success" }
+    } catch (error) {
+      const failure = classifyRetryFailure(
+        error as { type?: unknown; status?: unknown; message?: unknown; response?: unknown },
+        model.providerID,
+        model.modelID,
+      )
+      const classification = failure.report?.classification
+      return classification === "temporary-rate-limit" || classification === "quota-exhausted"
+        ? { outcome: "still-limited", report: failure.report }
+        : { outcome: "error" }
+    } finally {
+      probeInFlight = false
+    }
+  }
+
+  const runProbes = async () => {
+    try {
+      if (config.probeRateLimits.length === 0) return
+      if (!ctx.generate?.text) return
+      // One probe at a time: overlapping cycles would spend request slots of the same bucket.
+      if (probeInFlight) return
+      // Never add provider load while a real request is running.
+      if (running.size > 0) return
+      const now = Date.now()
+      const cooldowns = new Map<string, number>()
+      for (const entry of failures.knownLimitedModels()) {
+        cooldowns.set(modelKey({ providerID: entry.providerID, modelID: entry.modelID }), entry.until)
+      }
+      const deadlines = new Map<string, number>()
+      for (const model of config.probeRateLimits) {
+        for (const member of bucketMembers(model, config.sharedRateLimits)) {
+          const deadline = rateLimits.deadline(member, now)
+          if (deadline !== undefined) deadlines.set(modelKey(member), deadline)
+        }
+      }
+      const targets = probes.select({
+        now,
+        models: config.probeRateLimits,
+        groups: config.sharedRateLimits,
+        cooldowns,
+        deadlines,
+        intervalMs: config.probeIntervalMs,
+        maxBackoffMs: config.probeMaxBackoffMs,
+        busy: running.size > 0,
+      })
+      for (const target of targets) {
+        if (running.size > 0) return
+        const result = await probeModel(target)
+        probes.record(target, result.outcome, Date.now(), config.sharedRateLimits)
+        if (result.outcome === "success") {
+          // The bucket recovered: drop the cooldown of the model and of its shared group.
+          if (failures.clear(target.providerID, target.modelID)) {
+            await persistCooldowns()
+            await applyCurrent()
+          }
+        } else if (result.outcome === "still-limited" && result.report) {
+          // A probe that is still limited is fresh evidence that the model is unusable: the
+          // configured provider cooldown stays the floor, so the model stays out at least that long.
+          if (failures.reportFailure(result.report, Date.now())) {
+            await persistCooldowns()
+            await applyCurrent()
+          }
+        }
+      }
+    } catch {
+      console.warn("[quartermaster] rate-limit probe failed")
+    }
+  }
+
   const interval = setInterval(() => {
-    void refresh().catch(() => console.warn("[quartermaster] availability refresh failed"))
+    void refresh()
+      .then(() => runProbes())
+      .catch(() => console.warn("[quartermaster] availability refresh failed"))
   }, AVAILABILITY_REFRESH_MS)
   interval.unref?.()
-  const running = new Set<string>()
   const requestHistory = new RequestEvidenceHistory()
   const compactionRecovery = new Map<string, { agent: string; model: ModelRef }>()
   const failureObservations = new Map<string, { kind: string; attribution: string; occurredAt: number | null; observedAt: number; model?: ModelRef; deadline?: number; outcome: string }>()
@@ -250,6 +343,7 @@ export async function registerAgentRouting(
   let promptHook: { dispose: () => Promise<void> } | undefined
   let runningHook: { dispose: () => Promise<void> } | undefined
   let retryHook: { dispose: () => Promise<void> } | undefined
+  let httpResponseHook: { dispose: () => Promise<void> } | undefined
   const requestKinds = new Map<string, { kind: string; agent: string; model: ModelRef; observedAt: number }>()
   const attemptedModels = new Map<string, Set<string>>()
   const lastPrimaryModels = new Map<string, { agent: string; model: ModelRef }>()
@@ -395,6 +489,8 @@ export async function registerAgentRouting(
       },
       recommendation: { ...recommendation, applies: mode === "automatic", note: "Snapshot recommendation only; manual/unbound choices are not changed. Admission rechecks availability." },
       failureCooldowns: scope === "mismatch" ? [] : failures.snapshot(now, true),
+      providerRateLimits: scope === "mismatch" ? [] : rateLimits.snapshot(now),
+      rateLimitProbes: scope === "mismatch" ? [] : probes.snapshot(),
       lastFailureObservation: scope === "mismatch" || !failureObservation || now - failureObservation.observedAt > 900_000 ? null : failureObservation,
       failureObservationTimeBasis: "durable event created timestamp; no request attribution restored across restart",
       primaryRequestEvidence: {
@@ -471,6 +567,8 @@ export async function registerAgentRouting(
 
   if (ctx.session && Object.keys(config.agents).length > 0) {
     runningHook = await ctx.session.hook("model.request", async (input) => {
+      // A recovery probe is a session-free generation: the host fires no session hook for it,
+      // so it never reaches this handler and needs no guard here.
       const model = modelRef(input.model)
       latestRequestKinds.set(input.sessionID, input.kind)
       if (input.kind === "primary" && Object.hasOwn(config.agents, input.agent) && ctx.session?.get) {
@@ -522,6 +620,7 @@ export async function registerAgentRouting(
       }
     })
     retryHook = await ctx.session.hook("retry", async (event) => {
+      // A session-free probe triggers no session retry event, so it never reaches this handler.
       const request = requestKinds.get(event.sessionID)
       if (
         latestRequestKinds.get(event.sessionID) !== "primary" ||
@@ -547,7 +646,8 @@ export async function registerAgentRouting(
       if (!sameSessionModel(modelRef(event.model), current)) return
 
       const failure = classifyRetryFailure(event.error, event.model.providerID, event.model.id)
-      if (failure.report && failures.reportFailure(failure.report, Date.now())) {
+      const providerDeadline = rateLimits.deadline(modelRef(event.model), Date.now())
+      if (failure.report && failures.reportFailure(failure.report, Date.now(), providerDeadline)) {
         await persistCooldowns()
         await applyCurrent()
       }
@@ -608,6 +708,17 @@ export async function registerAgentRouting(
     promptHook = await ctx.session.hook("prompt", async (input) => {
       await assignPrompt(input.sessionID)
     })
+    // The provider states its own rate-limit window on the responses it already sends.
+    // Reading it here costs no request and no tokens.
+    try {
+      httpResponseHook = await ctx.session.hook("http.response", async (event) => {
+        const signal = parseRateLimitHeaders(event.response.headers, Date.now())
+        if (!signal) return
+        rateLimits.record(modelRef(event.model), signal, Date.now(), event.response.status)
+      })
+    } catch {
+      console.warn("[quartermaster] provider rate-limit observation is unavailable on this host")
+    }
   }
 
   // Validate automatic ownership/availability before acquiring an exclusive request lease.
@@ -630,6 +741,8 @@ export async function registerAgentRouting(
           typeof terminal.data?.error === "object" && terminal.data.error !== null) {
           const failure = classifyRetryFailure(terminal.data.error, request.model.providerID, request.model.modelID)
           const deadline = occurredAt + config.providerCooldownMs
+          // A provider-stated reset extends the cooldown; the configured window stays the floor.
+          const providerDeadline = rateLimits.deadline(request.model, now)
           const fresh = requestHistory.claimFailure(step.sessionID, kind, occurredAt, now)
           failureObservations.set(step.sessionID, {
             kind, attribution: "model-confirmed", occurredAt, observedAt: now, model: request.model,
@@ -637,7 +750,7 @@ export async function registerAgentRouting(
             outcome: !fresh ? "duplicate" : !failure.report ? "not-a-cooldown-failure" : deadline <= now ? "expired" : "next-automatic-assignment-only",
           })
           // Use the durable event time: observing an old failure must not renew its cooldown.
-          if (fresh && deadline > now && failure.report && failures.reportFailure(failure.report, occurredAt)) {
+          if (fresh && deadline > now && failure.report && failures.reportFailure(failure.report, occurredAt, providerDeadline)) {
             await persistCooldowns()
             await applyCurrent()
             if (kind === "compaction") compactionRecovery.set(step.sessionID, { agent: request.agent, model: request.model })
@@ -791,6 +904,8 @@ export async function registerAgentRouting(
       compactionRecovery.clear()
       failureObservations.clear()
       latestRequestKinds.clear()
+      rateLimits.clear()
+      probes.clear()
       clearInterval(interval)
       requestKinds.clear()
       attemptedModels.clear()
@@ -798,6 +913,7 @@ export async function registerAgentRouting(
       await runningHook?.dispose()
       await retryHook?.dispose()
       await promptHook?.dispose()
+      await httpResponseHook?.dispose()
       await commandRegistration?.dispose()
       await exclusiveGate.dispose()
       if (refreshPromise) await refreshPromise.catch(() => {})

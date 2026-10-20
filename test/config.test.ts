@@ -105,9 +105,34 @@ test("preserves slashes inside provider model IDs", () => {
 test("allows no bindings and accepts custom durations", () => {
   assert.deepEqual(parseConfig({}), {
     plans: {}, agents: {}, workTypes: {}, usageSources: {}, quotaExemptModels: [], exclusiveModels: [], sharedRateLimits: [],
+    probeRateLimits: [], probeIntervalMs: 300_000, probeMaxBackoffMs: 3_600_000,
     providerCooldownMs: 300_000, localHealthTimeoutMs: 2_000, localEndpoints: {},
   })
   assert.equal(parseConfig({ providerCooldownMs: 30, localHealthTimeoutMs: 50 }).providerCooldownMs, 30)
+})
+
+test("probing is opt-in and only accepts fully qualified model references", () => {
+  assert.deepEqual(parseConfig({}).probeRateLimits, [], "probing must be off by default")
+  assert.equal(parseConfig({}).probeIntervalMs, 300_000)
+  assert.equal(parseConfig({}).probeMaxBackoffMs, 3_600_000)
+  assert.deepEqual(parseConfig({ probeRateLimits: ["opencode/primary-free"] }).probeRateLimits, [
+    { providerID: "opencode", modelID: "primary-free" },
+  ])
+  assert.deepEqual(parseConfig({ probeRateLimits: [{ id: "opencode/primary-free", variant: "fast" }] }).probeRateLimits, [
+    { providerID: "opencode", modelID: "primary-free", variant: "fast" },
+  ])
+  assert.equal(parseConfig({ probeIntervalMs: 30_000 }).probeIntervalMs, 30_000)
+  assert.equal(parseConfig({ probeMaxBackoffMs: 900_000 }).probeMaxBackoffMs, 900_000)
+  assert.throws(() => parseConfig({ probeRateLimits: ["bad"] }), /probeRateLimits\[0\]/)
+  assert.throws(() => parseConfig({ probeRateLimits: ["p/m", "p/m"] }), /probeRateLimits\[1\]: duplicate probe model/)
+  assert.throws(() => parseConfig({ probeRateLimits: "p/m" }), /probeRateLimits: expected an array/)
+  assert.throws(() => parseConfig({ probeRateLimits: [{ id: "p/m", extra: true }] }), /unknown field/)
+  for (const probeIntervalMs of [0, -1, 1.5, "100", null]) {
+    assert.throws(() => parseConfig({ probeIntervalMs }), /probeIntervalMs: expected a positive safe integer/)
+  }
+  for (const probeMaxBackoffMs of [0, -1, 1.5, "100", null]) {
+    assert.throws(() => parseConfig({ probeMaxBackoffMs }), /probeMaxBackoffMs: expected a positive safe integer/)
+  }
 })
 
 test("normalizes ordered module models with entry, module, and provider cooldowns", () => {

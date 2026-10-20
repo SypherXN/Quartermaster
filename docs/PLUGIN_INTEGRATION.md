@@ -468,6 +468,19 @@ cooldown to every member, so the next selection skips the whole shared bucket.
 Model outages, provider outages, and success do not spread across the group.
 Groups are disjoint, contain at least two `providerID/modelID` strings, and
 are reread when project options are adopted.
+
+A provider may also state when its limit resets. The host's `http.response`
+hook exposes the response headers of requests that were already sent, so
+Quartermaster reads `retry-after` and `x-ratelimit-reset*` from those
+responses. A stated reset time extends the cooldown the failure applies;
+`providerCooldownMs` remains the floor, so a stated reset can make a cooldown
+longer but never shorter. Only a rate-limit or quota response states when the
+limit frees, so a later success never shortens a cooldown by itself. The
+read costs no request and no tokens, and Quartermaster never sends a probe
+request to ask whether a model is still rate limited: a probe against an
+exhausted shared bucket spends that bucket's own request quota. The observed
+state is reported read-only as `providerRateLimits` in the session
+diagnostics, with the stated reset, remaining quota, limit and source header.
 Retry-approved internal/transport and 408,
 409, or 5xx outage signals may switch to an eligible backup. Confirmed quota
 errors (402 or `provider.quota`) create a model-scoped cooldown for subsequent
@@ -569,6 +582,95 @@ decision when its hook runs and never overrides a veto, but cross-plugin hook
 ordering or later decision changes are not covered. See the isolated
 [`qm-test` procedure](../examples/test-agent/README.md) for optional provider
 smoke guidance and safety boundaries.
+
+## Opt-in recovery probes
+
+`probeRateLimits` is an opt-in list of fully qualified model IDs
+(`providerID/modelID`, optional `variant`), `probeIntervalMs` is the base
+interval in milliseconds (default 300000) and `probeMaxBackoffMs` is the
+longest backoff between two probes of one bucket in milliseconds (default
+3600000). The feature is off by default: with
+no list, no provider is ever asked whether it is still rate limited, and the
+behaviour described above is unchanged.
+
+A probe is a separate one-shot generation issued by the host through the
+plugin's session-free `generate.text` API. It never replays, resends or
+re-issues a user turn, creates no session, and is not routed or retried by
+Quartermaster. It is sent by the host because the OpenCode Zen free tier
+rejects callers outside OpenCode (`FreeTierError`); a plugin-side HTTP call
+would not be accepted. A probe spends one real provider request slot from the
+shared bucket and a tiny completion, so it costs a small amount of money on a
+paid provider: the explicit list is the safeguard, and the feature is meant
+for free tiers.
+
+The host contract for that call is verified in the OpenCode source and end to
+end by `scripts/verify-probe-host-contract.mjs`, which runs a real host against
+a loopback provider: the session-free `generate.text` route is `POST /api/experimental/generate` with a
+`{ prompt, model }` payload and no session id. The host creates no session and
+stores no chat for it — it attributes the request with a fresh, never
+registered id in the `x-opencode-session` header, which is the only trace and
+disappears with the request. Nothing is created, so nothing has to be removed
+afterwards, and no session event is emitted. The host also fires no session
+hook for a session-free generation, so the `model.request`, `retry` and
+`http.response` hooks never see a probe: Quartermaster cannot route it,
+cannot retry it and does not read headers from it.
+
+One probe is not always one provider request. The host applies its own retry
+policy to the failed generation, so the shape of the answer decides the cost.
+Verified against a real 2.0.31 host and a loopback provider reproducing the
+OpenCode Zen free-tier 429 body (`{"type":"rate_limit_error", ...}`, no limit
+headers): the host made exactly one provider request and failed fast without
+retrying. A 429 that carries the limit state instead (`retry-after`,
+`x-ratelimit-remaining-requests: 0`) is a retryable rate limit for the host and
+is retried on its own delay, so that shape can cost several request slots of the
+bucket. Raise `probeIntervalMs` for a provider that answers that way.
+
+A model is probed only when all of the following hold: it is listed in
+`probeRateLimits`; it is rate limited or a member of a `sharedRateLimits`
+group whose bucket is exhausted; the bucket's first probe waited for its own
+cooldown floor to expire, so a probe never runs while the model is still
+known-limited and never extends a known penalty window; no provider-stated
+reset is pending, because that time already says when the limit clears; the
+backoff window since the last probe of that bucket has elapsed (the interval
+doubles per failed probe and is capped at `probeMaxBackoffMs`, default 60
+minutes); no primary request is
+running, so a probe never adds load next to real work; and at most one probe is
+sent per shared bucket per cycle. The probe interval is the poll cadence, not
+the skip window: after the first probe of a bucket the backoff alone drives the
+schedule, so a provider floor never swallows the backoff and polling keeps
+running.
+
+With the default interval of 5 minutes and the default cap of 60 minutes, the
+gaps between probes of a bucket that stays limited are 10, 20, 40 and then 60
+minutes, and 60 minutes after that. The long cap is deliberate: a shared
+free-tier bucket can stay capped for hours, and a 15 minute heartbeat would
+spend a lot of requests against it. The trade-off is honest: a longer cap means
+the recovery of a bucket can go unnoticed for up to the cap, so lower
+`probeMaxBackoffMs` if you want the model back sooner.
+
+Outcomes: a resolved generation means the model recovered, so the cooldown of
+that model and of every member of its shared group is cleared; a rate-limit or
+quota error (402, 429, `provider.quota`, `provider.rate-limit`, or the plain
+rate-limit text the host itself retries on) means the bucket is still limited,
+so the cooldown is re-extended with `providerCooldownMs` as its floor, because
+the probe is fresh evidence that the model is unusable, and it spreads to the
+shared group exactly as a real failure does; any other failure (auth,
+network, unknown) changes nothing and is only recorded. A recovered bucket
+leaves an unrelated outage cooldown of a group member alone: that model did
+not recover, only the bucket did. Both Zen free-tier shapes are handled the
+same way: a quota-shaped error and a retryable 429 both keep the whole shared
+bucket out of rotation and both clear on a successful probe.
+
+The probe state is reported read-only as `rateLimitProbes` in the session
+diagnostics, with provider, model, outcome (`success`, `still-limited` or
+`error`) and time, and no error text, prompt or response content.
+
+Two limits are worth stating plainly. Whether the host itself retries a failed
+session-free generation internally is unverified on the tested host, so one
+probe may in principle consume more than one request slot; and whether
+repeated probing while over the cap extends the provider's penalty window is
+unverified. The opt-in list, the doubling backoff with its 15 minute cap and
+the conservative default interval are the protection in both cases.
 
 ## Optional RPC methods
 

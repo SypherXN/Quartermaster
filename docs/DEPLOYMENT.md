@@ -94,6 +94,22 @@ quota from an absent mapping. No provider polling or forced refresh is required.
 HTTP(S) GET health URL; probes omit credentials and cache for five seconds.
 A stopped inference server is offline; installation never requires starting it.
 
+Recovery probing is opt-in and off by default. `probeRateLimits` lists the
+fully qualified models that may be checked for rate-limit recovery,
+`probeIntervalMs` sets the base interval (default 300000) and
+`probeMaxBackoffMs` sets the longest backoff between two probes of one bucket
+(default 3600000): the base interval is the poll cadence, and the provider
+cooldown stays the floor of the skip window. The interval doubles per failed
+probe, so the default gaps are 10, 20, 40 and then 60 minutes, and 60 minutes
+after that. A probe spends one real
+provider request slot and a tiny completion, so enable it only where that is
+acceptable, such as a free tier; it is sent by the host, because the Zen free
+tier rejects callers outside OpenCode. A probe never replays a user turn.
+Without the list, no provider is ever polled for its rate-limit state. The
+long cap is deliberate — a shared free-tier bucket can stay capped for hours —
+but it means the recovery of a bucket can go unnoticed for up to the cap, so
+lower `probeMaxBackoffMs` if you want the model back sooner.
+
 ## Direct-call modules
 
 `modules` is optional and compatible with existing native plans and bindings. Omit it, or set `{}`, to leave chat routing unchanged. A profile does not register models, bind agents or authorize payment. When a higher-priority registration wins, repeat `modules` in that registration's `quartermaster.jsonc` with the plans and bindings that file must keep.
