@@ -1,8 +1,9 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { parseConfig } from "../../src/config.ts"
+import { parseConfig, type QuartermasterConfig } from "../../src/config.ts"
 import { ModuleCooldowns } from "../../src/modules.ts"
 import { registerQuartermasterRpc, requestModuleSelection, reportModuleCooldown, requestSelection } from "../../src/rpc.ts"
+import { ProjectConfigurationUnresolved } from "../../src/project-options.ts"
 
 const config = parseConfig({ modules: {
   consumer: { models: ["external/free", "external/paid"], cooldownMs: 100 },
@@ -20,8 +21,8 @@ function harness() {
       values.set(key, structuredClone(value))
     },
   }
-  async function connect(project = "project") {
-    const state = await ModuleCooldowns.load(config, storage, project, () => now)
+  async function connect(project = "project", options: { refresh?: () => Promise<unknown>; config?: QuartermasterConfig } = {}) {
+    const state = await ModuleCooldowns.load(options.config ?? config, storage, project, () => now, options.refresh)
     let methods: Methods | undefined
     let selections = 0
     const rpc = Object.assign(() => {
@@ -29,7 +30,7 @@ function harness() {
       return new Proxy({}, { get: (_, name: string) => (input: unknown, options: { signal: AbortSignal }) => {
         if (name === "selectModule") selections++
         return methods![name](input, { signal: options.signal,
-          error: (code: string) => { throw new Error(code) },
+          error: (code: string, _message: string, data?: { reason?: string }) => { throw new Error(`${code}: ${data?.reason ?? ""}`) },
         } as never)
       } })
     }, { register: async (_: unknown, handlers: Methods) => {
@@ -149,4 +150,64 @@ test("public feedback stays module/project scoped and leaves native selection un
   assert.equal(a.state.snapshot("other").length, 0)
   await a.registration.dispose()
   await b.registration.dispose()
+})
+
+test("a failed configuration read keeps the last known good selection", async () => {
+  const h = harness()
+  const warnings: string[] = []
+  const warn = console.warn
+  console.warn = (message: unknown) => { warnings.push(String(message)) }
+  try {
+    const a = await h.connect("project", { refresh: async () => { throw new ProjectConfigurationUnresolved("Receiving server configuration provenance is unavailable") } })
+    const selection = await requestModuleSelection(a.ctx, { module: "consumer" })
+    if (selection.status !== "selected") throw new Error("expected the declared candidate")
+    assert.deepEqual(selection.selected, { providerID: "external", modelID: "free" })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    assert.ok(warnings.some(warning => warning.includes("module configuration refresh failed")), "the failed read is reported")
+    await a.registration.dispose()
+  } finally {
+    console.warn = warn
+  }
+})
+
+test("a module query does not wait for a stalled configuration read", async () => {
+  const h = harness()
+  const a = await h.connect("project", { refresh: () => new Promise<never>(() => {}) })
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const started = Date.now()
+  const selection = await Promise.race([
+    requestModuleSelection(a.ctx, { module: "consumer" }),
+    new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("the module query waited for the configuration read")), 1_000)
+    }),
+  ]).finally(() => clearTimeout(timer))
+  if (selection.status !== "selected") throw new Error("expected the declared candidate")
+  assert.deepEqual(selection.selected, { providerID: "external", modelID: "free" })
+  assert.ok(Date.now() - started < 1_000, "the query answers inside the read budget")
+  await a.registration.dispose()
+})
+
+test("a stored cooldown row keeps a consistent remaining deadline", async () => {
+  const h = harness()
+  const a = await h.connect()
+  const ack = await reportModuleCooldown(a.ctx, { module: "consumer", providerID: "external", modelID: "free", reason: "rate-limit" })
+  assert.equal(ack.accepted, true)
+  const selection = await requestModuleSelection(a.ctx, { module: "consumer" })
+  if (selection.status !== "selected") throw new Error("expected the paid candidate")
+  assert.deepEqual(selection.selected, { providerID: "external", modelID: "paid" })
+  const candidate = selection.candidates.find(entry => entry.modelID === "free")
+  if (candidate?.reason !== "cooldown") throw new Error("expected a cooldown candidate")
+  assert.ok(candidate.blockedUntil! > selection.evaluatedAt)
+  assert.equal(candidate.remainingMs, candidate.blockedUntil! - selection.evaluatedAt)
+  await a.registration.dispose()
+})
+
+test("an unreadable configuration reports a coded reason instead of a guess", async () => {
+  const h = harness()
+  const a = await h.connect("project", { config: parseConfig({}) })
+  a.state.noteConfigurationFailure(new Error("Receiving server configuration provenance is unavailable"))
+  const call = { signal: new AbortController().signal,
+    error: (code: string, _message: string, data?: { reason?: string }) => { throw new Error(`${code}: ${data?.reason ?? ""}`) } }
+  await assert.rejects(a.methods().selectModule({ module: "consumer" }, call as never), /provenance-unavailable/)
+  await a.registration.dispose()
 })

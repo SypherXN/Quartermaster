@@ -23,14 +23,24 @@ export default Plugin.define({
       throw new Error("Quartermaster settings belong in quartermaster.jsonc beside the OpenCode config that registers the plugin, not in plugins[].options")
     const config = parseConfig({})
     const readConfiguration = startupConfigurationReader(ctx)
-    if (ctx.location.directory) await adoptProjectQuartermasterOptions(config, ctx.location.directory, readConfiguration).catch(() => undefined)
+    const directory = ctx.location.directory
+    let configurationError: unknown
+    if (directory) {
+      try {
+        await adoptProjectQuartermasterOptions(config, directory, readConfiguration)
+      } catch (error) {
+        configurationError = error
+        console.warn(`[quartermaster] project configuration unavailable: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
     const ledger = new TokenLedger(ctx.storage)
     const errorLedger = new ProviderErrorLedger(ctx.storage)
     const attributionLedger = new PluginAttributionLedger(ctx.storage)
     const projectID = ctx.location.project.id
     const modules = await ModuleCooldowns.load(config, ctx.storage, projectID, Date.now,
-      ctx.location.directory ? () => adoptProjectQuartermasterOptions(config, ctx.location.directory, readConfiguration) : undefined,
+      directory ? () => adoptProjectQuartermasterOptions(config, directory, readConfiguration) : undefined,
       () => readUsageStatus(ctx))
+    if (configurationError) modules.noteConfigurationFailure(configurationError)
     const budgetGate = config.budgets?.length
       ? new TokenBudgetGate(config.budgets, projectID, await ledger.list({ projectID }))
       : undefined

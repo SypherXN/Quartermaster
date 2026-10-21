@@ -178,10 +178,14 @@ restarts and paid live validation remain separate actions.
 
 Module queries (including status) and internal reports reread effective options
 through the same receiving-server provenance and precedence rules as the project
-writer. Profiles may be added after an empty startup. Invalid or unavailable
-configuration fails the operation rather than routing from guessed settings.
-The internal `query()` refreshes options; `select()` is the synchronous snapshot
-selector used after refresh, not a public consumer API.
+writer. Profiles may be added after an empty startup. Invalid configuration fails
+the operation rather than routing from guessed settings. Unreadable provenance is
+not invalid configuration: the read is bounded, a failed or stalled read leaves the
+last known good settings in place, and the failure is logged as
+`[quartermaster] module configuration refresh failed`. When no settings are known
+at all, `selectModule` fails with `reason: "provenance-unavailable"` rather than
+answering `no-module`. The internal `query()` refreshes options; `select()` is
+the synchronous snapshot selector used after refresh, not a public consumer API.
 
 Reordering changes the next recommendation. Duration changes apply to subsequent
 reports without shortening an active deadline. Removing a profile/model prunes
@@ -652,9 +656,10 @@ Outcomes: a resolved generation means the model recovered, so the cooldown of
 that model and of every member of its shared group is cleared; a rate-limit or
 quota error (402, 429, `provider.quota`, `provider.rate-limit`, or the plain
 rate-limit text the host itself retries on) means the bucket is still limited,
-so the cooldown is re-extended with `providerCooldownMs` as its floor, because
-the probe is fresh evidence that the model is unusable, and it spreads to the
-shared group exactly as a real failure does; any other failure (auth,
+and that is recorded only: a probe measures a bucket instead of being a user
+request, so it never extends a cooldown and never re-cools the shared group.
+Only a failed request may create or extend a cooldown, which keeps a model out
+once per incident instead of once per probe. Any other failure (auth,
 network, unknown) changes nothing and is only recorded. A recovered bucket
 leaves an unrelated outage cooldown of a group member alone: that model did
 not recover, only the bucket did. Both Zen free-tier shapes are handled the

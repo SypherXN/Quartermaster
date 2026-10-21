@@ -173,8 +173,9 @@ All settings belong in `quartermaster.jsonc` next to the OpenCode config that re
   probe is only sent when no provider reset time is pending, when no primary
   request is running, and at most once per shared bucket. A successful probe
   clears the cooldown of that model and of its shared group; a probe that is
-  still limited keeps the model out for the configured `providerCooldownMs`,
-  because it is fresh evidence that the model is unusable; any other failure
+  still limited changes nothing, because a probe measures a bucket instead of
+  being a user request: only a failed request may create or extend a cooldown,
+  so a model is not kept out twice for the same incident. Any other failure
   changes nothing. A probe is a separate one-shot generation through the host:
   it never replays, resends or re-issues a user turn. It is sent by the host,
   because the free tier rejects callers outside OpenCode. The host creates no
@@ -187,9 +188,10 @@ All settings belong in `quartermaster.jsonc` next to the OpenCode config that re
   and failed fast without retrying. A 429 that carries the limit state instead
   (`retry-after`, `x-ratelimit-remaining-requests: 0`) is retried by the host on
   its own delay, so that shape can spend several request slots of the bucket:
-  raise `probeIntervalMs` for it. Whether repeated probing while over the cap
-  extends the penalty window is unverified, so the backoff and the opt-in list
-  are the protection. The probe state is reported as `rateLimitProbes` in the
+  raise `probeIntervalMs` for it. Repeated probing while a bucket is over the cap
+  never extends a penalty window, because a probe does not extend a cooldown;
+  the backoff and the opt-in list still protect the bucket's request quota. The
+  probe state is reported as `rateLimitProbes` in the
   session diagnostics.
 - **Exclusive models:** `exclusiveModels` lists fully qualified model IDs.
   Automatic selection skips busy models. All primary requests using a listed
@@ -265,7 +267,9 @@ a cooldown. After a cooldown expires, the earlier eligible candidate wins again.
 
 Modules-only startup needs no native plans, agent bindings, chat catalog entry or
 session hooks. Module queries/reports adopt effective options; edits retain active
-deadlines, while removal durably prunes module-only state. Use `selectModule` and
+deadlines, while removal durably prunes module-only state. Options that cannot be
+resolved are not fatal: the last known good options stay in place, and a read that
+never answers is bounded so the caller keeps its own timeout. Use `selectModule` and
 `reportModuleCooldown`, or the typed `requestModuleSelection` and
 `reportModuleCooldown` helpers from `opencode-quartermaster/rpc`.
 Configuration alone starts no cooldown.

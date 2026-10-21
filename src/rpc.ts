@@ -2,7 +2,7 @@ import { Rpc } from "@opencode/plugin/rpc"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import type { QuartermasterConfig } from "./config.ts"
 import type { FailureReport, SuccessReport } from "./failures.ts"
-import type { ModuleCooldowns, ModuleCooldownReport, ModuleSelection } from "./modules.ts"
+import { ModuleConfigurationUnavailable, type ModuleCooldowns, type ModuleCooldownReport, type ModuleSelection } from "./modules.ts"
 import type { registerAgentRouting } from "./agent-routing.ts"
 import type { UsageReadResult, UsageSourceID } from "./usage.ts"
 import type { TokenBudgetConfig } from "./config.ts"
@@ -439,7 +439,15 @@ export async function registerQuartermasterRpc(
       if (!moduleInput(input, false)) throw call.error("invalid_input", "Invalid module selection.", { path: "module", message: "expected only a non-empty module" })
       call.signal.throwIfAborted()
       if (!modules) throw call.error("unavailable", "Module runtime unavailable.", { reason: "not-configured" })
-      const result = await modules.query(input.module)
+      let result: ModuleSelection
+      try {
+        result = await modules.query(input.module)
+      } catch (error) {
+        if (error instanceof ModuleConfigurationUnavailable) {
+          throw call.error("unavailable", "Module configuration unavailable.", { reason: error.reason })
+        }
+        throw error
+      }
       call.signal.throwIfAborted()
       return { apiVersion: 1, ...result }
     },

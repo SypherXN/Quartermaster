@@ -8,7 +8,15 @@ import { parseConfig, type QuartermasterConfig } from "./config.ts"
 
 export type ConfigurationReader = (directory: string) => Promise<readonly ConfigEntry[]>
 
-const provenanceUnavailable = () => new Error("Receiving server configuration provenance is unavailable")
+/** The configuration could not be read or resolved. Distinct from invalid configuration content. */
+export class ProjectConfigurationUnresolved extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "ProjectConfigurationUnresolved"
+  }
+}
+
+const provenanceUnavailable = () => new ProjectConfigurationUnresolved("Receiving server configuration provenance is unavailable")
 
 type ServerEndpoint = {
   url: string
@@ -314,12 +322,12 @@ const effectiveEntry = async (directory: string, readConfiguration: Configuratio
   const root = await realpath(directory)
   const packageRoot = await quartermasterRoot()
   const sources = await readConfiguration(root)
-  if (!Array.isArray(sources)) throw new Error("Invalid configuration provenance")
+  if (!Array.isArray(sources)) throw new ProjectConfigurationUnresolved("Invalid configuration provenance")
   let selected: { path?: string } | undefined
   for (const source of sources) {
     if (source.type === "directory") continue
     if (source.type !== "document" || !source.info || typeof source.info !== "object")
-      throw new Error("Invalid configuration provenance")
+      throw new ProjectConfigurationUnresolved("Invalid configuration provenance")
     if (source.path && insideDirectory(root, resolve(source.path))) {
       const path = await containedPath(root, source.path)
       if (!path) throw new Error("Project config changed; refusing to overwrite")
@@ -343,7 +351,7 @@ const effectiveEntry = async (directory: string, readConfiguration: Configuratio
     if (matches.length > 1) throw new Error("Expected exactly one Quartermaster plugin entry per configuration document")
     if (matches.length === 1) selected = { path: source.path }
   }
-  if (!selected) throw new Error("Expected exactly one project Quartermaster plugin entry")
+  if (!selected) throw new ProjectConfigurationUnresolved("Expected exactly one project Quartermaster plugin entry")
   if (!selected.path) return { options: {}, config: parseConfig({}), revision: 0, writable: false }
   // Inherited and virtual sources are readable, never writable through a project editor.
   if (!insideDirectory(root, resolve(selected.path))) {
@@ -360,7 +368,7 @@ const effectiveEntry = async (directory: string, readConfiguration: Configuratio
   for (const span of packageSpans(blanked)) {
     if (await isThisPackage(span.value, registrationPath, packageRoot)) matches.push(span)
   }
-  if (matches.length !== 1) throw new Error("Expected exactly one project Quartermaster plugin entry")
+  if (matches.length !== 1) throw new ProjectConfigurationUnresolved("Expected exactly one project Quartermaster plugin entry")
   const parsed = parseProjectConfig(registration) as { plugins?: { package?: unknown, options?: unknown }[] }
   const entry = parsed.plugins?.find((plugin) => plugin?.package === matches[0].value)
   if (!entry) throw new Error("Project config changed; refusing to overwrite")

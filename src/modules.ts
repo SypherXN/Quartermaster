@@ -2,9 +2,25 @@ import type { ModelRef, QuartermasterConfig } from "./config.ts"
 import { moduleUsageDecision, tracksQuota, type ModuleQuota } from "./eligibility.ts"
 import { FailureCooldowns, type PersistedCooldown } from "./failures.ts"
 import { modelKey, selectModel } from "./select.ts"
+import { ProjectConfigurationUnresolved } from "./project-options.ts"
 import type { UsageReadResult } from "./usage.ts"
 
 export const MODULE_COOLDOWN_STORAGE_KEY = "modules/cooldowns-v1"
+// The project options read is a loopback HTTP round trip. A permission review must not spend its budget on it.
+export const MODULE_CONFIG_READ_BUDGET_MS = 250
+
+export class ModuleConfigurationUnavailable extends Error {
+  readonly reason = "provenance-unavailable"
+  readonly detail: string
+  constructor(detail: string) {
+    super(`Module configuration is unavailable: ${detail}`)
+    this.name = "ModuleConfigurationUnavailable"
+    this.detail = detail
+  }
+}
+
+const errorMessage = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error)
 
 interface ModuleStorage {
   get(key: string): Promise<unknown>
@@ -50,6 +66,8 @@ export class ModuleCooldowns {
   private pending: Promise<void> = Promise.resolve()
   private refreshPending: Promise<void> = Promise.resolve()
   private pruned = false
+  private configurationError: { reason: string; message: string } | undefined
+  private configurationRefresh: Promise<void> = Promise.resolve()
   private readonly refreshOptions?: () => Promise<unknown>
   private readonly readUsage?: () => Promise<UsageReadResult>
 
@@ -116,7 +134,7 @@ export class ModuleCooldowns {
 
   async refresh(): Promise<void> {
     const refresh = this.refreshPending.catch(() => {}).then(async () => {
-      await this.refreshOptions?.()
+      await this.refreshConfiguration()
       const now = this.time()
       for (const [module, previous] of this.cooldowns) {
         const rows = previous.snapshot(now)
@@ -142,8 +160,46 @@ export class ModuleCooldowns {
 
   async query(module: string): Promise<ModuleSelection> {
     await this.refresh()
+    // Without a known configuration there is nothing to recommend from; say so instead of guessing.
+    if (!this.hasProfiles() && this.configurationError) {
+      throw new ModuleConfigurationUnavailable(this.configurationError.message)
+    }
     const usage = this.moduleTracksQuota(module) ? await this.readTrackedUsage() : undefined
     return this.select(module, usage)
+  }
+
+  /** A failed configuration read is recorded, not fatal: the last known good configuration stays in place. */
+  noteConfigurationFailure(error: unknown): void {
+    this.configurationError = { reason: "provenance-unavailable", message: errorMessage(error) }
+    console.warn(`[quartermaster] module configuration refresh failed: ${this.configurationError.message}`)
+  }
+
+  // ponytail: the read is bounded; a stalled round trip leaves the last known good configuration in place.
+  private async refreshConfiguration(): Promise<void> {
+    if (!this.refreshOptions) return
+    const read = this.configurationRefresh.catch(() => {}).then(async () => {
+      try {
+        await this.refreshOptions!()
+        this.configurationError = undefined
+      } catch (error) {
+        // Unreadable provenance is not invalid configuration: keep the last known good settings.
+        if (!(error instanceof ProjectConfigurationUnresolved)) throw error
+        this.noteConfigurationFailure(error)
+      }
+    })
+    this.configurationRefresh = read
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const budget = new Promise<void>(resolve => { timer = setTimeout(resolve, MODULE_CONFIG_READ_BUDGET_MS) })
+    try {
+      await Promise.race([read, budget])
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  private hasProfiles(): boolean {
+    const modules = this.config.modules
+    return modules !== undefined && Object.keys(modules).length > 0
   }
 
   async selections(): Promise<Record<string, ModuleSelection>> {

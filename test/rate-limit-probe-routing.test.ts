@@ -59,7 +59,7 @@ async function harness(generate: (input: GenerateInput) => Promise<{ text: strin
     },
     event: { subscribe: () => (async function* () {})() },
   } as never, config)
-  return { hooks, sessions, probes, routing }
+  return { hooks, sessions, probes, stored, routing }
 }
 
 const config = parseConfig({
@@ -109,30 +109,26 @@ test("a recovered model is cleared by one probe, without a network call of its o
   await routing?.dispose()
 })
 
-test("a probe that is still limited keeps the model out for the configured provider cooldown", async (t) => {
+test("a probe that is still limited does not extend the cooldown", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval", "Date"] })
-  const { probes, routing } = await harness(async () => {
+  const { probes, stored, routing } = await harness(async () => {
     throw { type: "provider.rate-limit", status: 429, message: "OpenCode Zen: Rate limit exceeded." }
   })
   assert.equal(await routing?.reportFailure({
     providerID: "provider-a", modelID: "primary", classification: "temporary-rate-limit",
   }), true)
+  const persisted = stored.get("availability/cooldowns-v1")
 
   t.mock.timers.tick(300_000)
   await settle()
 
   assert.equal(probes.length, 1)
-  const probeAt = Date.now()
   const report = await routing?.diagnoseSession("a")
-  const cooldowns = report?.failureCooldowns as { modelID?: string; until: number }[]
-  const primary = cooldowns.find((entry) => entry.modelID === "primary")
-  const sibling = cooldowns.find((entry) => entry.modelID === "backup")
-  assert.ok(primary, "the probed model must stay cooling")
-  assert.ok(sibling, "the shared bucket must stay cooling")
-  assert.ok((primary?.until ?? 0) >= probeAt + 300_000 - 1,
-    `the provider cooldown must stay the floor of the skip window, got ${primary?.until}`)
-  assert.equal(primary?.until, sibling?.until, "the shared bucket shares one deadline")
   assert.deepEqual(report?.rateLimitProbes?.map((entry) => entry.outcome), ["still-limited"])
+  assert.deepEqual(report?.failureCooldowns, [],
+    "a probe must not extend the cooldown of the model or of its shared group")
+  assert.equal(stored.get("availability/cooldowns-v1"), persisted,
+    "a probe must not move the persisted deadline")
   await routing?.dispose()
 })
 

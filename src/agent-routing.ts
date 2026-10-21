@@ -247,7 +247,7 @@ export async function registerAgentRouting(
   let probeInFlight = false
 
   // A probe is a separate one-shot generation through the host: it never replays a user turn.
-  const probeModel = async (model: ModelRef): Promise<{ outcome: ProbeOutcome; report?: FailureReport }> => {
+  const probeModel = async (model: ModelRef): Promise<{ outcome: ProbeOutcome }> => {
     const generate = ctx.generate
     if (!generate?.text) return { outcome: "error" }
     probeInFlight = true
@@ -269,7 +269,7 @@ export async function registerAgentRouting(
       )
       const classification = failure.report?.classification
       return classification === "temporary-rate-limit" || classification === "quota-exhausted"
-        ? { outcome: "still-limited", report: failure.report }
+        ? { outcome: "still-limited" }
         : { outcome: "error" }
     } finally {
       probeInFlight = false
@@ -316,14 +316,11 @@ export async function registerAgentRouting(
             await persistCooldowns()
             await applyCurrent()
           }
-        } else if (result.outcome === "still-limited" && result.report) {
-          // A probe that is still limited is fresh evidence that the model is unusable: the
-          // configured provider cooldown stays the floor, so the model stays out at least that long.
-          if (failures.reportFailure(result.report, Date.now())) {
-            await persistCooldowns()
-            await applyCurrent()
-          }
         }
+        // A probe that is still limited is a measurement, not a user request: it never
+        // extends a cooldown and never re-cools the shared group. Only a failed request
+        // may create or extend a cooldown, so a bucket that is momentarily busy is not
+        // punished twice for the same incident.
       }
     } catch {
       console.warn("[quartermaster] rate-limit probe failed")
