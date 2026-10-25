@@ -2,78 +2,1464 @@
 <html lang="en">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Quartermaster local report viewer</title>
+<title>Quartermaster · Model operations</title>
 <style>
-  body{font:16px system-ui,sans-serif;max-width:900px;margin:2rem auto;padding:0 1rem;color:#17202a}
-  button,input,textarea{font:inherit} section{margin:1rem 0;padding:1rem;border:1px solid #ccd1d1;border-radius:.5rem} label,textarea{display:block;width:100%} textarea{margin:.4rem 0 1rem}
-  pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f4f6f7;padding:1rem} :focus-visible{outline:3px solid #2874a6}
+  :root{--paper:#e5dfcf;--surface:#fcfaf2;--ink:#303729;--muted:#626a58;--line:#c8c9b5;--accent:#806020;--accent-soft:#eee2bf;--green:#4e6240;--green-soft:#e2e9d7;--radius:1px;--mono:ui-monospace,Consolas,monospace}
+
+  *{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font:14px/1.55 'Segoe UI',sans-serif}
+button,input,select{font:inherit}
+button,a,input,select{touch-action:manipulation}
+button{cursor:pointer;border:1px solid #9ca58c;border-radius:2px;background:var(--surface);color:var(--ink);padding:9px 13px;box-shadow:0 2px 0 #35412f10;transition:background .16s,transform .16s}
+button:hover:not(:disabled){background:#efeee6}
+button:active:not(:disabled){transform:translateY(1px)}
+button:disabled{cursor:not-allowed;opacity:.45}
+.primary{background:var(--green);color:#fff;border-color:var(--green)}
+.primary:hover:not(:disabled){background:#3e5132}
+a{color:inherit}
+input,select{width:100%;min-width:0;padding:10px 12px;background:#fffdf6;color:var(--ink);border:1px solid #aeb49b;border-radius:1px}
+input[type=file]{font-size:12px}
+input::placeholder{color:#6e745e}
+label{display:block;font-weight:650}
+h1,h2,h3,p{margin:0}
+h1{font:700 clamp(34px,4vw,50px)/1.08 Georgia,serif;letter-spacing:-1.7px}
+h2{font:700 21px/1.3 Georgia,serif;letter-spacing:-.4px}
+h3{font-size:15px}
+p+p{margin-top:8px}
+:focus-visible{outline:3px solid var(--accent);outline-offset:4px}
+[hidden]{display:none!important}
+.skip{position:fixed;top:-100px;left:20px;z-index:5}
+.skip:focus{top:12px;background:var(--surface);padding:12px}
+.eyebrow{font:11px/1.5 var(--mono);letter-spacing:1.6px;text-transform:uppercase;color:var(--muted)}
+.muted,.hint{color:var(--muted);font-weight:400}
+.hint{font-size:12px;margin:5px 0 16px}
+.warn{color:#a04a28}
+.mono{font-family:var(--mono);font-size:12px;overflow-wrap:anywhere}
+.badge{display:inline-flex;align-items:center;gap:5px;padding:3px 7px;border:1px solid #9aa88a;border-radius:1px;background:#f0f3e8;color:#435635;font:11px/1.5 var(--mono);white-space:normal}
+.badge.neutral{color:#5c6452;border-color:#bcc2ab;background:transparent}
+.badge.amber{color:#76581d;border-color:#b9a265;background:#f6edd4}
+.badge+ .badge{margin-left:5px}
+
+  .shell{display:grid;grid-template-columns:228px minmax(0,1fr);min-height:100vh}
+.sidebar{position:sticky;top:0;height:100vh;border-right:5px solid #b09350;padding:32px 18px;display:flex;flex-direction:column;background:#35412f}
+.brand{display:flex;align-items:center;gap:10px;text-decoration:none;color:#faf5e6;font:700 18px Georgia,serif;letter-spacing:-.5px}
+.mark{display:grid;place-items:center;width:34px;height:34px;flex-shrink:0;background:#b39250;color:#26311f;border:1px solid #ddc18a;outline:1px solid #8a713e;outline-offset:2px;border-radius:0}
+.brand-note{margin:10px 0 38px 44px;font:9px var(--mono);color:#c0c8ad;letter-spacing:1.2px}
+.sidebar>.eyebrow{color:#c0c8ad;padding-bottom:10px;border-bottom:3px double #7c876b}
+.nav{display:grid;gap:3px;margin-top:13px}
+.nav a{display:flex;align-items:center;gap:9px;padding:14px 10px;border-radius:0;border-bottom:1px solid #6f7b5b;color:#e0e5d3;text-decoration:none;font-size:13px;font-weight:550}
+.nav svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.6}
+.nav a[aria-current=page]{background:#ede6d0;color:#35412f;box-shadow:inset 4px 0 #b09350}
+.nav a:hover{background:#ffffff10}
+.nav a[aria-current=page]:hover{background:#ede6d0}
+.nav-index{margin-left:auto;font:10px var(--mono);opacity:.8}
+.sidebar-foot{margin-top:auto;padding-top:28px}
+.local-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--green);margin-right:7px}
+.sidebar-foot p{font-size:11px;color:#c7cfb7;margin-top:10px}
+.sidebar-foot .badge{background:transparent;color:#e7ecd9;border-color:#879372}
+.sidebar-foot .local-dot{background:#c5a45c}
+.workspace{min-width:0}
+.topbar{padding:20px 34px;background:#dcd8c6;border-bottom:3px double #858f73;display:flex;justify-content:space-between;align-items:center;gap:16px;font:11px var(--mono)}
+.topbar .mono{font-size:10px}
+.content{position:relative;max-width:1540px;margin:28px 30px 36px;padding:32px 32px 40px 54px;background:var(--surface);border:1px solid #c0bda8;box-shadow:5px 6px 0 #d5ceba;min-width:0}
+.content::before{content:'';position:absolute;top:25px;bottom:25px;left:15px;width:12px;border-right:3px double #b3a477;background:radial-gradient(circle at 3px 6px,#b8b5a3 0 2px,transparent 2.6px) 0 0/9px 40px}
+.page-head{display:flex;justify-content:space-between;align-items:flex-end;gap:24px;margin-bottom:26px;padding-bottom:25px;border-bottom:4px double var(--ink)}
+.page-head .eyebrow{margin-bottom:12px}
+.register-index{display:inline-block;font-weight:700;color:var(--accent);border-right:1px solid #aaad94;margin-right:9px;padding-right:9px}
+.page-head p{max-width:570px;margin-top:14px;color:var(--muted)}
+.page-head .head-action{white-space:nowrap}
+.panel{background:var(--surface);border:1px solid var(--line);border-top:3px solid #657653;border-radius:var(--radius);padding:22px;min-width:0}
+.panel-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:22px}
+.panel-head p{font-size:12px;color:var(--muted);margin-top:4px}
+.grid-two{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:20px}
+.stack{display:grid;gap:20px}
+.empty{padding:36px 16px;text-align:center;color:var(--muted);font-size:13px}
+.empty strong{display:block;font:23px Georgia,serif;color:var(--ink);margin-bottom:7px}
+.footer{display:flex;justify-content:space-between;gap:16px;padding-top:16px;margin-top:28px;border-top:3px double #9ba58a;color:var(--muted);font:10px var(--mono)}
+
+  .stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:0;margin-bottom:24px;border:1px solid #9eaa8d}
+.stat{padding:21px 20px;background:#f5f3e8;border:0;border-right:1px solid #bdc5ad;border-radius:0}
+.stat:last-child{border-right:0}
+.stat .number{font:34px/1.2 Georgia,serif;letter-spacing:-1px;margin:12px 0 6px}
+.stat p{font-size:11px;color:var(--muted)}
+.stat.accent{background:#35412f;color:var(--surface)}
+.stat.accent .eyebrow,.stat.accent p{color:#d1d8bf}
+.bar-row{margin:20px 0}
+.bar-label{display:flex;justify-content:space-between;gap:16px;margin-bottom:8px;font-size:12px}
+.bar-track{height:9px;background:#e7e5d6;border-radius:0;overflow:hidden}
+.bar-fill{height:100%;background:var(--green);min-width:0}
+.bar-row:nth-child(2n) .bar-fill{background:var(--accent)}
+.chart-foot{border-top:1px solid var(--line);padding-top:16px;margin-top:24px;font-size:11px;color:var(--muted)}
+.route-item{padding:15px 0;border-bottom:1px solid var(--line)}
+.route-item:first-child{padding-top:0}
+.route-item:last-child{border:0;padding-bottom:0}
+.route-item .chain{margin-top:6px}
+.note{padding:14px 16px;border-left:3px solid #899773;background:#ebeedf;border-radius:0;font-size:12px;color:#505e42}
+.note strong{color:var(--ink)}
+.import{margin-top:24px;font-size:12px}
+.import summary{cursor:pointer;color:var(--muted);width:fit-content}
+.import-body{display:flex;align-items:center;flex-wrap:wrap;gap:12px;padding-top:14px}
+.import-body input{max-width:320px}
+.status-line{font:11px/1.6 var(--mono);color:var(--muted);margin-top:14px;overflow-wrap:anywhere}
+.editor-intro{margin-bottom:24px}
+.editor-intro p{max-width:850px}
+.editor-section{padding:24px 0;border-top:1px solid var(--line)}
+.editor-section>label{font:700 21px Georgia,serif}
+.editor-actions{display:flex;flex-wrap:wrap;gap:8px;padding:20px 0 0}
+.tab-strip{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}
+.tab{display:inline-flex;align-items:center;padding:9px 15px;background:transparent;border:1px solid var(--line);border-radius:var(--radius);box-shadow:none;color:var(--muted);font:11px/1.5 var(--mono);letter-spacing:1.4px;text-transform:uppercase}
+.tab:hover:not(:disabled){background:var(--accent-soft);color:var(--ink)}
+.tab[aria-selected=true]{background:var(--surface);color:var(--ink);border-color:var(--accent);border-top:3px solid var(--green);padding-top:7px;font-weight:700;box-shadow:3px 3px 0 var(--green-soft)}
+.tab-panel{min-width:0}
+.plan{margin:12px 0;padding:20px;border:1px solid var(--line);border-left:4px solid #657653;border-radius:0;background:var(--surface)}
+.plan>strong{font-size:17px}
+.plan>span{color:var(--muted);font-size:12px}
+.chain{font:11px/1.8 var(--mono);color:var(--green);overflow-wrap:anywhere;margin:8px 0 16px}
+.row{display:grid;grid-template-columns:24px minmax(120px,1.5fr) minmax(100px,.8fr) minmax(100px,auto);gap:10px;align-items:center;margin:10px 0}
+.row>span:first-child{color:var(--muted);font:11px var(--mono)}
+.row button{font-size:11px;padding:6px 8px;margin:2px}
+.binding{grid-template-columns:minmax(110px,.8fr) minmax(140px,1.2fr) minmax(120px,.8fr) auto}
+.binding-plan{display:grid;gap:8px;min-width:0}
+.pool-row{grid-template-columns:minmax(150px,1fr) auto}
+.toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:14px 0 0}
+#plan-tools .toolbar input,#plan-tools .toolbar select{min-width:160px}
+.toolbar input{width:210px}
+.toolbar button{font-size:12px}
+.filters{display:grid;grid-template-columns:minmax(180px,1fr) 200px auto;gap:12px;align-items:end;margin-bottom:24px}
+.filters label{font-size:11px;color:var(--muted)}
+.filters input,.filters select{margin-top:6px}
+.check{display:flex;gap:8px;align-items:center;padding:10px 0}
+.check input{width:auto;margin:0}
+.usage-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}
+.variants{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.variants .badge{margin:0;border-color:#9aa88a;background:transparent}
+.quota{padding-top:16px;margin-top:16px;border-top:1px solid var(--line)}
+.quota .bar-track{margin:10px 0}
+.time{font-size:11px;color:var(--muted);margin-top:8px}
+.usage-totals{display:flex;gap:28px;margin:22px 0}
+.usage-totals strong{font:26px Georgia,serif;display:block}
+.usage-totals span{font-size:11px;color:var(--muted)}
+.no-margin{margin:0}
+.section-gap{margin-top:24px}
+.fade-in{animation:reveal .35s ease-out both}
+@keyframes reveal{from{opacity:0;transform:translateY(6px)}
+to{opacity:1;transform:none}
+}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}
+}
+@media(min-width:1500px){.content{padding:40px 44px 48px 62px}
+.topbar{padding-left:56px;padding-right:56px}
+}
+@media(max-width:1150px){.shell{grid-template-columns:190px minmax(0,1fr)}
+.sidebar{padding:26px 14px}
+.content{margin:20px;padding:28px 24px 32px 44px}
+.topbar{padding:18px 26px}
+.grid-two{grid-template-columns:1fr}
+.stats{gap:0}
+.stat{padding:17px}
+.row{grid-template-columns:20px minmax(90px,1fr) minmax(80px,.7fr)}
+.row>span:last-child{grid-column:2/-1}
+.binding,.pool-row{grid-template-columns:1fr 1fr}
+.binding button{grid-column:2}
+.usage-grid{grid-template-columns:1fr}
+}
+@media(max-width:700px){.shell{display:block}
+.sidebar{position:static;height:auto;padding:18px 20px 0;border-right:0;border-bottom:4px solid #b09350}
+.brand-note,.sidebar>.eyebrow,.sidebar-foot{display:none}
+.nav{display:flex;gap:4px;overflow-x:auto;margin:16px -6px 0}
+.nav a{padding:12px 9px;white-space:nowrap;font-size:11px;border-radius:0;gap:6px}
+.nav-index{display:none}
+.nav svg{width:15px;height:15px}
+.topbar{padding:14px 20px}
+.topbar .mono{max-width:48%;overflow-wrap:anywhere}
+.content{margin:14px 10px 24px;padding:22px 16px;box-shadow:3px 4px 0 #d5ceba}
+.content::before{display:none}
+.page-head{display:block;margin-bottom:24px}
+.page-head .head-action{margin-top:18px}
+.stats{grid-template-columns:1fr 1fr}
+.stat:nth-child(2n){border-right:0}
+.stat:nth-child(n+3){border-top:1px solid #bdc5ad}
+.stat .number{font-size:29px}
+.stat{padding:17px}
+.panel{padding:20px}
+.filters{grid-template-columns:1fr}
+.filters .check{padding:0}
+.row{grid-template-columns:22px minmax(0,1fr)}
+.row input:nth-of-type(2){grid-column:2}
+.row>span:last-child{grid-column:2}
+.binding,.pool-row{grid-template-columns:1fr}
+.binding select,.binding button{grid-column:1}
+.toolbar input{width:100%}
+.plan{padding:16px}
+.footer{flex-direction:column;gap:6px}
+h1{letter-spacing:-1.3px}
+.usage-totals{gap:24px}
+.editor-actions button{flex:1 1 40%}
+}
+
+  summary{cursor:pointer}
+summary:focus-visible{border-radius:1px}
+.bar-label span:first-child{overflow-wrap:anywhere;min-width:0}
+.stat .number{overflow-wrap:anywhere}
+.editor-actions{margin-bottom:24px}
+.panel a{color:var(--green)}
+
+  details.plan>summary{position:relative;padding-right:20px;list-style:none}
+details.plan>summary::-webkit-details-marker{display:none}
+details.plan>summary::after{content:'+';position:absolute;right:0;top:0;color:var(--muted);font:20px var(--mono)}
+details.plan[open]>summary::after{content:'−'}
+details.plan>summary>strong{font:700 21px Georgia,serif}
+details.plan>summary>span:not(.chain){font-size:12px;color:var(--muted)}
+details.plan>summary .chain{display:block;margin:7px 0 0}
+details.plan>summary select{display:inline-block;width:auto;min-width:140px;max-width:220px;margin:0 0 0 12px;font:12px var(--mono)}
+details.plan[open]>summary{margin-bottom:18px}
+.plan-category{margin:22px 0 8px;font:700 12px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted);display:flex;align-items:center;gap:6px}
+.plan-category .category-toggle{font:inherit;letter-spacing:inherit;text-transform:inherit;color:inherit;background:none;border:0;border-radius:0;box-shadow:none;padding:0;cursor:pointer;text-align:left}
+.plan-category .category-toggle:hover{color:var(--green)}
+.plan-category .mini{font:inherit;letter-spacing:normal;background:none;border:0;box-shadow:none;color:var(--muted);padding:0 3px;cursor:pointer}
+.plan-category .mini:hover{color:var(--green)}
+.drag-handle{cursor:grab;color:var(--muted);font:11px var(--mono);letter-spacing:normal;text-transform:none;user-select:none;padding:0 3px 0 0}
+.drag-handle:active{cursor:grabbing}
+.drop-target{box-shadow:inset 3px 0 var(--green)}
+.quota-window+.quota-window{margin-top:18px}
+
+
+
+ .provider-browser{display:grid;grid-template-columns:210px minmax(0,1fr);gap:20px;margin-top:22px;align-items:start}
+.provider-rail{padding:18px 10px;background:#e2dfcf;border:1px solid #b5b99f;border-top:5px solid #657653;border-radius:0;min-width:0}
+.provider-rail .panel-head{padding:0 8px;margin-bottom:14px;align-items:center}
+.provider-rail h2{font-size:14px}
+.provider-list{display:grid;gap:0;max-height:620px;overflow-y:auto;padding:4px}
+.provider-choice{display:flex;justify-content:space-between;gap:10px;text-align:left;border:0;border-bottom:1px solid #bdc2ab;border-radius:0;background:transparent;box-shadow:none;padding:13px 10px;width:100%;min-width:0}
+.provider-choice[aria-pressed=true]{background:var(--surface);color:#435334;box-shadow:inset 3px 0 #9c7c36}
+.provider-choice strong{display:block;font-size:12px;overflow-wrap:anywhere}
+.provider-choice .mono{display:block;color:var(--muted);font-size:10px}
+.provider-choice .count{font:11px var(--mono);color:var(--muted);padding-top:3px;white-space:nowrap}
+.provider-models{min-width:0}
+.provider-focus{padding:16px 0;border-bottom:3px double var(--ink);margin-bottom:8px}
+.provider-focus h2{font:700 29px Georgia,serif;margin:6px 0}
+.provider-focus p{font-size:12px;color:var(--muted)}
+.provider-tools{grid-template-columns:minmax(180px,1fr) minmax(160px,220px) auto}
+.provider-picker{display:block}
+.model-catalog{display:grid;gap:0}
+.model-group{min-width:0;margin-top:12px;border-top:2px solid #9ba58a}
+.model-group>summary{padding:14px 2px;font:700 19px/1.4 Georgia,serif;color:var(--ink)}
+.model-group>summary .badge{margin-left:9px;vertical-align:middle;font-weight:400}
+.model-group-id{display:block;margin:6px 0 0 18px;color:var(--muted);font-size:10px}
+.model-entry{background:transparent;border:0;border-radius:0;margin:0;min-width:0}
+.model-entry>summary{list-style:none;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:17px 18px}
+.model-entry>summary::-webkit-details-marker{display:none}
+.model-entry>summary::after{content:'+';font:18px var(--mono);color:var(--muted);flex-shrink:0}
+.model-entry[open]>summary::after{content:'−'}
+.model-name{flex:1;min-width:0}
+.model-name strong{display:block;font:700 21px Georgia,serif;overflow-wrap:anywhere}
+.model-name .mono{display:block;color:var(--muted);font-size:10px;margin-top:3px}
+.model-flags{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:5px}
+.model-flags .badge{margin:0;font-size:10px}
+.model-body{margin:0 18px;padding:0;border-top:1px solid var(--line)}
+.model-facts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin:0 0 20px}
+.model-facts>div{border-bottom:1px dashed #bcc2ac;padding-bottom:12px}
+.model-facts dt,.field-label{font:10px/1.5 var(--mono);letter-spacing:1px;text-transform:uppercase;color:var(--muted)}
+.model-ref{display:block;margin-top:9px}
+.model-ref .field-label{font-size:9px;letter-spacing:.7px}
+.model-facts dd{font:14px var(--mono);margin:5px 0 0;overflow-wrap:anywhere}
+.model-glance{display:flex;flex-wrap:wrap;gap:5px 16px;margin-top:10px;color:var(--muted);font:11px/1.6 var(--mono)}
+.model-limits{grid-template-columns:repeat(3,minmax(0,1fr))}
+.model-section,.catalog-pricing{border-top:1px solid var(--line);padding:0;margin:0}
+.model-body>details:first-child{border-top:0}
+.model-section>summary,.catalog-pricing>summary{padding:13px 2px;font:700 16px/1.4 Georgia,serif}
+.model-section[open],.catalog-pricing[open]{padding-bottom:16px}
+.price-schedule{border-top:1px solid var(--line);margin-top:16px;padding-top:12px}
+.price-schedule h4{margin:0 0 12px;font:11px/1.6 var(--mono);color:var(--green);font-weight:650}
+.price-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:0}
+.price-grid dt{font-size:11px;color:var(--muted)}
+.price-grid dd{margin:4px 0 0;font:13px/1.6 var(--mono);overflow-wrap:anywhere}
+.model-body .variants{margin-top:10px}
+.model-body .badge{user-select:all;overflow-wrap:anywhere}
+.catalog-more{justify-self:start;margin-top:12px}
+.catalog-result{margin:12px 0;font:11px var(--mono);color:var(--muted)}
+
+ @media(max-width:950px){.provider-browser{grid-template-columns:1fr}
+.provider-list{max-height:280px}
+.provider-picker{display:block}
+.provider-tools{grid-template-columns:minmax(160px,1fr) minmax(140px,180px)}
+.provider-tools .check{grid-column:1/-1;padding:0}
+.provider-focus{padding-top:0}
+}
+
+ @media(max-width:700px){.provider-tools{grid-template-columns:1fr}
+.model-entry>summary{flex-wrap:wrap;padding:15px}
+.model-name{flex-basis:calc(100% - 35px)}
+.model-flags{order:3;justify-content:flex-start;flex-basis:100%}
+.model-body{margin:0 15px}
+.model-facts{gap:14px 10px}
+.model-limits,.price-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+.provider-focus h2{font-size:25px}
+}
+
+
+
+.model-shell{background:var(--surface);border:1px solid #aab39b;border-left:4px solid #657653;border-radius:0;margin:12px 0 3px;box-shadow:2px 3px 0 #e0ddcd;min-width:0}
+.model-actions{display:flex;align-items:center;gap:10px;padding:10px 18px;border-top:1px solid var(--line);background:#f1f0e3}
+.preferred-toggle{font-size:12px;padding:6px 10px;display:inline-flex;align-items:center;gap:7px}
+.preferred-toggle[aria-pressed=true]{background:var(--accent-soft);border-color:#c5b47f;color:#684e19}
+.shortlist{background:#f3ead0;border:1px solid #b2a06e;border-left:6px solid #9c7c36;border-radius:0;padding:18px 20px;margin-bottom:22px;box-shadow:2px 3px 0 #e2ddc9}
+.shortlist-head{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px}
+.shortlist-head h2{font:700 24px Georgia,serif;margin:5px 0}
+.shortlist p{font-size:12px;color:#5e573d}
+.shortlist details{margin-top:12px}
+.shortlist summary{font-size:12px;color:#445436}
+.shortlist-group{margin-top:18px}
+.shortlist-group h3{font-size:13px}
+.shortlist-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid #cebf99}
+.shortlist-row button{font-size:11px;padding:6px 9px}
+.shortlist-row>span{min-width:0}
+.shortlist-filter{display:flex;flex-wrap:wrap;gap:12px 22px;margin-bottom:14px}
+.shortlist-filter .check{font-size:12px}
+.shortlist .status-line{margin-top:10px}
+.provider-choice .count small{font:10px var(--mono);color:var(--accent)}
+
+ .sidebar :focus-visible{outline-color:#e7c77b}
+
+ @media(max-width:700px){.shortlist{padding:15px}
+.model-actions{padding:10px 15px;flex-wrap:wrap}
+.shortlist-row{align-items:flex-start}
+.shortlist-row button{flex-shrink:0}
+.model-actions .hint{margin:0}
+}
+
 </style>
-<h1>Quartermaster local report viewer</h1>
-<p>Choose a report file, or start the separately opted-in local gateway and load a live report. The gateway keeps the OpenCode token server-side.</p>
-<section><label for="file">Report JSON</label> <input id="file" type="file" accept="application/json,.json"> <button id="live" type="button">Load live report</button>
-<p id="status" role="status" aria-live="polite">No report loaded.</p></section>
-<main id="report" aria-live="polite"></main>
-<section id="editor">
-  <h2 id="options-heading">Assignment editor</h2>
-  <p>Load the project options, edit plans and bindings, then apply. Apply submits a save through the project writer. The editor is disabled while loading or saving; Cancel only discards unsaved edits, not a submitted save. The current session stays unchanged, and the next assignment reads the saved file.</p>
-  <fieldset id="options-fields" aria-labelledby="options-heading" style="border:0;padding:0;margin:0;min-width:0">
-  <label for="plans">Plans. One model per line: plan provider/model variant</label>
-  <textarea id="plans" rows="4" spellcheck="false"></textarea>
-  <label for="agents">Agent bindings. One per line: agent plan</label>
-  <textarea id="agents" rows="3" spellcheck="false"></textarea>
-  <label for="work-types">Work types. One per line: workType plan</label>
-  <textarea id="work-types" rows="3" spellcheck="false"></textarea>
-  <p><button id="load-options" type="button">Load project options</button> <button id="apply-options" type="button">Apply project options</button> <button id="cancel-options" type="button">Cancel edits</button></p>
-  </fieldset>
-  <p id="options-status" role="status" aria-live="polite">Project options are not loaded. The editor cannot apply until they load.</p>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<div class="shell">
+<aside class="sidebar" aria-label="Primary navigation">
+  <a class="brand" href="#overview"><span class="mark" aria-hidden="true"><svg aria-hidden="true" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="14" rx="1.5"/><path d="M3 10h7m4 0h7M10 6v8h4V6"/></svg></span>Quartermaster</a>
+   <div class="brand-note">MODEL SUPPLY OFFICE</div><div class="eyebrow">Workspace</div>
+  <nav class="nav">
+    <a href="#overview" aria-current="page"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z"/></svg>Overview<span class="nav-index" aria-hidden="true">01</span></a>
+    <a href="#plans"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16M8 3v4M16 10v4M10 17v4"/></svg>Plans<span class="nav-index" aria-hidden="true">02</span></a>
+    <a href="#providers"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5 9-5Zm-9 9 9 5 9-5M3 16l9 5 9-5"/></svg>Providers &amp; models<span class="nav-index" aria-hidden="true">03</span></a>
+    <a href="#quota"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 19a7 7 0 1 1 7-7M12 12l4-3"/></svg>Quota<span class="nav-index" aria-hidden="true">04</span></a>
+  </nav>
+  <div class="sidebar-foot"><span class="badge neutral"><span class="local-dot"></span>Local workspace</span><p>Deliberate routing.<br>A little more headroom.</p></div>
+</aside>
+<div class="workspace">
+<header class="topbar"><span>Workspace <span class="muted">/</span> <strong id="breadcrumb">Overview</strong></span><span id="project-label" class="mono muted">NOT CONNECTED</span></header>
+<main class="content" id="main" tabindex="-1">
+<section data-page="overview" class="fade-in" aria-labelledby="overview-heading">
+   <div class="page-head"><div><div class="eyebrow"><span class="register-index" aria-hidden="true">01</span>Workspace ledger</div><h1 id="overview-heading">Workspace ledger.</h1><p>Your model inventory, routing plans, and available headroom.<br>A clear record of what keeps the work moving.</p></div><button id="refresh-dashboard" class="primary head-action" type="button">↻ &nbsp; Refresh workspace</button></div>
+  <div id="overview-stats" class="stats"></div>
+  <div class="grid-two"><section class="panel"><div class="panel-head"><div><h2>Where the work goes</h2><p>Observed tokens by provider</p></div><span class="badge neutral">Telemetry</span></div><div id="overview-chart"></div></section><section class="panel"><div class="panel-head"><div><h2>Routing at a glance</h2><p>Ordered fallbacks from the running host</p></div><a class="mono" href="#plans">Edit plans ↗</a></div><div id="overview-plans"></div></section></div>
+  <div id="overview-attention" class="note section-gap">Connect to your local gateway to see the state of this workspace. Nothing runs automatically.</div>
+  <p id="dashboard-status" class="status-line" role="status" aria-live="polite">Waiting for your first refresh.</p>
+  <details class="import"><summary>Working offline? Import a report</summary><div class="import-body"><label for="file">Report JSON</label><input id="file" type="file" accept="application/json,.json"><button id="live" type="button">Load live report</button></div><p class="hint">Read-only snapshot. The gateway keeps the OpenCode token server-side.</p></details>
+  <p id="status" class="status-line" role="status" aria-live="polite">No report loaded.</p>
+  <div id="report" hidden></div>
 </section>
+<section id="editor" data-page="plans" hidden class="fade-in" aria-labelledby="plan-heading">
+   <div class="page-head"><div><div class="eyebrow"><span class="register-index" aria-hidden="true">02</span>Routing plans</div><h1 id="plan-heading">Routing plans.</h1><p>Set the first choice. Give it a fallback. Keep every agent on course.</p></div><span class="badge neutral">Winning settings</span></div>
+   <div class="note editor-intro"><strong id="options-heading">Your routing playbook.</strong> Earlier models are tried first; named variants stay separate. Apply saves the winning quartermaster.jsonc, including a settings file outside this project. A registration with no settings file stays read-only. The current session is unchanged; the next assignment reads the saved file. Cancel discards unsaved edits, not a submitted save.</div>
+   <p id="options-status" class="status-line" role="status" aria-live="polite">Plans load from the local gateway when this page is open.</p>
+  <div class="tab-strip" role="tablist" aria-label="Routing plan settings"><button type="button" class="tab" role="tab" id="tab-plans" aria-selected="true" aria-controls="panel-plans" tabindex="0"><span class="register-index" aria-hidden="true">01</span>Plans</button><button type="button" class="tab" role="tab" id="tab-agents" aria-selected="false" aria-controls="panel-agents" tabindex="-1"><span class="register-index" aria-hidden="true">02</span>Agent bindings</button><button type="button" class="tab" role="tab" id="tab-modules" aria-selected="false" aria-controls="panel-modules" tabindex="-1"><span class="register-index" aria-hidden="true">03</span>Modules</button><button type="button" class="tab" role="tab" id="tab-settings" aria-selected="false" aria-controls="panel-settings" tabindex="-1"><span class="register-index" aria-hidden="true">04</span>Settings</button></div>
+  <fieldset id="options-fields" aria-labelledby="options-heading" style="border:0;padding:0;margin:0;min-width:0">
+    <div class="editor-actions"><button id="load-options" type="button">Load plans</button><button id="apply-options" class="primary" type="button" disabled>Apply plans</button><button id="cancel-options" type="button">Cancel edits</button><button id="download-options" type="button">Download draft</button></div>
+   <div class="tab-panel" id="panel-plans" role="tabpanel" aria-labelledby="tab-plans" tabindex="0">
+      <div class="editor-section"><label for="plans">Plans</label><p class="hint">Order matters. Use providerID/modelID and the exact variant name from the catalog. Browser-shortlisted models appear first in suggestions; existing values and chain order never change. Filter the list here. Categories stay in this browser, start collapsed, and do not change routing or the saved file.</p><p id="plan-preference-status" class="hint"></p><div id="plan-tools"></div><div id="plans"></div></div>
+   </div>
+    <div class="tab-panel" id="panel-agents" role="tabpanel" aria-labelledby="tab-agents" tabindex="-1" hidden>
+    <div class="editor-section"><label for="agents">Agent bindings</label><p class="hint">Choose a plan from the menu. Other plan… accepts a name that is not listed yet. Apply still requires that plan to exist.</p>
+  <div id="agents"></div>
+    </div><div class="editor-section"><label for="work-types">Work types</label><p class="hint">Choose a plan from the menu. Other plan… accepts a name that is not listed yet. Apply still requires that plan to exist.</p>
+  <div id="work-types"></div>
+   </div>
+   </div>
+    <div class="tab-panel" id="panel-modules" role="tabpanel" aria-labelledby="tab-modules" tabindex="-1" hidden>
+    <div class="editor-section"><label for="modules">Modules</label><p class="hint">A module keeps its own ordered chain and cooldowns, used only while that module is selected. Changes here stay in the draft until Apply.</p>
+  <div id="modules"></div>
+   </div>
+   </div>
+    <div class="tab-panel" id="panel-settings" role="tabpanel" aria-labelledby="tab-settings" tabindex="-1" hidden>
+    <div class="editor-section"><label for="limits">Settings summary</label>
+  <div id="limits"></div>
+   </div>
+   </div>
+  </fieldset>
+</section>
+<section data-page="providers" hidden class="fade-in" aria-labelledby="providers-heading">
+  <div class="page-head"><div><div class="eyebrow"><span class="register-index" aria-hidden="true">03</span>Provider inventory</div><h1 id="providers-heading">Providers &amp; models.</h1><p>Browse OpenCode’s provider catalog. Compare capabilities and exact named variants. Catalog metadata does not establish connectivity.</p></div><button id="refresh-providers" type="button" class="head-action">↻ &nbsp; Refresh catalog</button></div>
+  <p id="catalog-status" class="status-line" role="status" aria-live="polite">Refresh the catalog to see provider metadata. No inference calls are made.</p>
+  <div class="shortlist-filter"><label class="check" for="preferred-filter"><input id="preferred-filter" type="checkbox" disabled>Preferred models only</label></div>
+  <div class="filters provider-tools"><label for="model-search">Search names, IDs, or exact variants<input id="model-search" type="search" placeholder="Search this catalog…" aria-describedby="catalog-scope"></label><label class="provider-picker" for="provider-filter">Browse provider<select id="provider-filter"><option value="">All providers</option></select></label><label class="check" for="thinking-filter"><input id="thinking-filter" type="checkbox" aria-describedby="thinking-help">Confirmed thinking only</label></div>
+  <p id="thinking-help" class="hint">OpenCode V2 does not report thinking capability, so these models show “Thinking unknown.” Variant names do not confirm capability; use their exact IDs in plan variant fields. Enabled metadata is not proof of connectivity or availability.</p>
+  <div class="provider-browser"><aside class="provider-rail" aria-labelledby="provider-list-heading"><div class="panel-head"><h2 id="provider-list-heading">Providers</h2><span id="provider-count" class="badge neutral">—</span></div><div id="provider-list" class="provider-list"></div></aside><div class="provider-models"><header class="provider-focus"><div class="eyebrow">Model catalog</div><h2 id="catalog-heading" tabindex="-1">Provider models</h2><p id="catalog-scope">Choose a provider to browse its models, or search all providers.</p></header><p id="catalog-result" class="catalog-result" aria-live="polite"></p><div id="catalog" class="model-catalog"></div></div></div>
+  <section class="shortlist" aria-labelledby="shortlist-heading"><div class="shortlist-head"><div><div class="eyebrow">Personal reference / browser only</div><h2 id="shortlist-heading">Preferred models</h2><p>A saved shortlist in this browser only. Not routing priority, configuration, or plan order.</p></div><button id="retry-preferences" type="button">Reload browser shortlist</button></div><p id="preference-status" class="status-line" role="status" aria-live="polite">Reading browser shortlist…</p><details><summary id="shortlist-summary">Saved shortlist</summary><div id="preferred-list"></div></details></section>
+  <fieldset id="pool-fields" style="border:0;padding:0;margin:0;min-width:0">
+  <details class="editor-section"><summary><strong>Shared pools &amp; recovery</strong> <span class="muted">· Coordinate rate limits</span></summary>
+  <label for="shared-pools" class="section-gap">Shared pools</label>
+  <p class="hint">Models in one pool share a cooldown. A limit on any member cools the others. Beam stays out of the Zen free pool. Apply on Plans saves this draft.</p>
+  <div id="shared-pools"></div>
+  <label for="probes">Recovery probes</label>
+  <p class="hint">One probe from a pool is enough. It runs only while that pool is cooling.</p>
+  <div id="probes"></div>
+  </details>
+  </fieldset>
+</section>
+<section data-page="quota" hidden class="fade-in" aria-labelledby="quota-heading">
+   <div class="page-head"><div><div class="eyebrow"><span class="register-index" aria-hidden="true">04</span>Provider quota</div><h1 id="quota-heading">Quota.</h1><p>Provider windows from the latest snapshot. A missing percent or reset stays unknown.</p></div><button id="refresh-quota" type="button" class="head-action">↻ &nbsp; Refresh quota</button></div>
+  <div id="quota-providers" class="usage-grid"></div>
+  <p id="quota-status" class="status-line" role="status" aria-live="polite">Quota loads with this page.</p>
+</section>
+<footer class="footer"><span>QUARTERMASTER <span aria-hidden="true">/</span> MODEL SUPPLY OFFICE</span><span>Local data. Explicit actions. No background inference.</span></footer>
+</main></div></div>
+<datalist id="model-suggestions"></datalist>
 <script>
 const input=document.querySelector('#file'), live=document.querySelector('#live'), status=document.querySelector('#status'), output=document.querySelector('#report')
+function chainText(models){return (Array.isArray(models)?models:[]).map(model=>{if(typeof model==='string')return model;const id=model?.id||(model?.providerID&&model?.modelID?`${model.providerID}/${model.modelID}`:'');return id&&model?.variant?`${id} · ${model.variant}`:id}).filter(Boolean).join(' → ')}
+let currentReport=null, dashboardData=null, catalogData=null, usageData=null
 function render(data){if(data.apiVersion!==1||data.status!=='ok'||!data.totals||!data.costs)throw Error('Unsupported report')
+  dashboardData=null
+  currentReport=data
   status.textContent=`Report for project ${data.projectID} · generated ${new Date(data.generatedAt).toLocaleString()}`
-  for(const [title,value] of [['Plans',data.plans],['Agent bindings',data.agents],['Work types',data.workTypes],['Availability',data.availability],['Usage totals',data.totals],['Partial cost estimates',data.costs],['Agent attribution',data.agentAttribution],['Plan attribution',data.planAttribution],['Budgets',data.budgets],['Provider errors',data.errors]]){
-    if(value===undefined)continue
-    const section=document.createElement('section'),heading=document.createElement('h2'),pre=document.createElement('pre');heading.textContent=title;pre.textContent=JSON.stringify(value,null,2);section.append(heading,pre);output.append(section)
-  }
+  output.replaceChildren()
+  if(typeof document.createElement==='function'){paintOverview();paintUsage()}
 }
 let loadID=0
 async function loadReport(read){const mine=++loadID;output.replaceChildren();live.disabled=true;input.disabled=true;status.textContent='Loading report…'
-  try{const data=await read();if(mine!==loadID)return;render(data)}catch{if(mine===loadID)status.textContent='Could not load the Quartermaster report.'}finally{if(mine===loadID){live.disabled=false;input.disabled=false}}
+  try{const data=await read();if(mine!==loadID)return;render(data);const derived=usageFromSources(data.availability?.sources, data.availability);usageData=derived?attachCooldowns(derived, data.cooldowns):null;dashboardData=null;paintUsage();setMessage('#quota-status',usageData?.length?'This report included provider quota.':'This report has no provider quota.')}catch{if(mine===loadID)status.textContent='Could not load the Quartermaster report. Any previous snapshot stays visible.'}finally{if(mine===loadID){live.disabled=false;input.disabled=false}}
 }
 input.addEventListener('change',()=>{const file=input.files?.[0];if(file)void loadReport(async()=>JSON.parse(await file.text()))})
 live.addEventListener('click',()=>void loadReport(async()=>{const response=await fetch('/api/report',{cache:'no-store',credentials:'same-origin'});if(!response.ok)throw Error('Gateway unavailable');return response.json()}))
-const plansInput=document.querySelector('#plans'), agentsInput=document.querySelector('#agents'), workTypesInput=document.querySelector('#work-types'), optionsStatus=document.querySelector('#options-status')
-const optionsFields=document.querySelector('#options-fields')
-let revision, saved
-const lines=value=>value.split('\n').map(line=>line.trim()).filter(Boolean)
-const modelText=model=>typeof model==='string'?model:`${model.id}${model.variant?` ${model.variant}`:''}`
-function show(options){
-  plansInput.value=Object.entries(options.plans??{}).flatMap(([plan,models])=>models.map(model=>`${plan} ${modelText(model)}`)).join('\n')
-  agentsInput.value=Object.entries(options.agents??{}).map(([agent,plan])=>`${agent} ${plan}`).join('\n')
-  workTypesInput.value=Object.entries(options.workTypes??{}).map(([workType,plan])=>`${workType} ${plan}`).join('\n')
+
+const optionsFields=document.querySelector('#options-fields'), poolFields=document.querySelector('#pool-fields'), optionsStatus=document.querySelector('#options-status')
+function lockOptions(locked){if(optionsFields)optionsFields.disabled=locked;if(poolFields)poolFields.disabled=locked}
+let revision, saved, draft, settingsPath=''
+let canWrite=false
+function ownCopy(value){
+  if(Array.isArray(value))return value.map(item=>ownCopy(item))
+  if(!value||typeof value!=='object')return value
+  const copy=Object.create(null)
+  for(const key of Object.keys(value))copy[key]=ownCopy(value[key])
+  return copy
 }
-function modelFrom(text){const [id,variant]=text.split(/\s+/);if(!id?.includes('/'))throw Error('Each model must be provider/model');return variant?{id,variant}:id}
+function h(tag,props,...kids){
+  const node=document.createElement(tag)
+  for(const [key,value] of Object.entries(props??{})){
+    if(key==='text')node.textContent=value
+    else if(key==='value')node.value=value
+    else if(key==='disabled')node.disabled=value
+    else if(key.startsWith('on')&&typeof value==='function')node.addEventListener(key.slice(2).toLowerCase(),value)
+    else if(key==='type')node.type=value
+    else node.setAttribute(key,value==null?'':String(value))
+  }
+  for(const kid of kids)if(kid)node.append(kid)
+  return node
+}
+function mount(selector,...children){const node=document.querySelector(selector);if(node&&typeof node.replaceChildren==='function')node.replaceChildren(...children)}
+function empty(title,detail){return h('div',{class:'empty'},h('strong',{text:title}),h('span',{text:detail}))}
+function number(value){return typeof value==='number'&&Number.isFinite(value)?value.toLocaleString(undefined,{maximumFractionDigits:2}):'—'}
+function known(value){return typeof value==='number'&&Number.isFinite(value)}
+function stat(label,value,detail,accent=false){return h('div',{class:`stat${accent?' accent':''}`},h('div',{class:'eyebrow',text:label}),h('div',{class:'number',text:value}),h('p',{text:detail}))}
+function timeText(timestamp,now=Date.now()){
+  if(!known(timestamp)||timestamp<=0)return 'Time unknown'
+  const date=new Date(timestamp);if(Number.isNaN(date.getTime()))return 'Time unknown'
+  const delta=timestamp-now, minutes=Math.ceil(Math.abs(delta)/60000)
+  const relative=minutes<1?'now':minutes<60?`${minutes}m`:minutes<1440?`${Math.ceil(minutes/60)}h`:`${Math.ceil(minutes/1440)}d`
+  return `${date.toLocaleString()} · ${delta===0?'now':delta>0?`in ${relative}`:`${relative} ago`}`
+}
+function costText(costs){const values=costs?.currencies;return Array.isArray(values)&&values.length?values.map(item=>`${number(item.estimatedAmount)} ${item.currency}`).join(' + '):'Not priced'}
+function providerDimensions(){return (currentReport?.dimensions?.items||[]).filter(item=>item.dimension==='provider')}
+function telemetryIssue(){return dashboardData&&!currentReport?`Telemetry unavailable.${typeof dashboardData.reportError==='string'&&dashboardData.reportError?` ${dashboardData.reportError}`:''}`:''}
+function paintOverview(){
+ const report=currentReport, snapshot=dashboardData||report, totals=report?.totals, plans=snapshot?.plans??report?.plans
+ const providers=catalogData?.providers
+ mount('#overview-stats',stat('Observed tokens',number(totals?.observedTokens),telemetryIssue()?'Telemetry unavailable':'Input + output · partial telemetry',true),stat('Routing plans',plans?number(Object.keys(plans).length):'—','From the running host'),stat('Catalog providers',Array.isArray(providers)?number(providers.length):'—','Metadata · not a connectivity check'),stat('Estimated cost',report?costText(report.costs):'—','Partial estimate · not a bill'))
+ const rows=providerDimensions(), max=Math.max(0,...rows.map(item=>item.observedTokens||0))
+ mount('#overview-chart',...(rows.length?rows.map(item=>bar(item.value||'Unattributed',item.observedTokens,max)): [empty(telemetryIssue()?'Telemetry is unavailable.':'A little quiet, for now.',telemetryIssue()||'Refresh the workspace or import a report to see observed work.')]),h('p',{class:'chart-foot',text:'Observed input + output only. A share of observed tokens is not a share of provider quota.'}))
+ const entries=Object.entries(plans||{})
+ const shown=entries.slice(0,6)
+  const planRows=shown.length?shown.map(([name,models])=>h('div',{class:'route-item'},h('strong',{text:name}),h('p',{class:'chain no-margin',text:chainText(models)||'No models in this chain'}))):[empty('Give your work a direction.','Refresh the workspace, or open Plans to load the winning settings file.')]
+ if(entries.length>shown.length)planRows.push(h('p',{class:'hint',text:`${entries.length-shown.length} more plans are on the Plans page.`}))
+ const bindings=[]
+ for(const [map,label] of [[snapshot?.agents??report?.agents,'agent binding'],[snapshot?.workTypes??report?.workTypes,'work type']])if(map&&typeof map==='object'&&!Array.isArray(map)){const count=Object.keys(map).length;bindings.push(`${count} ${label}${count===1?'':'s'}`)}
+ if(bindings.length)planRows.push(h('p',{class:'chart-foot',text:bindings.join(' · ')}))
+ mount('#overview-plans',...planRows)
+ const projectID=snapshot?.projectID??report?.projectID
+ const project=document.querySelector('#project-label');if(project)project.textContent=projectID?`PROJECT / ${projectID}`:'NOT CONNECTED'
+ const attention=document.querySelector('#overview-attention')
+ if(attention&&report){
+  const classes=report.errors?.byClassification
+  const named=classes&&typeof classes==='object'&&!Array.isArray(classes)?Object.entries(classes).map(([name,item])=>`${name} ${number(item?.count)}`).join(', '):''
+  const latest=known(report.freshness?.latestObservedAt)?` Latest observation ${timeText(report.freshness.latestObservedAt)}.` : ''
+   const quota=typeof snapshot?.availability?.status==='string'?` Quota source status: ${snapshot.availability.status}.` : ''
+  attention.textContent=`${number(totals?.records)} telemetry records · ${number(totals?.unknownTokenRecords)} with unknown token counts · ${number(report.errors?.total)} recorded provider errors.${named?` Classifications: ${named}.`:''}${latest}${quota} These are observations, not complete account usage.`
+ }else if(attention&&dashboardData)attention.textContent=`${telemetryIssue()} Routing plans and quota state are shown independently from telemetry.${typeof snapshot.availability?.status==='string'?` Quota source status: ${snapshot.availability.status}.`:''}`
+}
+function bar(label,value,max){
+ const fill=h('div',{class:'bar-fill'});fill.setAttribute('style',`width:${max>0&&known(value)?Math.min(100,Math.max(0,value/max*100)):0}%`)
+ return h('div',{class:'bar-row'},h('div',{class:'bar-label'},h('span',{text:label}),h('span',{class:'mono',text:number(value)})),h('div',{class:'bar-track','aria-hidden':'true'},fill))
+}
+function navigate(){
+  const names={overview:'Overview',plans:'Plans',providers:'Providers & models',quota:'Quota'}
+  const candidate=window.location.hash.slice(1), route=candidate==='usage'?'quota':Object.hasOwn(names,candidate)?candidate:'overview'
+ for(const page of document.querySelectorAll('[data-page]'))page.hidden=page.getAttribute('data-page')!==route
+ for(const link of document.querySelectorAll('.nav a')){if(link.getAttribute('href')===`#${route}`)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current')}
+  document.querySelector('#breadcrumb').textContent=names[route]
+  document.title=`${names[route]} · Quartermaster`
+  if(route==='plans'||route==='providers')void maybeLoadPlans()
+  if(route==='providers')void maybeLoadCatalog()
+  if(route==='quota')void maybeLoadWorkspace()
+}
+function maybeLoadPlans(){
+  if(saved!==undefined)return
+  try{const protocol=location.protocol;if(protocol!=='http:'&&protocol!=='https:')return}catch{return}
+  return loadOptions()
+}
+function maybeLoadCatalog(){
+  if(catalogData)return
+  const button=document.querySelector('#refresh-providers')
+  if(!button||button.disabled)return
+  try{const protocol=location.protocol;if(protocol!=='http:'&&protocol!=='https:')return}catch{return}
+  return refreshCatalog()
+}
+function maybeLoadWorkspace(){
+  if(dashboardData)return
+  const button=document.querySelector('#refresh-quota')
+  if(!button||button.disabled)return
+  try{const protocol=location.protocol;if(protocol!=='http:'&&protocol!=='https:')return}catch{return}
+  return refreshWorkspace()
+}
+function setMessage(selector,text){const node=document.querySelector(selector);if(node)node.textContent=text}
+let variantRefreshers=[]
+let catalogLimit=30, catalogHasSelection=false
+const modelExpansion=new Map()
+const modelSectionExpansion=new Map()
+const providerExpansion=new Map()
+function catalogModels(){return (catalogData?.providers||[]).flatMap(provider=>(provider.models||[]).map(model=>({...model,providerID:provider.id,providerName:provider.name||provider.id})))}
+const preferenceKey='quartermaster.preferred-models.v1'
+let preferredModels=new Set(), preferenceReady=false, preferenceRevision=null, preferenceMessage='Browser shortlist has not been read.'
+function preferredID(id){return typeof id==='string'&&id.indexOf('/')>0&&!id.endsWith('/')&&!/\s/.test(id)}
+function loadPreferences(){
+ try{
+  const raw=globalThis.localStorage.getItem(preferenceKey), data=raw===null?{version:1,models:[]}:JSON.parse(raw)
+  if(!data||data.version!==1||!Array.isArray(data.models)||!data.models.every(preferredID))throw Error('Invalid browser shortlist')
+  preferredModels=new Set(data.models);preferenceRevision=raw;preferenceReady=true
+  preferenceMessage=preferredModels.size?`Loaded ${preferredModels.size} preferred models saved in this browser. Routing and plan order are unchanged.`:'Browser shortlist ready. No preferred models yet.'
+ }catch{preferenceReady=false;preferenceMessage='Could not read the browser shortlist. Storage may be blocked or malformed. Last confirmed choices are shown; nothing was overwritten.'}
+ paintShortlist();modelSuggestions();paintCatalog()
+}
+function togglePreferred(id){
+ if(!preferenceReady||!preferredID(id))return
+ const next=new Set(preferredModels);if(next.has(id))next.delete(id);else next.add(id)
+ try{
+  const storage=globalThis.localStorage
+  if(storage.getItem(preferenceKey)!==preferenceRevision)throw Error('Shortlist changed elsewhere')
+  const serialized=JSON.stringify({version:1,models:[...next]})
+  storage.setItem(preferenceKey,serialized)
+  if(storage.getItem(preferenceKey)!==serialized)throw Error('Unconfirmed browser save')
+  preferredModels=next;preferenceRevision=serialized
+  preferenceMessage=`Saved ${next.size} preferred models in this browser. Routing, configuration, variants, and plan order are unchanged.`
+ }catch{preferenceReady=false;preferenceMessage='Could not confirm the browser shortlist save. Storage may be blocked, full, or changed in another tab. Last confirmed choices remain on screen; reload the browser shortlist before editing.'}
+ paintShortlist();modelSuggestions();paintCatalog()
+ if(typeof document.querySelectorAll==='function'){
+  const button=[...document.querySelectorAll('[data-model-preference]')].find(node=>node.getAttribute('data-model-preference')===id)
+  if(button)button.focus();else document.querySelector('#catalog-heading')?.focus?.()
+ }
+}
+function paintShortlist(){
+ setMessage('#preference-status',preferenceMessage)
+ setMessage('#plan-preference-status',preferenceReady?'Preferred suggestions are a browser-local shortlist, not a routing priority.':preferenceMessage)
+ const filter=document.querySelector('#preferred-filter');if(filter)filter.disabled=!preferenceReady
+ setMessage('#shortlist-summary',`${preferenceReady?'Saved shortlist':'Last confirmed shortlist'} · ${preferredModels.size} models`)
+ const groups=new Map(), models=catalogModels()
+ for(const id of preferredModels){const provider=id.slice(0,id.indexOf('/'));if(!groups.has(provider))groups.set(provider,[]);groups.get(provider).push(id)}
+ const content=[]
+ for(const [provider,ids] of groups){
+  const name=catalogData?.providers.find(item=>item.id===provider)?.name||provider
+  const group=h('div',{class:'shortlist-group'},h('h3',{text:`${name} · ${ids.length}`}))
+  for(const id of ids){const model=models.find(item=>`${item.providerID}/${item.id}`===id);group.append(h('div',{class:'shortlist-row'},h('span',{},h('span',{class:'mono',text:id}),h('p',{class:'hint no-margin',text:model?model.name:catalogData?'Not in the current catalog · saved choice retained':'Catalog not loaded · saved choice retained'})),h('button',{type:'button',text:'Remove',disabled:!preferenceReady,'aria-label':`Remove ${id} from browser shortlist`,onClick:()=>togglePreferred(id)})))}
+  content.push(group)
+ }
+ mount('#preferred-list',...(content.length?content:[h('p',{class:'hint',text:preferenceReady?'Use Preferred beside any model to build your shortlist.':'No confirmed browser shortlist is available.'})]))
+}
+function chooseProvider(id){
+ document.querySelector('#provider-filter').value=id
+ paintCatalog()
+ document.querySelector('#catalog-heading')?.focus?.()
+}
+function tokenLimit(value){return Number.isSafeInteger(value)&&value>=0?value:undefined}
+function catalogRate(value){return known(value)&&value>=0?value:undefined}
+function catalogPrice(value){return catalogRate(value)===undefined?'Not provided':`$${String(value)}`}
+function capabilityText(value){return value===true?'Yes':value===false?'No':'Not provided'}
+function modalitiesText(value){return Array.isArray(value)?value.length?value.join(', '):'None advertised':'Not provided'}
+function pricingGlance(model){
+ const rates=Array.isArray(model.cost)?model.cost:[]
+ if(!rates.some(rate=>[rate.input,rate.output,rate.cache?.read,rate.cache?.write].some(value=>catalogRate(value)!==undefined)))return 'Pricing not provided'
+ if(rates.length===1&&!rates[0].tier&&catalogRate(rates[0].input)!==undefined&&catalogRate(rates[0].output)!==undefined)return `Catalog / 1M: ${catalogPrice(rates[0].input)} in · ${catalogPrice(rates[0].output)} out`
+ return `Pricing · ${rates.length} catalog rates`
+}
+function modelSection(modelID,name,label,...content){
+ const key=JSON.stringify([modelID,name])
+ const section=h('details',{class:name==='pricing'?'catalog-pricing':'model-section',onToggle:()=>modelSectionExpansion.set(key,section.open)},h('summary',{text:label}),...content)
+ if(modelSectionExpansion.get(key)===true)section.setAttribute('open','')
+ return section
+}
+function catalogPricing(model,key){
+ const section=modelSection(key,'pricing','Catalog pricing',h('p',{class:'hint',text:'USD per 1M tokens · catalog metadata, not subscription charges or an account bill. Exact named variants may have different rates.'}))
+ const rates=Array.isArray(model.cost)?model.cost:[]
+ if(!rates.length){section.append(h('p',{class:'hint',text:'Catalog prices not provided.'}));return section}
+ rates.forEach((rate,index)=>{
+  const heading=rate.tier?.type==='context'&&tokenLimit(rate.tier.size)!==undefined?`Context tier · ${number(rate.tier.size)} tokens`:`Catalog rate · ${index+1}`
+  const facts=h('dl',{class:'price-grid'})
+  for(const [label,value] of [['Input',rate.input],['Output',rate.output],['Cache read',rate.cache?.read],['Cache write',rate.cache?.write]])facts.append(h('div',{},h('dt',{text:label}),h('dd',{text:catalogPrice(value)})))
+  section.append(h('section',{class:'price-schedule','aria-label':heading},h('h4',{text:heading}),facts))
+ })
+ return section
+}
+function catalogModel(provider,model){
+ const key=`${provider.id}/${model.id}`
+ const item=h('details',{class:'model-entry',onToggle:()=>modelExpansion.set(key,item.open)})
+ if(modelExpansion.get(key)===true)item.setAttribute('open','')
+ item.append(h('summary',{},h('span',{class:'model-name'},h('strong',{text:model.name||model.id}),h('span',{class:'model-ref'},h('span',{class:'field-label',text:'Model ID'}),h('span',{class:'mono',text:key})),h('span',{class:'model-glance'},h('span',{text:`Context ${tokenLimit(model.context)!==undefined?number(model.context)+' tokens':'unknown'}`}),h('span',{text:`Output ${tokenLimit(model.output)!==undefined?number(model.output)+' tokens':'unknown'}`}),h('span',{text:pricingGlance(model)}))),h('span',{class:'model-flags'},h('span',{class:`badge ${model.enabled===true?'':'neutral'}`,text:model.enabled===true?'Enabled':model.enabled===false?'Disabled':'Enabled unknown'}),h('span',{class:`badge ${model.reasoning===true?'':'neutral'}`,text:model.reasoning===true?'Thinking':model.reasoning===false?'No thinking':'Thinking unknown'}))))
+  const facts=h('dl',{class:'model-facts model-limits'})
+  for(const [label,value] of [['Context window',model.context],['Maximum input',model.input],['Maximum output',model.output]])facts.append(h('div',{},h('dt',{text:label}),h('dd',{text:tokenLimit(value)!==undefined?`${number(value)} tokens`:'Unknown'})))
+  const capabilities=h('dl',{class:'model-facts'})
+  for(const [label,value] of [['Input modalities',modalitiesText(model.capabilities?.input)],['Output modalities',modalitiesText(model.capabilities?.output)],['Tools',capabilityText(model.capabilities?.tools)],['Temperature control',capabilityText(model.capabilities?.temperature)]])capabilities.append(h('div',{},h('dt',{text:label}),h('dd',{text:value})))
+   const variants=modelSection(key,'variants',model.variants?.length?`Named variants · ${model.variants.length}`:'No named variants advertised')
+   if(model.variants?.length)variants.append(h('p',{class:'hint',text:'Use an exact variant ID in Plans. Names do not establish thinking support.'}),h('div',{class:'variants'},...model.variants.map(name=>h('span',{class:'badge neutral',text:name}))))
+   else variants.append(h('p',{class:'hint',text:'This model does not advertise exact named variant IDs.'}))
+   const body=h('div',{class:'model-body'},modelSection(key,'limits','Token limits',facts),modelSection(key,'capabilities','Advertised capabilities',capabilities),catalogPricing(model,key),variants)
+  item.append(body)
+  const preferred=preferredModels.has(key)
+  const toggle=h('button',{type:'button',class:'preferred-toggle',disabled:!preferenceReady,'aria-pressed':String(preferred),'aria-label':`Preferred model ${key}, browser shortlist`,'data-model-preference':key,onClick:()=>togglePreferred(key)},h('span',{'aria-hidden':'true',text:preferred?'★':'☆'}),h('span',{text:'Preferred'}))
+  return h('article',{class:'model-shell'},item,h('div',{class:'model-actions'},toggle,h('span',{class:'hint no-margin',text:'Browser shortlist only · not routing priority'})))
+}
+function paintCatalog(reset=true,focusIndex){
+ if(reset)catalogLimit=30
+  const search=(document.querySelector('#model-search').value||'').trim().toLowerCase(), selected=document.querySelector('#provider-filter').value||'', thinking=document.querySelector('#thinking-filter').checked, preferredOnly=document.querySelector('#preferred-filter').checked
+ if(!catalogData){mount('#provider-list',h('p',{class:'hint',text:'Providers appear here after the catalog loads.'}));setMessage('#provider-count','—');mount('#catalog',empty('Your model library awaits.','Refresh the catalog to read provider metadata from OpenCode.'));return}
+  const groups=catalogData.providers.map(provider=>({provider,models:(provider.models||[]).filter(model=>(!preferredOnly||preferredModels.has(`${provider.id}/${model.id}`))&&(!thinking||model.reasoning===true)&&[provider.id,provider.name,model.id,model.name,`${provider.id}/${model.id}`,...(model.variants||[])].join(' ').toLowerCase().includes(search))}))
+ const total=groups.reduce((sum,group)=>sum+group.provider.models.length,0), allMatches=groups.reduce((sum,group)=>sum+group.models.length,0)
+  const choice=(id,name,count,available)=>{const saved=[...preferredModels].filter(key=>!id||key.slice(0,key.indexOf('/'))===id).length;return h('button',{type:'button',class:'provider-choice','aria-pressed':String(id===selected),'aria-label':`${name}, ${count} matching models of ${available}${saved?`, ${saved} preferred in this browser`:''}`,onClick:()=>chooseProvider(id)},h('span',{},h('strong',{text:name}),h('span',{class:'mono',text:id||'Entire catalog'})),h('span',{class:'count'},h('span',{text:search||thinking||preferredOnly?`${count} / ${available}`:String(available)}),saved?h('small',{text:` · ★ ${saved}`}):null))}
+ mount('#provider-list',choice('','All providers',allMatches,total),...groups.map(({provider,models})=>choice(provider.id,provider.name||provider.id,models.length,provider.models.length)))
+ setMessage('#provider-count',String(groups.length))
+ const active=groups.find(group=>group.provider.id===selected), scope=selected?groups.filter(group=>group.provider.id===selected):groups
+ const matches=scope.reduce((sum,group)=>sum+group.models.length,0), available=scope.reduce((sum,group)=>sum+group.provider.models.length,0)
+ setMessage('#catalog-heading',active?active.provider.name||active.provider.id:'All providers')
+ setMessage('#catalog-scope',active?`${active.provider.id} · ${available} catalog models. Search is limited to this provider.`:`${groups.length} providers · ${total} catalog models. Search covers the entire catalog.`)
+  const result=[];let shown=0,focusTarget
+  for(const {provider,models} of scope){
+   if(!models.length)continue
+   const visible=models.slice(0,Math.max(0,catalogLimit-shown))
+   const group=h('details',{class:'model-group','aria-label':`${provider.name||provider.id} models`,onToggle:()=>providerExpansion.set(provider.id,group.open)})
+   const isOpen=providerExpansion.get(provider.id)===true
+   if(isOpen)group.setAttribute('open','')
+   const summary=h('summary',{},h('strong',{text:provider.name||provider.id}),h('span',{class:'badge neutral',text:`${models.length} matching models · ${visible.length} loaded`}),h('span',{class:'mono model-group-id',text:provider.id}))
+   group.append(summary)
+   visible.forEach((model,index)=>{const row=catalogModel(provider,model);row.setAttribute('id',`catalog-model-${shown+index}`);group.append(row);if(shown+index===focusIndex)focusTarget=isOpen?row.children[0].children[0]:summary})
+   if(!visible.length)group.append(h('p',{class:'hint',text:'Models are available in this provider. Use Show more models below to load more from the existing catalog.'}))
+   shown+=visible.length;result.push(group)
+  }
+  if(!result.length)result.push(empty(preferredOnly?'No preferred models match this view.':thinking?'No confirmed thinking metadata.':available?'No models match.':groups.length?'No models listed.':'No providers listed.',preferredOnly?'Clear the filter or choose All providers. Saved choices missing from the catalog remain in the browser shortlist.':thinking?'Unknown capability is not the same as no thinking support. Clear this filter to browse models and exact named variants.':selected?'Try a different search, or choose All providers to search the entire catalog.':'Try a different search or refresh the catalog.'))
+  if(matches>shown)result.push(h('button',{type:'button',class:'catalog-more',text:`Show ${Math.min(30,matches-shown)} more models`,onClick:()=>{catalogLimit+=30;paintCatalog(false,shown)}}))
+  mount('#catalog',...result)
+  setMessage('#catalog-result',`${shown} of ${matches} matching models loaded · ${available} in this ${selected?'provider':'catalog'}`)
+  setMessage('#catalog-status',`${total} catalog models · ${groups.length} providers · Catalog read ${timeText(catalogData.generatedAt)}. Metadata is not availability.`)
+  focusTarget?.focus?.()
+}
+function modelSuggestions(){
+ const models=catalogModels(), preferred=[], other=[]
+ for(const model of models){const id=`${model.providerID}/${model.id}`;(preferredModels.has(id)?preferred:other).push(h('option',{value:id,text:`${preferredModels.has(id)?'Preferred · ':''}${model.name||model.id}`}))}
+ const missing=[...preferredModels].filter(id=>!models.some(model=>`${model.providerID}/${model.id}`===id)).map(id=>h('option',{value:id,text:'Preferred · not in current catalog'}))
+ mount('#model-suggestions',...preferred,...missing,...other)
+}
+function catalogSuggestions(){
+  modelSuggestions()
+ const filter=document.querySelector('#provider-filter'), previous=filter.value
+  const providers=catalogData?.providers||[]
+  mount('#provider-filter',h('option',{value:'',text:'All providers'}),...providers.map(provider=>h('option',{value:provider.id,text:`${provider.name||provider.id} (${provider.models.length})`})))
+  filter.value=catalogHasSelection&&(previous===''||providers.some(provider=>provider.id===previous))?previous:providers[0]?.id||''
+  catalogHasSelection=true
+}
+function assistVariant(idInput,variantInput,key){
+ idInput.setAttribute('list','model-suggestions')
+ const choices=h('datalist',{id:`variants-${key}`})
+ const update=()=>{const model=catalogModels().find(item=>`${item.providerID}/${item.id}`===idInput.value);choices.replaceChildren(...(model?.variants||[]).map(value=>h('option',{value})));variantInput.setAttribute('list',`variants-${key}`)}
+ idInput.addEventListener('input',update);variantRefreshers.push(update);update();return choices
+}
+function paintUsage(){
+ const sources=(usageData||[]).filter(item=>typeof item?.providerID==='string'&&item.providerID)
+ const cards=[]
+ for(const source of sources){
+  const id=source.providerID
+  const provider=catalogData?.providers.find(item=>item.id===id)
+  const card=h('section',{class:'panel'},h('div',{class:'panel-head'},h('div',{},h('h2',{text:provider?.name||id}),h('p',{class:'mono',text:id})),h('span',{class:`badge ${source.stale?'amber':'neutral'}`,text:source.stale?'Stale quota':source.status||'Quota unknown'})))
+  const quota=h('div',{class:'quota'})
+  if(source.reason)quota.append(h('p',{class:'hint',text:source.reason}))
+  if(!source.windows?.length)quota.append(h('p',{class:'hint',text:'No quota window is available. A provider reset time is unknown.'}))
+  for(const window of source.windows||[]){
+   const windowNode=h('div',{class:'quota-window'},h('div',{class:'bar-label'},h('strong',{text:window.label||'Quota window'}),h('span',{class:'mono',text:known(window.percent)?`${number(window.percent)}% used`:'Usage unknown'})))
+   if(known(window.percent)){
+    const fill=h('div',{class:'bar-fill'});fill.setAttribute('style',`width:${Math.max(0,Math.min(100,window.percent))}%`)
+    windowNode.append(h('div',{class:'bar-track','aria-hidden':'true'},fill))
+   }
+   const values=[]
+   if(known(window.used))values.push(`${number(window.used)} used`)
+   if(known(window.remaining))values.push(`${number(window.remaining)} remaining`)
+   if(known(window.limit))values.push(`${number(window.limit)} limit`)
+   if(values.length)windowNode.append(h('p',{class:'hint',text:`${values.join(' · ')}${window.unit?` ${window.unit}`:''}`}))
+   if(typeof window.state==='string'&&window.state&&window.state!=='ok')windowNode.append(h('p',{class:'hint',text:`Window state · ${window.state}`}))
+   windowNode.append(h('p',{class:'time',text:known(window.resetsAt)?`Provider reset${window.resetEstimated?' (estimated)':''} · ${timeText(window.resetsAt)}`:'Provider reset · unknown'}))
+   quota.append(windowNode)
+  }
+   if(source.sourceID)quota.append(h('p',{class:'time',text:`Usage source · ${source.sourceID}`}))
+   if(source.observedAt)quota.append(h('p',{class:'time',text:`Quota observed · ${timeText(source.observedAt)}${source.stale?' · STALE — cached reading; workspace refresh may return the same observation':''}`}))
+   card.append(quota)
+  cards.push(card)
+ }
+ mount('#quota-providers',...(cards.length?cards:[empty('No quota snapshot yet.','Open this page through the local gateway, or refresh quota. Missing windows stay unknown.')]))
+}
+function finite(value){return typeof value==='number'&&Number.isFinite(value)?value:undefined}
+function epoch(value){const numeric=finite(value);if(numeric!==undefined)return numeric;if(typeof value==='string'&&/^\d{4}-\d{2}-\d{2}T/.test(value)){const parsed=Date.parse(value);if(Number.isFinite(parsed))return parsed}}
+function asReport(value){return value&&value.apiVersion===1&&value.status==='ok'&&value.totals&&value.costs?value:null}
+function stringList(value){
+  if(Array.isArray(value))return value.flatMap(item=>typeof item==='string'?[item]:typeof item?.name==='string'?[item.name]:typeof item?.id==='string'?[item.id]:[])
+  if(value&&typeof value==='object')return Object.keys(value)
+  return []
+}
+function normalizeCatalogModel(model,key){
+  const id=typeof model?.id==='string'&&model.id?model.id:typeof key==='string'?key:''
+  const reasoning=[model?.reasoning, model?.capabilities?.reasoning, model?.capabilities?.thinking].find(item=>typeof item==='boolean')
+  const limits={}
+  for(const field of ['context','input','output']){const value=tokenLimit(model?.[field])??tokenLimit(model?.limit?.[field]);if(value!==undefined)limits[field]=value}
+  const capabilities={}
+  for(const field of ['tools','temperature'])if(typeof model?.capabilities?.[field]==='boolean')capabilities[field]=model.capabilities[field]
+  for(const field of ['input','output'])if(Array.isArray(model?.capabilities?.[field]))capabilities[field]=model.capabilities[field].filter(item=>typeof item==='string'&&item.length>0)
+   const cost=Array.isArray(model?.cost)?model.cost.flatMap(rate=>{
+    if(!rate||typeof rate!=='object'||(Object.hasOwn(rate,'tier')&&(!rate.tier||rate.tier.type!=='context'||tokenLimit(rate.tier.size)===undefined)))return []
+   const entry={cache:{}}
+   for(const field of ['input','output'])if(catalogRate(rate?.[field])!==undefined)entry[field]=rate[field]
+   for(const field of ['read','write'])if(catalogRate(rate?.cache?.[field])!==undefined)entry.cache[field]=rate.cache[field]
+   if(rate?.tier?.type==='context'&&tokenLimit(rate.tier.size)!==undefined)entry.tier={type:'context',size:rate.tier.size}
+    return [entry.input,entry.output,entry.cache.read,entry.cache.write].some(value=>catalogRate(value)!==undefined)?[entry]:[]
+  }):[]
+  return {id,name:typeof model?.name==='string'?model.name:id,...(reasoning===undefined?{}:{reasoning}),...(typeof model?.enabled==='boolean'?{enabled:model.enabled}:{}),...limits,capabilities,cost,variants:stringList(model?.variants)}
+}
+function normalizeCatalogProvider(provider){
+  const models=Array.isArray(provider?.models)?provider.models.map(model=>normalizeCatalogModel(model)):provider?.models&&typeof provider.models==='object'?Object.entries(provider.models).map(([key,model])=>normalizeCatalogModel(model,key)):[]
+  return {id:typeof provider?.id==='string'?provider.id:'',name:typeof provider?.name==='string'?provider.name:typeof provider?.id==='string'?provider.id:'Provider',models}
+}
+function usageWindows(windows){
+  if(!Array.isArray(windows))return []
+  return windows.map(item=>{
+    const percent=finite(item?.percent)??finite(item?.usedPercent)
+    const resetsAt=epoch(item?.resetsAt)
+    return {label:typeof item?.label==='string'?item.label:typeof item?.name==='string'?item.name:'Quota window',...(percent===undefined?{}:{percent}),...(resetsAt===undefined?{}:{resetsAt}),...(item?.resetEstimated===true?{resetEstimated:true}:{}),...(finite(item?.used)!==undefined?{used:item.used}:{}),...(finite(item?.remaining)!==undefined?{remaining:item.remaining}:{}),...(finite(item?.limit)!==undefined?{limit:item.limit}:{}),...(typeof item?.unit==='string'?{unit:item.unit}:{}),...(typeof item?.state==='string'?{state:item.state}:{})}
+  })
+}
+function usageEntry(providerID, source){
+  const cooldowns=Array.isArray(source?.cooldowns)?source.cooldowns.flatMap(item=>{const until=epoch(item?.until);return until===undefined?[]:[{modelID:typeof item?.modelID==='string'?item.modelID:typeof item?.id==='string'?item.id:providerID||'Provider',until}]}):undefined
+  const observedAt=epoch(source?.observedAt)??epoch(source?.checkedAt)
+  return {providerID,status:typeof source?.status==='string'?source.status:typeof source?.availability==='string'?source.availability:'unknown',stale:source?.stale===true,...(observedAt===undefined?{}:{observedAt}),...(typeof source?.reason==='string'?{reason:source.reason}:typeof source?.error==='string'?{reason:source.error}:{}),...(typeof source?.sourceID==='string'?{sourceID:source.sourceID}:{}),windows:usageWindows(source?.windows),...(cooldowns?{cooldownsKnown:true,cooldowns}:{})}
+}
+function usageFromSources(sources, fallback){
+  if(!sources||typeof sources!=='object'||Array.isArray(sources))return null
+  return Object.entries(sources).map(([providerID, source])=>{
+    const entry=source&&typeof source==='object'?source:{}
+    return usageEntry(providerID,{...entry,status:entry.status||entry.availability||fallback?.status,reason:entry.reason||(typeof entry.error==='string'?entry.error:undefined)||(typeof fallback?.reason==='string'?fallback.reason:undefined)})
+  })
+}
+function attachCooldowns(entries, cooldowns){
+  if(!Array.isArray(cooldowns))return entries
+  const rows=cooldowns.flatMap(item=>{const until=epoch(item?.until);if(until===undefined)return [];const modelID=typeof item?.modelID==='string'?item.modelID:typeof item?.id==='string'?item.id:'Provider';const providerID=typeof item?.providerID==='string'?item.providerID:modelID.split('/')[0];return [{providerID,modelID,until}]})
+  const seen=new Set(entries.map(item=>item.providerID))
+  for(const row of rows)if(row.providerID&&!seen.has(row.providerID)){entries.push(usageEntry(row.providerID,{status:'unknown',windows:[],cooldowns:[]}));seen.add(row.providerID)}
+  return entries.map(entry=>{const merged=[...(entry.cooldowns||[]),...rows.filter(row=>row.providerID===entry.providerID).map(({modelID,until})=>({modelID,until}))];const seen=new Set();return {...entry,cooldownsKnown:true,cooldowns:merged.filter(item=>{const key=`${item.modelID}\0${item.until}`;if(seen.has(key))return false;seen.add(key);return true})}})
+}
+function renderCatalog(data){
+  const list=Array.isArray(data)?data:Array.isArray(data?.providers)?data.providers:null
+  if(!list)throw Error('Unsupported catalog')
+  catalogData={generatedAt:epoch(data?.generatedAt),providers:list.map(normalizeCatalogProvider)}
+    catalogSuggestions();for(const update of variantRefreshers)update();paintShortlist();paintCatalog();paintOverview();paintUsage()
+}
+function renderDashboard(data){
+  if(!data||typeof data!=='object'||Array.isArray(data))throw Error('Unsupported dashboard')
+  dashboardData=data
+  const report=asReport(data.report)||asReport(data)
+   currentReport=report
+   status.textContent=report?`Report for project ${report.projectID} · generated ${new Date(report.generatedAt).toLocaleString()}`:telemetryIssue()
+  const listed=Array.isArray(data.cooldowns)?data.cooldowns:report?.cooldowns
+  const usage=Array.isArray(data.usage)?data.usage.map(item=>usageEntry(typeof item?.providerID==='string'?item.providerID:typeof item?.id==='string'?item.id:'',item)):usageFromSources(data.availability?.sources, data.availability)||usageFromSources(data.sources, data)||(report?usageFromSources(report.availability?.sources, report.availability):null)
+  const hasUsage=Array.isArray(data.usage)||!!data.availability||!!data.sources||!!report?.availability||Array.isArray(listed)
+  usageData=hasUsage?attachCooldowns(usage||[], listed):null
+  paintOverview();paintUsage()
+   const label=document.querySelector('#project-label'), projectID=typeof data.projectID==='string'?data.projectID:report?.projectID
+  if(label)label.textContent=projectID?`PROJECT / ${projectID}`:'NOT CONNECTED'
+  const when=epoch(data.generatedAt)??epoch(report?.generatedAt)
+    setMessage('#dashboard-status',`Workspace snapshot ${timeText(when)}. ${telemetryIssue()||'Telemetry shown from the report timestamp.'} No inference or recovery probes. Quota timestamps identify freshness; rereading does not guarantee new observations.`)
+  const quotaStatus=data.availability?.status||report?.availability?.status
+    setMessage('#quota-status',`${hasUsage?`Quota snapshot ${timeText(epoch(data.availability?.updatedAt)??epoch(data.updatedAt))}.${typeof quotaStatus==='string'?` Source status: ${quotaStatus}.`:''}`:'No quota payload in this workspace snapshot.'} No inference or recovery probes. Quota timestamps identify freshness; rereading does not guarantee new observations.`.trim())
+}
+async function refreshWorkspace(){
+ const buttons=['#refresh-dashboard','#refresh-quota'];for(const selector of buttons)document.querySelector(selector).disabled=true
+ setMessage('#dashboard-status','Reading workspace…');setMessage('#quota-status','Reading quota…')
+ try{
+  const response=await fetch('/api/dashboard',{cache:'no-store',credentials:'same-origin'})
+  if(!response.ok)throw Error('Gateway unavailable')
+  const data=await response.json();renderDashboard(data)
+ }catch{
+  setMessage('#dashboard-status','Could not refresh. Start the opted-in local gateway, then try again. Any previous snapshot stays visible.')
+  setMessage('#quota-status','Could not refresh quota. Any previous snapshot stays visible; its timestamps have not changed.')
+ }finally{for(const selector of buttons)document.querySelector(selector).disabled=false}
+}
+async function refreshCatalog(){
+ const button=document.querySelector('#refresh-providers');button.disabled=true;setMessage('#catalog-status','Reading the OpenCode catalog…')
+ try{
+  const response=await fetch('/api/providers',{cache:'no-store',credentials:'same-origin'})
+  if(!response.ok)throw Error('Catalog unavailable')
+  const data=await response.json();renderCatalog(data)
+ }catch{setMessage('#catalog-status','Could not refresh the catalog. Start the local gateway, then try again. Any previous catalog stays visible.')}
+ finally{button.disabled=false}
+}
+function paintAccess(){const apply=document.querySelector('#apply-options');if(apply)apply.disabled=!canWrite}
+function modelBits(model){return typeof model==='string'?{id:model,variant:''}:{id:model?.id??'',variant:model?.variant??''}}
+function writeModel(plan,index,id,variant){draft.plans[plan][index]=variant?{id,variant}:id}
+function chainLabel(models){const text=chainText(models);return text||'This chain is empty.'}
+function pooled(){const ids=new Set();for(const group of draft.sharedRateLimits||[]){if(!Array.isArray(group))continue;for(const model of group){const id=modelBits(model).id;if(id)ids.add(id)}}return ids}
+function probed(){const ids=new Set();for(const model of draft.probeRateLimits||[]){const id=modelBits(model).id;if(id)ids.add(id)}return ids}
+function normalizeModel(model){
+  const {id,variant}=typeof model==='string'?{id:model,variant:''}:modelBits(model)
+  const modelID=String(id).trim(), effort=String(variant).trim()
+  const split=modelID.indexOf('/')
+  if(split<=0||split===modelID.length-1||/\s/.test(modelID))throw Error('Each model must be providerID/modelID')
+  return effort?{id:modelID,variant:effort}:modelID
+}
+function normalizePlans(plans){
+  if(!plans||typeof plans!=='object'||Array.isArray(plans))throw Error('Plans are missing')
+  const out=Object.create(null)
+  for(const name of Object.keys(plans)){
+    const models=plans[name]
+    if(!Array.isArray(models)||!models.length)throw Error(`Plan ${name} needs a model`)
+    out[name]=models.map(normalizeModel)
+  }
+  return out
+}
+function normalizeMap(map,label){
+  const out=Object.create(null)
+  if(map===undefined)return out
+  if(!map||typeof map!=='object'||Array.isArray(map))throw Error(`Each ${label} needs a plan`)
+  for(const name of Object.keys(map)){
+    if(typeof map[name]!=='string'||!map[name].trim())throw Error(`Each ${label} needs a plan`)
+    out[name]=map[name].trim()
+  }
+  return out
+}
 function editedOptions(){
-  const plans=Object.create(null);for(const line of lines(plansInput.value)){const gap=line.indexOf(' ');if(gap<1)throw Error('Each plan line needs a name and provider/model');const plan=line.slice(0,gap),model=modelFrom(line.slice(gap+1));(plans[plan]??=[]).push(model)}
-  const pair=(value,label)=>{const out=Object.create(null);for(const line of lines(value)){const [name,plan]=line.split(/\s+/);if(!name||!plan)throw Error(`Each ${label} line needs two names`);out[name]=plan}return out}
-  return {...saved,...{plans,agents:pair(agentsInput.value,'agent'),workTypes:pair(workTypesInput.value,'work type')}}
+  if(!draft)throw Error('Load project options before applying')
+  const out=ownCopy(draft)
+  out.plans=normalizePlans(out.plans)
+  out.agents=normalizeMap(out.agents,'agent')
+  out.workTypes=normalizeMap(out.workTypes,'work type')
+  for(const [name,plan] of Object.entries(out.agents))if(!Object.hasOwn(out.plans,plan))throw Error(`Agent ${name} uses a plan that is not listed`)
+  for(const [name,plan] of Object.entries(out.workTypes))if(!Object.hasOwn(out.plans,plan))throw Error(`Work type ${name} uses a plan that is not listed`)
+  if(out.sharedRateLimits!==undefined){
+    if(!Array.isArray(out.sharedRateLimits))throw Error('Shared pools must be a list')
+    out.sharedRateLimits=out.sharedRateLimits.map(group=>{
+      if(!Array.isArray(group))throw Error('A shared pool must be a list of models')
+      const ids=group.map(model=>typeof normalizeModel(model)==='string'?normalizeModel(model):normalizeModel(model).id)
+      if(ids.length<2)throw Error('A shared pool needs at least two models')
+      if(new Set(ids).size!==ids.length)throw Error('A shared pool lists the same model twice')
+      return ids
+    })
+  }
+  if(out.probeRateLimits!==undefined){
+    if(!Array.isArray(out.probeRateLimits))throw Error('Probes must be a list')
+    out.probeRateLimits=out.probeRateLimits.map(normalizeModel)
+  }
+  return out
 }
-document.querySelector('#load-options').addEventListener('click',async()=>{
+function show(options){draft=ownCopy(options);renderBoard();paintAccess()}
+function setPlanModels(plan,models){if(!draft?.plans)throw Error('Load project options before applying');draft.plans[plan]=models.slice();renderBoard()}
+function moveItem(list,index,delta){const target=index+delta;if(target<0||target>=list.length)return;list.splice(target,0,list.splice(index,1)[0]);renderBoard()}
+function moveKey(object,key,delta){
+  const keys=Object.keys(object), index=keys.indexOf(key), target=index+delta
+  if(index<0||target<0||target>=keys.length)return object
+  keys.splice(target,0,keys.splice(index,1)[0])
+  const next=Object.create(null)
+  for(const name of keys)next[name]=object[name]
+  return next
+}
+const planExpansion=new Map(), expandedCategories=new Set(), dragState={kind:'',key:''}
+function categoryOfPlan(plan){return planCategories.includes(planCategoryAssignments[plan])?planCategoryAssignments[plan]:''}
+function orderPlans(entries){
+  const next=Object.create(null)
+  for(const [name,value] of entries)next[name]=value
+  draft.plans=next
+}
+function movePlanBefore(plan,target){
+  if(plan===target)return false
+  const entries=Object.entries(draft.plans||{})
+  const from=entries.findIndex(([name])=>name===plan)
+  if(from<0)return false
+  const [entry]=entries.splice(from,1)
+  const at=entries.findIndex(([name])=>name===target)
+  if(at<0){entries.splice(from,0,entry);return false}
+  entries.splice(at,0,entry)
+  orderPlans(entries)
+  return true
+}
+function movePlanToGroupEnd(plan,category){
+  const entries=Object.entries(draft.plans||{})
+  const from=entries.findIndex(([name])=>name===plan)
+  if(from<0)return false
+  const [entry]=entries.splice(from,1)
+  let at=-1
+  for(const [index,[name]] of entries.entries())if(categoryOfPlan(name)===category)at=index+1
+  entries.splice(at<0?entries.length:at,0,entry)
+  orderPlans(entries)
+  return true
+}
+function assignCategory(plan,category){
+  if(categoryOfPlan(plan)===category)return true
+  if(!categoryReady){optionsStatus.textContent=categoryMessage;return false}
+  if(category)planCategoryAssignments[plan]=category;else delete planCategoryAssignments[plan]
+  if(saveCategories())return true
+  optionsStatus.textContent=categoryMessage
+  return false
+}
+function setCategories(next){
+  const before=planCategories
+  planCategories=next
+  if(saveCategories())return true
+  planCategories=before
+  optionsStatus.textContent=categoryMessage
+  return false
+}
+function moveCategoryBefore(name,target){
+  if(name===target)return false
+  const next=planCategories.filter(item=>item!==name)
+  const at=next.indexOf(target)
+  if(at<0)return false
+  next.splice(at,0,name)
+  return setCategories(next)
+}
+function moveCategory(name,delta){
+  const index=planCategories.indexOf(name), target=index+delta
+  if(index<0||target<0||target>=planCategories.length)return
+  const next=planCategories.slice()
+  next.splice(target,0,next.splice(index,1)[0])
+  if(setCategories(next))renderBoard()
+}
+function startDrag(event,kind,key){
+  dragState.kind=kind
+  dragState.key=key
+  if(!event.dataTransfer)return
+  event.dataTransfer.effectAllowed='move'
+  event.dataTransfer.setData?.('text/plain',key||kind)
+  event.dataTransfer.setDragImage?.(event.currentTarget,8,8)
+}
+function endDrag(){
+  dragState.kind=''
+  dragState.key=''
+  const root=document.querySelector('#plans')
+  for(const node of root?.children||[])node.classList?.remove?.('drop-target')
+}
+const categoryKey='quartermaster.plan-categories.v1'
+let planCategories=[], planCategoryAssignments=Object.create(null), categoriesLoaded=false, categoryReady=false
+let categoryMessage='Plan categories have not been read.', planFilter='', categoryFilter='all', planFilterStatus=null
+function ensureCategories(){if(categoriesLoaded)return;categoriesLoaded=true;loadCategories()}
+function loadCategories(){
+  try{
+    if(typeof localStorage==='undefined'||!localStorage)throw Error('unavailable')
+    const raw=localStorage.getItem(categoryKey)
+    const data=raw===null?{version:1,categories:[],assignments:{}}:JSON.parse(raw)
+    if(!data||data.version!==1||!Array.isArray(data.categories)||!data.assignments||typeof data.assignments!=='object'||Array.isArray(data.assignments))throw Error('invalid')
+    if(!data.categories.every(name=>typeof name==='string'&&name.trim()===name&&name.length>0&&name.length<=80))throw Error('invalid')
+    const assignments=Object.create(null)
+    for(const [plan,category] of Object.entries(data.assignments)){
+      if(typeof plan!=='string'||!plan||!data.categories.includes(category))throw Error('invalid')
+      assignments[plan]=category
+    }
+    planCategories=data.categories.slice()
+    planCategoryAssignments=assignments
+    categoryReady=true
+    categoryMessage=planCategories.length?`${planCategories.length} browser categories. They do not change routing or the saved file.`:'No browser categories yet. They stay in this browser and do not change routing.'
+  }catch{
+    categoryReady=false
+    planCategories=[]
+    planCategoryAssignments=Object.create(null)
+    categoryMessage='Could not read plan categories. Storage may be blocked or malformed. Nothing was overwritten.'
+  }
+}
+function saveCategories(){
+  if(!categoryReady)return false
+  try{
+    const assignments=Object.create(null)
+    for(const [plan,category] of Object.entries(planCategoryAssignments))if(planCategories.includes(category))assignments[plan]=category
+    localStorage.setItem(categoryKey,JSON.stringify({version:1,categories:planCategories,assignments}))
+    return true
+  }catch{
+    categoryReady=false
+    categoryMessage='Could not save plan categories. The routing draft was not changed.'
+    return false
+  }
+}
+function planSearchText(plan){
+  const models=draft?.plans?.[plan]
+  const ids=Array.isArray(models)?models.map(model=>modelBits(model).id).join(' '):''
+  return `${plan} ${planCategoryAssignments[plan]||''} ${ids}`.toLowerCase()
+}
+function hidePlanNode(node,hidden){
+  node.hidden=hidden
+  if(typeof node.removeAttribute==='function'){if(hidden)node.setAttribute('hidden','');else node.removeAttribute('hidden')}
+  else if(node.attributes){if(hidden)node.attributes.hidden='';else delete node.attributes.hidden}
+}
+function paintPlanFilter(){
+  const root=document.querySelector('#plans')
+  if(!root||!root.children)return
+  const query=planFilter.trim().toLowerCase()
+  const matches=[], headings=new Set()
+  for(const card of root.children){
+    const heading=card.getAttribute?.('data-category-heading')??card.attributes?.['data-category-heading']
+    if(typeof heading==='string'){headings.add(heading);continue}
+    const search=card.getAttribute?.('data-search')??card.attributes?.['data-search']
+    if(typeof search!=='string')continue
+    const category=card.getAttribute?.('data-category')??card.attributes?.['data-category']??''
+    const inCategory=categoryFilter==='uncategorized'?!category:categoryFilter==='all'||category===categoryFilter
+    matches.push({card,category,matched:inCategory&&(!query||search.includes(query))})
+  }
+  const categoryOpen=category=>expandedCategories.has(category)||(categoryFilter!=='all'&&(categoryFilter==='uncategorized'?category==='':category===categoryFilter))
+  for(const {card,category,matched} of matches)hidePlanNode(card,!matched||(headings.size>0&&!categoryOpen(category)))
+  for(const node of root.children){
+    const heading=node.getAttribute?.('data-category-heading')??node.attributes?.['data-category-heading']
+    if(typeof heading!=='string')continue
+    hidePlanNode(node,!matches.some(match=>match.matched&&match.category===heading))
+  }
+  if(planFilterStatus)planFilterStatus.textContent=`Showing ${matches.filter(match=>match.matched).length} of ${matches.length} plans. ${categoryMessage}`
+}
+function renderPlanTools(){
+  ensureCategories()
+  const tools=document.querySelector('#plan-tools')
+  if(!tools||typeof tools.replaceChildren!=='function')return
+  const filter=h('input',{type:'text','aria-label':'Filter plans',placeholder:'Filter by plan or model',value:planFilter,onInput:()=>{planFilter=filter.value;paintPlanFilter()}})
+  const category=h('select',{'aria-label':'Filter by category',onChange:()=>{categoryFilter=category.value;paintPlanFilter()}})
+  category.append(h('option',{value:'all',text:'All categories'}),h('option',{value:'uncategorized',text:'Uncategorized'}))
+  for(const name of planCategories)category.append(h('option',{value:name,text:name}))
+  if(!['all','uncategorized',...planCategories].includes(categoryFilter))categoryFilter='all'
+  category.value=categoryFilter
+  const created=h('input',{type:'text','aria-label':'New category name',placeholder:'New category'})
+  const add=h('button',{type:'button',text:'Add category',onClick:()=>{
+    const name=created.value.trim()
+    if(!categoryReady){optionsStatus.textContent=categoryMessage;return}
+    if(!name||name.length>80){optionsStatus.textContent='Enter a category name first.';return}
+    if(name.toLowerCase()==='uncategorized'||name.toLowerCase()==='all categories'){optionsStatus.textContent='Choose another category name.';return}
+    if(planCategories.includes(name)){optionsStatus.textContent='That category already exists.';return}
+    planCategories.push(name)
+    if(!saveCategories()){planCategories.pop();optionsStatus.textContent=categoryMessage;return}
+    renderBoard()
+  }})
+  const remove=h('button',{type:'button',text:'Remove category',onClick:()=>{
+    if(!categoryReady||!planCategories.includes(categoryFilter)){optionsStatus.textContent='Choose a category to remove.';return}
+    const removed=categoryFilter
+    planCategories=planCategories.filter(name=>name!==removed)
+    expandedCategories.delete(removed)
+    for(const [plan,name] of Object.entries(planCategoryAssignments))if(name===removed)delete planCategoryAssignments[plan]
+    categoryFilter='all'
+    if(!saveCategories()){optionsStatus.textContent=categoryMessage;return}
+    renderBoard()
+  }})
+  planFilterStatus=h('p',{class:'hint',text:''})
+  tools.replaceChildren(h('div',{class:'toolbar'},filter,category,created,add,remove),planFilterStatus)
+}
+function renderBoard(){
+  if(typeof document.createElement!=='function'||!draft)return
+  const mounts={pools:document.querySelector('#shared-pools'),probes:document.querySelector('#probes'),plans:document.querySelector('#plans'),modules:document.querySelector('#modules'),agents:document.querySelector('#agents'),work:document.querySelector('#work-types'),limits:document.querySelector('#limits')}
+   if(Object.values(mounts).some(node=>!node||typeof node.replaceChildren!=='function'))return
+   variantRefreshers=[]
+  const inPool=pooled(), inProbe=probed()
+  mounts.pools.replaceChildren()
+  const groups=Array.isArray(draft.sharedRateLimits)?draft.sharedRateLimits:[]
+  if(!groups.length)mounts.pools.append(h('p',{class:'hint',text:'No shared pool yet.'}))
+  groups.forEach((group,groupIndex)=>{
+    const card=h('div',{class:'plan'})
+    card.append(h('p',{text:`Pool ${groupIndex+1}`}))
+    group.forEach((model,index)=>{
+      const idInput=h('input',{type:'text',list:'model-suggestions','aria-label':`Pool ${groupIndex+1} model ${index+1}`,value:modelBits(model).id,onInput:()=>{draft.sharedRateLimits[groupIndex][index]=idInput.value}})
+      card.append(h('div',{class:'row pool-row'},idInput,h('span',{},
+        index?h('button',{type:'button',text:'Earlier',onClick:()=>moveItem(draft.sharedRateLimits[groupIndex],index,-1)}):null,
+        index<group.length-1?h('button',{type:'button',text:'Later',onClick:()=>moveItem(draft.sharedRateLimits[groupIndex],index,1)}):null,
+        h('button',{type:'button',text:'Remove',onClick:()=>{draft.sharedRateLimits[groupIndex].splice(index,1);if(!draft.sharedRateLimits[groupIndex].length)draft.sharedRateLimits.splice(groupIndex,1);renderBoard()}}),
+      )))
+    })
+    card.append(h('div',{class:'toolbar'},h('button',{type:'button',text:'Add model to pool',onClick:()=>{draft.sharedRateLimits[groupIndex].push('');renderBoard()}}),h('button',{type:'button',text:'Remove pool',onClick:()=>{draft.sharedRateLimits.splice(groupIndex,1);renderBoard()}})))
+    mounts.pools.append(card)
+  })
+  mounts.pools.append(h('button',{type:'button',text:'Add shared pool',onClick:()=>{if(!Array.isArray(draft.sharedRateLimits))draft.sharedRateLimits=[];draft.sharedRateLimits.push(['','']);renderBoard()}}))
+  mounts.probes.replaceChildren()
+  const probes=Array.isArray(draft.probeRateLimits)?draft.probeRateLimits:[]
+  const note=poolProbeNote()
+  if(note)mounts.probes.append(h('p',{class:'warn',text:note}))
+  probes.forEach((model,index)=>{
+    const bits=modelBits(model)
+    const variantInput=h('input',{type:'text','aria-label':`Probe ${index+1} variant`,value:bits.variant,placeholder:'Exact variant (optional)'})
+    const idInput=h('input',{type:'text','aria-label':`Probe ${index+1} model`,value:bits.id})
+    const writeProbe=()=>{draft.probeRateLimits[index]=variantInput.value?{id:idInput.value,variant:variantInput.value}:idInput.value}
+    idInput.addEventListener('input',writeProbe)
+    variantInput.addEventListener('input',writeProbe)
+    const suggestions=assistVariant(idInput,variantInput,`probe-${index}`)
+    mounts.probes.append(h('div',{class:'row'},h('span',{text:String(index+1)}),idInput,variantInput,h('button',{type:'button',text:'Remove',onClick:()=>{draft.probeRateLimits.splice(index,1);renderBoard()}})),suggestions)
+  })
+  mounts.probes.append(h('button',{type:'button',text:'Add probe',onClick:()=>{if(!Array.isArray(draft.probeRateLimits))draft.probeRateLimits=[];draft.probeRateLimits.push('');renderBoard()}}))
+  const usedBy=plan=>[...Object.keys(draft.agents||{}).filter(agent=>draft.agents[agent]===plan),...Object.keys(draft.workTypes||{}).filter(work=>draft.workTypes[work]===plan)]
+   renderPlanTools()
+   mounts.plans.replaceChildren()
+   const planNames=Object.keys(draft.plans||{})
+   const categoryOf=categoryOfPlan
+   const grouped=planNames.some(plan=>categoryOf(plan))
+   const planGroups=grouped?[...planCategories,''].flatMap(name=>{
+     const members=planNames.filter(plan=>categoryOf(plan)===name)
+     return members.length?[{label:name||'Uncategorized',key:name,members}]:[]
+   }):[{label:'',key:'',members:planNames}]
+   for(const group of planGroups){
+     if(group.label){
+       const key=group.key
+        const toggleLabel=()=>`${expandedCategories.has(key)?'▾':'▸'} ${group.label}`
+        const toggle=h('button',{type:'button',class:'category-toggle','aria-expanded':String(expandedCategories.has(key)),text:toggleLabel(),onClick:()=>{
+          if(expandedCategories.has(key))expandedCategories.delete(key);else expandedCategories.add(key)
+          toggle.setAttribute('aria-expanded',String(expandedCategories.has(key)))
+         toggle.textContent=toggleLabel()
+         paintPlanFilter()
+       }})
+       const heading=h('h3',{class:'plan-category','data-category-heading':key,
+         onDragOver:event=>{
+           if(!dragState.kind||(dragState.kind==='category'&&dragState.key===key))return
+           event.preventDefault()
+           if(event.dataTransfer)event.dataTransfer.dropEffect='move'
+           heading.classList?.add('drop-target')
+         },
+         onDragLeave:()=>heading.classList?.remove('drop-target'),
+         onDrop:event=>{
+           if(!dragState.kind)return
+           event.preventDefault()
+           heading.classList?.remove('drop-target')
+           const source=dragState.key, kind=dragState.kind
+           dragState.kind=''
+           if(kind==='category'){if(moveCategoryBefore(source,key))renderBoard();return}
+           if(!assignCategory(source,key)){renderBoard();return}
+           if(movePlanToGroupEnd(source,key))renderBoard()
+         }},
+         h('span',{class:'drag-handle',draggable:'true','aria-hidden':'true',title:'Drag to reorder',text:'⋮⋮',onDragStart:event=>startDrag(event,'category',key),onDragEnd:endDrag}),
+         toggle,
+         h('button',{type:'button',class:'mini','aria-label':`Move ${group.label} category earlier`,text:'←',onClick:()=>moveCategory(key,-1)}),
+         h('button',{type:'button',class:'mini','aria-label':`Move ${group.label} category later`,text:'→',onClick:()=>moveCategory(key,1)}))
+       mounts.plans.append(heading)
+     }
+     for(const plan of group.members){
+     const models=draft.plans[plan]
+     const card=h('details',{class:'plan','data-search':planSearchText(plan),'data-category':categoryOf(plan),onToggle:()=>planExpansion.set(plan,card.open),
+       onDragOver:event=>{
+         if(dragState.kind!=='plan'||dragState.key===plan)return
+         event.preventDefault()
+         if(event.dataTransfer)event.dataTransfer.dropEffect='move'
+         card.classList?.add('drop-target')
+       },
+       onDragLeave:()=>card.classList?.remove('drop-target'),
+       onDrop:event=>{
+         if(dragState.kind!=='plan'||dragState.key===plan)return
+         event.preventDefault()
+         card.classList?.remove('drop-target')
+         const source=dragState.key
+         dragState.kind=''
+         if(!assignCategory(source,categoryOf(plan))){renderBoard();return}
+         if(movePlanBefore(source,plan))renderBoard()
+       }})
+    if(planExpansion.has(plan)?planExpansion.get(plan):planNames.length<=6||plan===planNames[0])card.setAttribute('open','')
+    const chain=h('span',{class:'chain',text:chainLabel(models)})
+    const refresh=()=>{chain.textContent=chainLabel(draft.plans[plan])}
+    const category=h('select',{'aria-label':`${plan} category`,onMouseDown:event=>event.stopPropagation?.(),onClick:event=>event.stopPropagation?.(),onChange:()=>{
+      if(!categoryReady){optionsStatus.textContent=categoryMessage;category.value=categoryOf(plan);return}
+      const previous=planCategoryAssignments[plan]
+      if(category.value)planCategoryAssignments[plan]=category.value;else delete planCategoryAssignments[plan]
+      if(!saveCategories()){
+        if(previous)planCategoryAssignments[plan]=previous;else delete planCategoryAssignments[plan]
+        optionsStatus.textContent=categoryMessage
+        category.value=previous||''
+        return
+      }
+      renderBoard()
+    }})
+    category.append(h('option',{value:'',text:'Uncategorized'}))
+    for(const name of planCategories)category.append(h('option',{value:name,text:name}))
+    category.value=categoryOf(plan)
+    card.append(h('summary',{},h('span',{class:'drag-handle',draggable:'true','aria-hidden':'true',title:'Drag to reorder',text:'⋮⋮',onDragStart:event=>startDrag(event,'plan',plan),onDragEnd:endDrag}),h('strong',{text:plan}),category,h('span',{text:usedBy(plan).length?` · ${usedBy(plan).join(', ')}`:''}),chain))
+    models.forEach((model,index)=>{
+      const bits=modelBits(model)
+    const idInput=h('input',{type:'text',list:'model-suggestions','aria-label':`${plan} model ${index+1}`,value:bits.id,onInput:()=>{writeModel(plan,index,idInput.value,modelBits(draft.plans[plan][index]).variant);refresh()}})
+    const variantInput=h('input',{type:'text','aria-label':`${plan} variant ${index+1}`,value:bits.variant,placeholder:'Exact variant (optional)',onInput:()=>{writeModel(plan,index,modelBits(draft.plans[plan][index]).id,variantInput.value);refresh()}})
+      const suggestions=assistVariant(idInput,variantInput,`plan-${encodeURIComponent(plan)}-${index}`)
+      card.append(suggestions)
+      const badges=h('span',{})
+      if(inPool.has(bits.id))badges.append(h('span',{class:'badge',text:'shared pool'}))
+      if(inProbe.has(bits.id))badges.append(h('span',{class:'badge',text:'probe'}))
+      card.append(h('div',{class:'row'},h('span',{text:String(index+1)}),idInput,variantInput,h('span',{},
+        index?h('button',{type:'button',text:'Earlier',onClick:()=>moveItem(draft.plans[plan],index,-1)}):null,
+        index<models.length-1?h('button',{type:'button',text:'Later',onClick:()=>moveItem(draft.plans[plan],index,1)}):null,
+        h('button',{type:'button',text:'Remove',onClick:()=>{draft.plans[plan].splice(index,1);renderBoard()}}),
+        badges,
+      )))
+    })
+      card.append(h('div',{class:'toolbar'},
+        h('button',{type:'button',text:'Add model',onClick:()=>{draft.plans[plan].push('');renderBoard()}}),
+       planNames[0]!==plan?h('button',{type:'button',text:'Move plan earlier',onClick:()=>{draft.plans=moveKey(draft.plans,plan,-1);renderBoard()}}):null,
+      planNames.at(-1)!==plan?h('button',{type:'button',text:'Move plan later',onClick:()=>{draft.plans=moveKey(draft.plans,plan,1);renderBoard()}}):null,
+      h('button',{type:'button',text:'Remove plan',onClick:()=>{delete draft.plans[plan];renderBoard()}}),
+    ))
+      mounts.plans.append(card)
+     }
+    }
+    paintPlanFilter()
+   const planName=h('input',{type:'text','aria-label':'New plan name',placeholder:'plan name'})
+  mounts.plans.append(h('div',{class:'toolbar'},planName,h('button',{type:'button',text:'Add plan',onClick:()=>{
+    const name=planName.value.trim()
+    if(!name){optionsStatus.textContent='Enter a plan name first.';return}
+    if(!draft.plans||typeof draft.plans!=='object'||Array.isArray(draft.plans))draft.plans=Object.create(null)
+    if(Object.hasOwn(draft.plans,name)){optionsStatus.textContent='That plan is already listed.';return}
+    draft.plans[name]=['']
+    renderBoard()
+  }})))
+  renderBindings(mounts.agents,'agent','agents',planNames)
+  renderBindings(mounts.work,'work type','workTypes',planNames)
+  renderModules(mounts.modules)
+  mounts.limits.replaceChildren()
+  if(typeof draft.providerCooldownMs==='number'){
+    const cooldown=h('input',{type:'number','aria-label':'Cooldown floor milliseconds',value:String(draft.providerCooldownMs),onInput:()=>{draft.providerCooldownMs=Number(cooldown.value)}})
+    mounts.limits.append(h('label',{text:'Cooldown floor in milliseconds'}),cooldown)
+  }
+  const exclusive=(draft.exclusiveModels||[]).map(model=>modelBits(model).id).filter(Boolean)
+  if(exclusive.length)mounts.limits.append(h('p',{text:`Exclusive models: ${exclusive.join(', ')}`}))
+  const sources=Object.entries(draft.usageSources||{}).map(([provider,source])=>`${provider} → ${source}`)
+  if(sources.length)mounts.limits.append(h('p',{text:`Usage sources: ${sources.join(', ')}`}))
+  const local=Object.keys(draft.localEndpoints||{})
+  if(local.length)mounts.limits.append(h('p',{text:`Local health checks: ${local.join(', ')}`}))
+  paintAccess()
+}
+function poolProbeNote(){
+  const groups=Array.isArray(draft.sharedRateLimits)?draft.sharedRateLimits:[]
+  const probes=Array.isArray(draft.probeRateLimits)?draft.probeRateLimits:[]
+  for(const group of groups){
+    if(!Array.isArray(group))continue
+    const ids=new Set(group.map(model=>modelBits(model).id).filter(Boolean))
+    const hits=probes.map(model=>modelBits(model).id).filter(id=>ids.has(id))
+    if(hits.length>1)return 'More than one probe sits in the same shared pool. One probe covers that pool.'
+  }
+  return ''
+}
+function renderBindings(container,label,key,planNames){
+   container.replaceChildren()
+   const map=draft[key]
+   const listed=map&&typeof map==='object'&&!Array.isArray(map)?map:null
+   for(const name of Object.keys(listed??{})){
+     const current=draft[key][name]||''
+     const known=planNames.includes(current)
+     const note=h('span',{class:'hint',text:current&&!known?'Plan is not listed yet':''})
+     const custom=h('input',{type:'text','aria-label':`${label} ${name} custom plan`,value:known?'':current,placeholder:'Plan name'})
+     const select=h('select',{'aria-label':`${label} ${name} plan`})
+     for(const plan of planNames)select.append(h('option',{value:plan,text:plan}))
+     select.append(h('option',{value:'',text:'Other plan…'}))
+     select.value=known?current:''
+     const refreshNote=()=>{const value=draft[key][name]||'';note.textContent=value.trim()&&!planNames.includes(value.trim())?'Plan is not listed yet':''}
+     select.addEventListener('change',()=>{
+       if(select.value===''){
+         hidePlanNode(custom,false)
+         if(planNames.includes(draft[key][name]))custom.value=''
+         draft[key][name]=custom.value
+         refreshNote()
+         if(typeof custom.focus==='function')custom.focus()
+         return
+       }
+       draft[key][name]=select.value
+       custom.value=''
+       hidePlanNode(custom,true)
+       refreshNote()
+     })
+     custom.addEventListener('input',()=>{
+       if(planNames.includes(custom.value)){
+         draft[key][name]=custom.value
+         select.value=custom.value
+         custom.value=''
+         hidePlanNode(custom,true)
+         refreshNote()
+         return
+       }
+       draft[key][name]=custom.value
+       refreshNote()
+     })
+     hidePlanNode(custom,known)
+     container.append(h('div',{class:'row binding'},h('span',{text:name}),h('div',{class:'binding-plan'},select,custom),note,h('button',{type:'button',text:'Remove',onClick:()=>{delete draft[key][name];renderBoard()}})))
+   }
+  const nameInput=h('input',{type:'text','aria-label':`New ${label} name`,placeholder:label})
+  container.append(h('div',{class:'toolbar'},nameInput,h('button',{type:'button',text:`Add ${label}`,onClick:()=>{
+    const name=nameInput.value.trim()
+    if(!name){optionsStatus.textContent=`Enter a ${label} name first.`;return}
+    if(!draft[key]||typeof draft[key]!=='object'||Array.isArray(draft[key]))draft[key]=Object.create(null)
+    if(Object.hasOwn(draft[key],name)){optionsStatus.textContent=`That ${label} is already listed.`;return}
+    draft[key][name]=planNames[0]||''
+    renderBoard()
+  }})))
+}
+function writeModuleModel(profile,index,patch){
+  const current=profile.models[index]
+  const base=typeof current==='string'?{id:current}:{...(current&&typeof current==='object'?current:{id:''})}
+  const next={...base,...patch}
+  const entry={id:next.id??''}
+  if(next.variant)entry.variant=next.variant
+  if(typeof next.cooldownMs==='number')entry.cooldownMs=next.cooldownMs
+  profile.models[index]=entry
+}
+function renderModules(container){
+  if(!container)return
+  container.replaceChildren()
+  const modules=draft.modules&&typeof draft.modules==='object'&&!Array.isArray(draft.modules)?draft.modules:null
+  const names=modules?Object.keys(modules):[]
+  for(const [index,name] of names.entries()){
+    const profile=draft.modules[name]&&typeof draft.modules[name]==='object'?draft.modules[name]:{models:[]}
+    if(!Array.isArray(profile.models))profile.models=[]
+    draft.modules[name]=profile
+    const models=profile.models
+    const card=h('details',{class:'plan','data-module':name})
+    card.setAttribute('open','')
+    const chain=h('span',{class:'chain',text:chainLabel(models)})
+    const refresh=()=>{chain.textContent=chainLabel(profile.models)}
+    card.append(h('summary',{},h('strong',{text:name}),chain))
+    const cooldown=h('input',{type:'number',min:'1','aria-label':`${name} module cooldown milliseconds`,value:typeof profile.cooldownMs==='number'?String(profile.cooldownMs):'',placeholder:'Inherited cooldown'})
+    cooldown.addEventListener('input',()=>{
+      const value=Number(cooldown.value)
+      if(cooldown.value.trim()&&Number.isSafeInteger(value)&&value>0)profile.cooldownMs=value
+      else delete profile.cooldownMs
+    })
+    card.append(h('div',{class:'row'},h('span',{text:'Module cooldown (ms)'}),cooldown))
+    models.forEach((model,position)=>{
+      const bits=modelBits(model)
+      const override=model&&typeof model==='object'&&typeof model.cooldownMs==='number'?String(model.cooldownMs):''
+      const idInput=h('input',{type:'text',list:'model-suggestions','aria-label':`${name} module model ${position+1}`,value:bits.id,onInput:()=>{writeModuleModel(profile,position,{id:idInput.value});refresh()}})
+      const variantInput=h('input',{type:'text','aria-label':`${name} module variant ${position+1}`,value:bits.variant,placeholder:'Exact variant (optional)',onInput:()=>{writeModuleModel(profile,position,{variant:variantInput.value});refresh()}})
+      const cooldownInput=h('input',{type:'number',min:'1','aria-label':`${name} module model cooldown ${position+1}`,value:override,placeholder:'Chain cooldown',onInput:()=>{
+        const value=Number(cooldownInput.value)
+        writeModuleModel(profile,position,{cooldownMs:cooldownInput.value.trim()&&Number.isSafeInteger(value)&&value>0?value:undefined})
+      }})
+      card.append(assistVariant(idInput,variantInput,`module-${encodeURIComponent(name)}-${position}`))
+      card.append(h('div',{class:'row'},h('span',{text:String(position+1)}),idInput,variantInput,cooldownInput,h('span',{},
+        position?h('button',{type:'button',text:'Earlier',onClick:()=>moveItem(profile.models,position,-1)}):null,
+        position<models.length-1?h('button',{type:'button',text:'Later',onClick:()=>moveItem(profile.models,position,1)}):null,
+        models.length>1?h('button',{type:'button',text:'Remove',onClick:()=>{profile.models.splice(position,1);renderBoard()}}):null)))
+    })
+    card.append(h('div',{class:'toolbar'},
+      h('button',{type:'button',text:'Add model',onClick:()=>{profile.models.push('');renderBoard()}}),
+      index?h('button',{type:'button',text:'Move module earlier',onClick:()=>{draft.modules=moveKey(draft.modules,name,-1);renderBoard()}}):null,
+      index<names.length-1?h('button',{type:'button',text:'Move module later',onClick:()=>{draft.modules=moveKey(draft.modules,name,1);renderBoard()}}):null,
+      h('button',{type:'button',text:'Remove module',onClick:()=>{delete draft.modules[name];renderBoard()}})))
+    container.append(card)
+  }
+  const nameInput=h('input',{type:'text','aria-label':'New module name',placeholder:'module name'})
+  container.append(h('div',{class:'toolbar'},nameInput,h('button',{type:'button',text:'Add module',onClick:()=>{
+    const name=nameInput.value.trim()
+    if(!name){optionsStatus.textContent='Enter a module name first.';return}
+    if(!draft.modules||typeof draft.modules!=='object'||Array.isArray(draft.modules))draft.modules=Object.create(null)
+    if(Object.hasOwn(draft.modules,name)){optionsStatus.textContent='That module is already listed.';return}
+    draft.modules[name]={models:['']}
+    renderBoard()
+  }})))
+}
+function loadedMessage(){
+  const where=settingsPath?` File: ${settingsPath}.`:''
+   return canWrite?`Loaded the winning settings.${where} Review the chains, then apply.`:`Loaded the winning settings.${where} Read-only: there is no settings file to update. Download a draft to take a JSON copy.`
+}
+async function loadOptions(){
+  if(!optionsFields||optionsFields.disabled)return
+  lockOptions(true)
+  optionsStatus.textContent='Loading plans…'
+  try{
+    const response=await fetch('/api/options',{cache:'no-store',credentials:'same-origin'})
+    const body=await response.json()
+    if(!response.ok)throw Error(body.error||'unavailable')
+    revision=body.revision
+    saved=body.options
+    canWrite=body.writable===true
+    settingsPath=typeof body.path==='string'?body.path:''
+    show(saved)
+    optionsStatus.textContent=loadedMessage()
+  }catch(error){
+    revision=undefined
+    saved=undefined
+    canWrite=false
+    optionsStatus.textContent=error.message||'Could not load plans.'
+  }finally{lockOptions(false);paintAccess()}
+}
+document.querySelector('#load-options').addEventListener('click',()=>loadOptions())
+document.querySelector('#cancel-options').addEventListener('click',()=>{
   if(optionsFields.disabled)return
-  optionsFields.disabled=true
-  optionsStatus.textContent='Loading project options…'
-  try{const response=await fetch('/api/options',{cache:'no-store',credentials:'same-origin'});const body=await response.json();if(!response.ok)throw Error(body.error||'unavailable');revision=body.revision;saved=body.options;show(saved);optionsStatus.textContent='Loaded project options. Review them, then apply.'}
-  catch(error){revision=undefined;saved=undefined;optionsStatus.textContent=error.message||'Could not load project options.'}
-  finally{optionsFields.disabled=false}
+  if(!saved){optionsStatus.textContent='Nothing to cancel.';return}
+  show(saved)
+  optionsStatus.textContent='Cancelled. Unsaved edits were discarded.'
 })
-document.querySelector('#cancel-options').addEventListener('click',()=>{if(optionsFields.disabled)return;if(!saved){optionsStatus.textContent='Nothing to cancel.';return}show(saved);optionsStatus.textContent='Cancelled. Unsaved edits were discarded.'})
+document.querySelector('#download-options').addEventListener('click',()=>{
+  if(optionsFields.disabled)return
+  try{
+    const options=editedOptions()
+    const blob=new Blob([JSON.stringify(options,null,2)+'\n'],{type:'application/json'})
+    const link=document.createElement('a')
+    link.href=URL.createObjectURL(blob)
+    link.download='quartermaster-options.json'
+    link.click()
+    setTimeout(()=>URL.revokeObjectURL(link.href),0)
+    optionsStatus.textContent='Downloaded a JSON draft. Comments from the current file are not in it. Review it before replacing a settings file.'
+  }catch(error){optionsStatus.textContent=error.message||'Could not download a draft.'}
+})
 document.querySelector('#apply-options').addEventListener('click',async()=>{
   if(optionsFields.disabled)return
-  optionsFields.disabled=true
-  optionsStatus.textContent='Applying project options…'
-  try{if(typeof revision!=='number'||!saved)throw Error('Load project options before applying');const options=editedOptions();const response=await fetch('/api/options',{method:'POST',cache:'no-store',credentials:'same-origin',headers:{'content-type':'application/json'},body:JSON.stringify({options,revision})});const body=await response.json();if(!response.ok)throw Error(body.error||'apply failed');revision=body.revision;saved=body.options;show(saved);optionsStatus.textContent='Applied. The current session is unchanged. The next assignment uses these options.'}
-  catch(error){optionsStatus.textContent=error.message||'Could not apply project options.'}
-  finally{optionsFields.disabled=false}
+  lockOptions(true)
+  optionsStatus.textContent='Applying plans…'
+  try{
+    if(typeof revision!=='number'||!saved)throw Error('Load project options before applying')
+    if(!canWrite)throw Error('Apply requires a winning settings file.')
+    const options=editedOptions()
+    const response=await fetch('/api/options',{method:'POST',cache:'no-store',credentials:'same-origin',headers:{'content-type':'application/json'},body:JSON.stringify({options,revision})})
+    const body=await response.json()
+    if(!response.ok)throw Error(body.error||'apply failed')
+    revision=body.revision
+    saved=body.options
+    canWrite=body.writable===true
+    if(typeof body.path==='string')settingsPath=body.path
+    show(saved)
+    optionsStatus.textContent='Applied. The current session is unchanged. The next assignment uses these options.'
+  }catch(error){optionsStatus.textContent=error.message||'Could not apply project options.'}
+  finally{lockOptions(false);paintAccess()}
 })
+function bind(selector,type,handler){const node=document.querySelector(selector);if(node&&typeof node.addEventListener==='function')node.addEventListener(type,handler)}
+bind('#refresh-dashboard','click',()=>{void refreshWorkspace()})
+bind('#refresh-quota','click',()=>{void refreshWorkspace()})
+bind('#refresh-providers','click',()=>{void refreshCatalog()})
+bind('#model-search','input',()=>paintCatalog())
+bind('#provider-filter','change',()=>paintCatalog())
+bind('#thinking-filter','change',()=>paintCatalog())
+bind('#preferred-filter','change',()=>paintCatalog())
+bind('#retry-preferences','click',loadPreferences)
+const planTabs=[document.querySelector('#tab-plans'),document.querySelector('#tab-agents'),document.querySelector('#tab-modules'),document.querySelector('#tab-settings')], planTabPanels=[document.querySelector('#panel-plans'),document.querySelector('#panel-agents'),document.querySelector('#panel-modules'),document.querySelector('#panel-settings')]
+function selectPlanTab(index){for(const [position,tab] of planTabs.entries()){if(!tab)continue
+    tab.setAttribute?.('aria-selected',String(position===index))
+    tab.tabIndex=position===index?0:-1
+    const panel=planTabPanels[position]
+    if(panel){panel.hidden=position!==index;panel.tabIndex=position===index?0:-1}}
+  planTabs[index]?.focus?.()}
+planTabs.forEach((tab,index)=>{if(!tab||typeof tab.addEventListener!=='function')return
+  tab.addEventListener('click',()=>selectPlanTab(index))
+  tab.addEventListener('keydown',event=>{let next=index
+    if(event.key==='ArrowRight')next=(index+1)%planTabs.length
+    else if(event.key==='ArrowLeft')next=(index+planTabs.length-1)%planTabs.length
+    else if(event.key==='Home')next=0
+    else if(event.key==='End')next=planTabs.length-1
+    else return
+    event.preventDefault()
+    selectPlanTab(next)})})
+if(typeof document.querySelectorAll==='function'){addEventListener('hashchange',navigate);navigate();loadPreferences();paintOverview();paintCatalog();paintUsage()}
 </script>
 </html>

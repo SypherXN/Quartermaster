@@ -186,8 +186,37 @@ export class RateLimitObservations {
     return [...this.observed.values()].filter((entry) => now - entry.observedAt <= MAX_SIGNAL_AGE_MS)
   }
 
+  /** Record a deadline the error body stated, so it is readable in diagnostics like a header reset. */
+  recordStatedReset(
+    model: Pick<ModelRef, "providerID" | "modelID">,
+    resetAt: number,
+    now: number,
+    status?: number,
+  ): void {
+    this.record(model, { resetAt, source: "session-error" }, now, status)
+  }
+
   clear(): void {
     this.observed.clear()
     this.limited.clear()
   }
+}
+
+/**
+ * The wait a provider asked for in a structured error (`retryAfterMs`). It is the same value the
+ * host shows as a reset time, measured from when the failure was recorded, so it is converted to
+ * an absolute deadline and clamped like a header reset.
+ */
+export function statedResetFromError(error: unknown, recordedAt: number): number | undefined {
+  if (!error || typeof error !== "object" || !Number.isFinite(recordedAt)) return undefined
+  const delay = (error as { retryAfterMs?: unknown }).retryAfterMs
+  if (typeof delay !== "number" || !Number.isFinite(delay) || delay < 0) return undefined
+  return recordedAt + Math.min(Math.max(delay, MIN_COOLDOWN_MS), MAX_COOLDOWN_MS)
+}
+
+/** The later of two optional deadlines. */
+export function laterDeadline(a: number | undefined, b: number | undefined): number | undefined {
+  if (a === undefined) return b
+  if (b === undefined) return a
+  return Math.max(a, b)
 }

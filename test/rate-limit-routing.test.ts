@@ -16,7 +16,7 @@ interface Hook {
     agent?: string
     model?: { providerID: string; id: string }
     decision?: { retry: boolean; delay?: number }
-    error?: { status?: number }
+    error?: { type?: string; status?: number; retryAfterMs?: number }
     response?: { status: number; headers: { get(name: string): string | null } }
   }): Promise<void>
 }
@@ -131,5 +131,29 @@ test("a response without rate-limit headers leaves the state untouched", async (
 
   const report = await routing?.diagnoseSession("a")
   assert.deepEqual(report?.providerRateLimits, [])
+  await routing?.dispose()
+})
+
+test("a free-allowance failure waits for the reset its error states", async () => {
+  const { hooks, routing } = await harness()
+  const now = Date.now()
+
+  // The host does not retry this failure; the error carries when the allowance frees again.
+  for (const callback of hooks["model.request"]) {
+    await callback({ sessionID: "a", kind: "primary", agent: "reviewer", model: { providerID: "provider-a", id: "primary" } })
+  }
+  await hooks.retry[0]({
+    sessionID: "a", agent: "reviewer", model: { providerID: "provider-a", id: "primary" },
+    decision: { retry: false },
+    error: { type: "provider.free-limit", status: 429, retryAfterMs: 3_600_000 },
+  })
+
+  const report = await routing?.diagnoseSession("a")
+  const cooldown = (report?.failureCooldowns ?? []).find((entry: { modelID?: string }) => entry.modelID === "primary")
+  assert.ok(cooldown, "the exhausted free model must be cooling")
+  assert.ok(
+    (cooldown.until as number) >= now + 3_500_000,
+    `the cooldown must reach the stated reset, got ${cooldown.until}`,
+  )
   await routing?.dispose()
 })

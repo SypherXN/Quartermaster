@@ -15,6 +15,8 @@ test("structured retry failures permit only safe transient fallback", () => {
     { error: { type: "provider.rate-limit", status: 429 }, fallback: true, classification: "temporary-rate-limit" },
     { error: { type: "provider.internal", status: 503 }, fallback: true, classification: "provider-outage" },
     { error: { type: "provider.transport", status: 503 }, fallback: true, classification: "provider-outage" },
+    { error: { type: "provider.free-limit" }, fallback: true, classification: "temporary-rate-limit" },
+    { error: { message: "FreeUsageLimitError: free usage limit reached" }, fallback: true, classification: "temporary-rate-limit" },
     { error: { type: "provider.quota", status: 402 }, fallback: false, classification: "quota-exhausted" },
     { error: { type: "provider.auth", status: 401 }, fallback: false, classification: "auth" },
     { error: { type: "permission.rejected" }, fallback: false, classification: "auth" },

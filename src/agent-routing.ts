@@ -7,7 +7,7 @@ import type { ModelRef, QuartermasterConfig } from "./config.ts"
 import { buildQuotaEligibility } from "./eligibility.ts"
 import { classifyRetryFailure, FailureCooldowns, type FailureReport, type SuccessReport } from "./failures.ts"
 import { applyLocalHealth, LocalHealth } from "./local-health.ts"
-import { parseRateLimitHeaders, RateLimitObservations } from "./rate-limit.ts"
+import { laterDeadline, parseRateLimitHeaders, RateLimitObservations, statedResetFromError } from "./rate-limit.ts"
 import { bucketMembers, RateLimitProbes, type ProbeOutcome } from "./rate-limit-probe.ts"
 import { bindExclusive, ExclusiveLeases } from "./exclusive.ts"
 import { explainSelection, type SelectionExplanation } from "./explain.ts"
@@ -643,8 +643,11 @@ export async function registerAgentRouting(
       if (!sameSessionModel(modelRef(event.model), current)) return
 
       const failure = classifyRetryFailure(event.error, event.model.providerID, event.model.id)
-      const providerDeadline = rateLimits.deadline(modelRef(event.model), Date.now())
-      if (failure.report && failures.reportFailure(failure.report, Date.now(), providerDeadline)) {
+      const failedAt = Date.now()
+      const stated = statedResetFromError(event.error, failedAt)
+      const providerDeadline = laterDeadline(rateLimits.deadline(modelRef(event.model), failedAt), stated)
+      if (stated !== undefined) rateLimits.recordStatedReset(modelRef(event.model), stated, failedAt)
+      if (failure.report && failures.reportFailure(failure.report, failedAt, providerDeadline)) {
         await persistCooldowns()
         await applyCurrent()
       }
@@ -737,9 +740,11 @@ export async function registerAgentRouting(
         if (request?.managed && typeof occurredAt === "number" &&
           typeof terminal.data?.error === "object" && terminal.data.error !== null) {
           const failure = classifyRetryFailure(terminal.data.error, request.model.providerID, request.model.modelID)
-          const deadline = occurredAt + config.providerCooldownMs
           // A provider-stated reset extends the cooldown; the configured window stays the floor.
-          const providerDeadline = rateLimits.deadline(request.model, now)
+          const stated = statedResetFromError(terminal.data.error, occurredAt)
+          if (stated !== undefined) rateLimits.recordStatedReset(request.model, stated, now)
+          const providerDeadline = laterDeadline(rateLimits.deadline(request.model, now), stated)
+          const deadline = Math.max(occurredAt + config.providerCooldownMs, providerDeadline ?? 0)
           const fresh = requestHistory.claimFailure(step.sessionID, kind, occurredAt, now)
           failureObservations.set(step.sessionID, {
             kind, attribution: "model-confirmed", occurredAt, observedAt: now, model: request.model,
@@ -819,6 +824,11 @@ export async function registerAgentRouting(
   }
 
   const selectPlan = async (planID: string): Promise<SelectionExplanation & { plan?: { id: string; source: "named-plan"; reasonCode: "named-plan" } }> => {
+    // The caller applies the model. Refresh first so a process that started before
+    // this model was enabled, or before quota recovered, does not keep rejecting it
+    // from that startup snapshot. Cooldowns and exclusive holds still apply.
+    await ensureProjectOptions()
+    await refresh()
     const now = Date.now()
     const selection = selectNamedPlan(
       config,

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { parseRateLimitHeaders, RateLimitObservations } from "../src/rate-limit.ts"
+import { laterDeadline, parseRateLimitHeaders, RateLimitObservations, statedResetFromError } from "../src/rate-limit.ts"
 
 const headers = (values: Record<string, string>) => ({
   get: (name: string) => values[name.toLowerCase()] ?? null,
@@ -67,4 +67,27 @@ test("a reset that already passed is not a deadline", () => {
   const observations = new RateLimitObservations()
   observations.record(model, { resetAt: now - 1 }, now, 429)
   assert.equal(observations.deadline(model, now), undefined)
+})
+
+test("a provider-requested wait becomes a cooldown deadline", () => {
+  assert.equal(statedResetFromError({ retryAfterMs: 3_600_000 }, now), now + 3_600_000)
+  // The delay is measured from when the failure was recorded, not from now.
+  assert.equal(statedResetFromError({ retryAfterMs: 3_600_000 }, now - 5_000), now - 5_000 + 3_600_000)
+  // Clamped like a header reset.
+  assert.equal(statedResetFromError({ retryAfterMs: 0 }, now), now + 1_000)
+  assert.equal(statedResetFromError({ retryAfterMs: 7 * 24 * 3_600_000 }, now), now + 24 * 3_600_000)
+  // Anything unusable states nothing.
+  assert.equal(statedResetFromError({ retryAfterMs: -1 }, now), undefined)
+  assert.equal(statedResetFromError({ retryAfterMs: Number.NaN }, now), undefined)
+  assert.equal(statedResetFromError({ retryAfterMs: "3600" }, now), undefined)
+  assert.equal(statedResetFromError({}, now), undefined)
+  assert.equal(statedResetFromError(undefined, now), undefined)
+})
+
+test("the later of two deadlines wins and an absent one is ignored", () => {
+  assert.equal(laterDeadline(undefined, now), now)
+  assert.equal(laterDeadline(now, undefined), now)
+  assert.equal(laterDeadline(now, now + 1), now + 1)
+  assert.equal(laterDeadline(now + 1, now), now + 1)
+  assert.equal(laterDeadline(undefined, undefined), undefined)
 })

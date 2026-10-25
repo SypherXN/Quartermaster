@@ -49,6 +49,11 @@ export function classifyRetryFailure(
   if (type === "provider.auth" || type === "permission.rejected" || status === 401 || status === 403) {
     return { fallback: false, report: { providerID, modelID, classification: "auth" } }
   }
+  // The host does not retry a free-allowance failure, so the router has to fall through and the
+  // reset the error carries is the only thing that says when the bucket frees again.
+  if (type === "provider.free-limit" || text.includes("FreeUsageLimitError")) {
+    return { fallback: true, report: { providerID, modelID, classification: "temporary-rate-limit" } }
+  }
   if (type === "provider.rate-limit" || status === 429 || RATE_LIMIT_TEXT.test(text)) {
     return { fallback: true, report: { providerID, modelID, classification: "temporary-rate-limit" } }
   }

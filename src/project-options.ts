@@ -1,5 +1,6 @@
 import { copyFile, lstat, mkdir, readFile, realpath, rm, rmdir, stat, writeFile as writeFileDefault } from "node:fs/promises"
 import { createHash } from "node:crypto"
+import { homedir } from "node:os"
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path"
 import { fileURLToPath } from "node:url"
 import { OpenCode, type ConfigEntry } from "@opencode/client"
@@ -357,7 +358,8 @@ const effectiveEntry = async (directory: string, readConfiguration: Configuratio
   if (!insideDirectory(root, resolve(selected.path))) {
     const settings = await readSiblingSettings(selected.path)
     const config = parseConfig(settings.options)
-    return { path: settings.path, options: settings.options, config, revision: 0, writable: false }
+    const revision = settings.text === undefined ? 0 : createHash("sha256").update(JSON.stringify([settings.path, settings.text])).digest().readUIntBE(0, 6)
+    return { path: settings.path, options: settings.options, config, revision, writable: false, text: settings.text, existed: settings.text !== undefined }
   }
   const registrationPath = await containedPath(root, selected.path)
   if (!registrationPath) throw new Error("Project config changed; refusing to overwrite")
@@ -405,6 +407,7 @@ export async function applyProjectQuartermasterOptions(input: {
       throw new Error("Effective Quartermaster options are outside the writable project configuration")
     if (target.revision !== input.revision) throw new Error("Project config changed; refusing to overwrite")
     const next = `${JSON.stringify(input.options, null, 2)}\n`
+    const previousText = target.text
     const backup = (await containedPath(root, `${target.path}.quartermaster.bak`, true))!
     if (target.existed && await containedPath(root, target.path) !== target.path) throw new Error("Project config changed; refusing to overwrite")
     if (target.existed) await copyFile(target.path, backup)
@@ -419,7 +422,7 @@ export async function applyProjectQuartermasterOptions(input: {
     } catch (error) {
       await containedPath(root, target.path, true).then((found) => {
         if (found === undefined) return
-        if (target.existed) return writeFileDefault(found, target.text)
+        if (target.existed) return writeFileDefault(found, previousText)
         return rm(found, { force: true })
       }).catch(() => undefined)
       throw error
@@ -430,13 +433,149 @@ export async function applyProjectQuartermasterOptions(input: {
   }
 }
 
+// Gateway-only. The plugin writer above still refuses a winning file outside the project.
+export async function applyDiscoveredQuartermasterOptions(input: {
+  directory: string
+  options: unknown
+  revision: number
+  signal?: AbortSignal
+  readConfiguration?: ConfigurationReader
+}, io: { writeFile?: typeof writeFileDefault } = {}) {
+  parseConfig(input.options)
+  if (input.signal?.aborted) throw input.signal.reason ?? new DOMException("The operation was aborted", "AbortError")
+  const readConfiguration = input.readConfiguration ?? readNativeConfiguration
+  const root = await realpath(input.directory)
+  const preview = await effectiveEntry(root, readConfiguration)
+  if (preview.writable) return applyProjectQuartermasterOptions({ ...input, readConfiguration }, io)
+  if (!preview.path) throw new Error("Effective Quartermaster options have no settings file; refusing to create one")
+  const lock = resolve(dirname(preview.path), ".quartermaster-options.lock")
+  await mkdir(lock).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "EEXIST") throw new Error("Project options update already in progress")
+    throw error
+  })
+  try {
+    const target = await effectiveEntry(root, readConfiguration)
+    if (target.writable || !target.path || target.path !== preview.path || target.revision !== input.revision)
+      throw new Error("Project config changed; refusing to overwrite")
+    const parent = await realpath(dirname(target.path))
+    const file = await containedPath(parent, target.path, true)
+    const backup = await containedPath(parent, `${target.path}.quartermaster.bak`, true)
+    if (!file || !backup || basename(file) !== QUARTERMASTER_SETTINGS_FILE || (target.existed && file !== target.path))
+      throw new Error("Project config changed; refusing to overwrite")
+    const next = `${JSON.stringify(input.options, null, 2)}\n`
+    if (target.existed) await copyFile(file, backup)
+    const current = await effectiveEntry(root, readConfiguration)
+    if (current.writable || current.path !== target.path || current.revision !== input.revision)
+      throw new Error("Project config changed; refusing to overwrite")
+    try {
+      if (input.signal?.aborted) throw input.signal.reason ?? new DOMException("The operation was aborted", "AbortError")
+      if (await containedPath(parent, file, true) !== file) throw new Error("Project config changed; refusing to overwrite")
+      await (io.writeFile ?? writeFileDefault)(file, next, input.signal ? { signal: input.signal } : undefined)
+      if (input.signal?.aborted) throw input.signal.reason ?? new DOMException("The operation was aborted", "AbortError")
+    } catch (error) {
+      await containedPath(parent, file, true).then((found) => {
+        if (found !== file) return
+        if (target.existed) return writeFileDefault(found, target.text ?? "")
+        return rm(found, { force: true })
+      }).catch(() => undefined)
+      throw error
+    }
+    return { path: file, backup }
+  } finally {
+    await rmdir(lock)
+  }
+}
+
+const CONFIG_FILENAMES = ["opencode.json", "opencode.jsonc"] as const
+
+const enabledFlag = (value: string | undefined) => value === "1" || value?.toLowerCase() === "true"
+
+const isFile = async (path: string) => (await stat(path).catch(missing))?.isFile() === true
+
+// OpenCode keeps user config under the XDG config directory, including on Windows.
+const installedConfigDirectory = (env: NodeJS.ProcessEnv) => {
+  if (env.OPENCODE_CONFIG_DIR) return resolve(env.OPENCODE_CONFIG_DIR)
+  const home = env.OPENCODE_TEST_HOME || homedir()
+  const base = env.XDG_CONFIG_HOME || resolve(home, ".config")
+  return resolve(base, "opencode")
+}
+
+const filesIn = async (dir: string, nested: boolean) => {
+  const found: string[] = []
+  for (const name of CONFIG_FILENAMES) {
+    const path = resolve(dir, name)
+    if (await isFile(path)) found.push(path)
+  }
+  if (!nested) return found
+  for (const name of CONFIG_FILENAMES) {
+    const path = resolve(dir, ".opencode", name)
+    if (await isFile(path)) found.push(path)
+  }
+  return found
+}
+
+const chainFromRoot = async (directory: string) => {
+  let dir = await realpath(directory)
+  const chain = [dir]
+  while (true) {
+    const parent = dirname(dir)
+    if (parent === dir) break
+    chain.push(parent)
+    dir = parent
+  }
+  return chain.reverse()
+}
+
+/**
+ * Config documents this process would load when loopback provenance cannot
+ * authenticate. Lowest priority first. `serve --stdio` removes the server
+ * password from the environment before plugins start, so the HTTP reader
+ * cannot present it.
+ */
+export async function readInstalledConfiguration(directory: string, env: NodeJS.ProcessEnv = process.env): Promise<readonly ConfigEntry[]> {
+  const paths: string[] = []
+  const push = async (path: string) => {
+    if (!(await isFile(path))) return
+    const resolved = await realpath(path)
+    if (!paths.includes(resolved)) paths.push(resolved)
+  }
+  const globalDir = installedConfigDirectory(env)
+  for (const path of await filesIn(globalDir, false)) await push(path)
+  const globalReal = await realpath(globalDir).catch(missing)
+  const projectDisabled = enabledFlag(env.OPENCODE_CONFIG_PROJECT_DISABLE) || enabledFlag(env.OPENCODE_DISABLE_PROJECT_CONFIG)
+  if (!projectDisabled) {
+    for (const dir of await chainFromRoot(directory)) {
+      if (globalReal !== undefined && samePath(globalReal, dir)) continue
+      for (const path of await filesIn(dir, true)) await push(path)
+    }
+  }
+  if (env.OPENCODE_CONFIG) await push(resolve(env.OPENCODE_CONFIG))
+  const entries: ConfigEntry[] = []
+  for (const path of paths) {
+    const info = parseProjectConfig(await readFile(path, "utf8")) as Extract<ConfigEntry, { type: "document" }>["info"]
+    entries.push({ type: "document", path, info })
+  }
+  return entries
+}
+
 export async function readProjectQuartermasterOptions(directory: string, readConfiguration: ConfigurationReader = readNativeConfiguration) {
   const target = await effectiveEntry(directory, readConfiguration)
   return { path: target.path, revision: target.revision, options: target.options, config: target.config, writable: target.writable }
 }
 
+const readAdoptedOptions = async (directory: string, readConfiguration: ConfigurationReader) => {
+  try {
+    return await readProjectQuartermasterOptions(directory, readConfiguration)
+  } catch (error) {
+    // A supplied reader is the test and gateway contract. Only the native
+    // loopback reader may fall back to the files this process would load.
+    if (readConfiguration !== readNativeConfiguration || !(error instanceof ProjectConfigurationUnresolved)) throw error
+    return readProjectQuartermasterOptions(directory, (root) => readInstalledConfiguration(root))
+  }
+}
+
 export async function adoptProjectQuartermasterOptions(config: QuartermasterConfig, directory: string, readConfiguration: ConfigurationReader = readNativeConfiguration) {
-  const loaded = await readProjectQuartermasterOptions(directory, readConfiguration)
+  const loaded = await readAdoptedOptions(directory, readConfiguration)
   Object.assign(config, loaded.config)
   if (loaded.config.budgets === undefined) delete config.budgets
   if (loaded.config.tokenRates === undefined) delete config.tokenRates

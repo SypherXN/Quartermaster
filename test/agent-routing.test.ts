@@ -806,6 +806,15 @@ test("each new prompt chooses for that session and chooses again after the turn"
     assert.deepEqual(stored.get("availability/cooldowns-v1"), beforeExpired, "delayed expired evidence creates no fresh cooldown")
     assert.equal((await routing?.diagnoseSession("h"))?.lastFailureObservation?.outcome, "expired")
   } finally { Date.now = clock }
+  // A free-allowance failure is nonretryable, so the terminal event is the only place its reset is seen.
+  await routing?.reportSuccess({ providerID: "provider-a", scope: "model", modelID: "primary" })
+  await routing?.reportSuccess({ providerID: "provider-b", scope: "model", modelID: "backup" })
+  await hooks["model.request"][0]({ sessionID: "a", kind: "primary", agent: "reviewer", model: sessions.a.model })
+  const freeAt = Date.now()
+  await push({ type: "session.execution.failed", created: freeAt, data: { sessionID: "a", error: { type: "provider.free-limit", status: 429, retryAfterMs: 3_600_000 } } })
+  const freePersisted = JSON.stringify(stored.get("availability/cooldowns-v1"))
+  assert.ok(freePersisted.includes(String(freeAt + 3_600_000)), "the cooldown must reach the reset the error stated")
+  assert.ok(!freePersisted.includes(String(freeAt + 300000)), "the configured floor must not cap the stated reset")
   await routing?.dispose()
 })
 
@@ -1367,7 +1376,7 @@ test("named plan query recommends without applying, pinning, reserving, or infer
   assert.equal(picked?.selected?.modelID, "primary")
   assert.equal(picked?.plan?.id, "review")
   assert.equal(picked?.plan?.source, "named-plan")
-  assert.deepEqual(calls, before, "a named-plan query does not list models, reload agents, store pins, or switch models")
+  assert.deepEqual(calls, [...before, "models"], "a named-plan query refreshes the enabled model list without reloading agents, storing pins, or switching models")
   assert.deepEqual(agents.reviewer.model, { providerID: "provider-a", id: "primary" })
   const work = await routing?.select("reviewer", "deep") as { plan?: { id?: string; source?: string }; selected?: { modelID?: string } } | undefined
   assert.equal(work?.plan?.id, "other")
@@ -1379,7 +1388,7 @@ test("named plan query recommends without applying, pinning, reserving, or infer
   const unpinned = await routing?.selectPlan("review")
   assert.equal(unpinned?.selected?.modelID, "primary")
   assert.equal(unpinned?.reasonCode, "highest-priority-eligible")
-  assert.deepEqual(calls, afterPin)
+  assert.deepEqual(calls, [...afterPin, "models"], "a later named-plan query refreshes models without storing another pin or reloading agents")
   assert.deepEqual(agents.reviewer.model, pinnedModel)
   const agentPick = await routing?.select("reviewer") as { selected?: { modelID?: string }; reasonCode?: string; plan?: { source?: string } } | undefined
   assert.equal(agentPick?.selected?.modelID, "backup")
@@ -1412,5 +1421,78 @@ test("a named plan works without an agent binding or session", async () => {
   assert.equal(picked?.selected?.providerID, "provider-a")
   assert.equal(picked?.selected?.modelID, "primary")
   assert.equal((await routing?.select("anyone"))?.reasonCode, "unbound-agent")
+  await routing?.dispose()
+})
+
+test("named plan selection refreshes a stale registry and quota without switching a session", async () => {
+  const planConfig = parseConfig({
+    plans: { review: ["openai/gpt-6-luna"] },
+    usageSources: { openai: "codex" },
+  })
+  let enabled = false
+  let availability: "available" | "limited" = "available"
+  const usage = () => {
+    const checkedAt = new Date().toISOString()
+    const limited = availability === "limited"
+    const source = {
+      authenticated: true,
+      checkedAt,
+      stale: false,
+      error: null,
+      windows: [{
+        name: "weekly",
+        usedPercent: limited ? 100 : 40,
+        state: limited ? "rate-limited" : "ok",
+        resetsAt: limited ? new Date(Date.now() + 60_000).toISOString() : null,
+        ...(limited ? { resetEstimated: true } : {}),
+      }],
+      nextAvailableAt: limited ? new Date(Date.now() + 60_000).toISOString() : null,
+      availability,
+    }
+    return { schemaVersion: 1, updatedAt: checkedAt, sources: { go: source, codex: source, cursor: source }, models: { go: {} } }
+  }
+  let listed = 0
+  let usageReads = 0
+  let switches = 0
+  const routing = await registerAgentRouting({
+    model: { list: async () => {
+      listed += 1
+      return { data: enabled ? [{ providerID: "openai", id: "gpt-6-luna", enabled: true }] : [] }
+    } },
+    storage: { get: async () => undefined, set: async () => {}, remove: async () => {}, scan: async () => ({ entries: [] }) },
+    rpc: () => ({ status: async () => { usageReads += 1; return usage() } }),
+    agent: {
+      transform: async () => ({ dispose: async () => {} }),
+      reload: async () => { throw new Error("named plan must not reload agents") },
+    },
+    session: { switchModel: async () => { switches += 1 } },
+  } as never, planConfig)
+
+  const hidden = await routing?.selectPlan("review")
+  assert.equal(hidden?.status, "no-eligible")
+  assert.equal(hidden?.skipped[0]?.code, "not-in-registry")
+  const listedAfterHidden = listed
+  const readsAfterHidden = usageReads
+
+  enabled = true
+  const selected = await routing?.selectPlan("review")
+  assert.equal(selected?.status, "selected")
+  assert.equal(selected?.selected?.providerID, "openai")
+  assert.equal(selected?.selected?.modelID, "gpt-6-luna")
+  assert.equal(selected?.reasonCode, "highest-priority-eligible")
+  assert.ok(listed > listedAfterHidden, "enabling the model is visible on the next named-plan query")
+  assert.ok(usageReads > readsAfterHidden, "named-plan selection reads cached usage")
+
+  availability = "limited"
+  const limited = await routing?.selectPlan("review")
+  assert.equal(limited?.status, "no-eligible")
+  assert.equal(limited?.skipped[0]?.code, "limited")
+
+  availability = "available"
+  await routing?.reportFailure({ providerID: "openai", modelID: "gpt-6-luna", classification: "model-outage" })
+  const cooling = await routing?.selectPlan("review")
+  assert.equal(cooling?.status, "no-eligible")
+  assert.equal(cooling?.skipped[0]?.code, "cooldown")
+  assert.equal(switches, 0, "a named-plan query does not switch a session")
   await routing?.dispose()
 })

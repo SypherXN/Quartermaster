@@ -245,9 +245,11 @@ again. Neither outcome proves the provider served a request or reset its quota.
 
 Module selection and named-plan selection are the two plugin recommendation
 paths. Agent selection remains the bound form of the plan path. None of these
-calls assigns a model, reloads agents, changes a pin, reserves an exclusive
+calls switches the caller's session, changes a pin, reserves an exclusive
 model, or starts inference. The caller applies a selected provider, model,
-and optional variant itself.
+and optional variant itself. An availability change can schedule the same
+agent-catalog reload as the periodic refresh; that reload does not switch an
+active session.
 
 - `selectModule({ module })`, through `requestModuleSelection`, reads
   `modules.<name>.models`. Mapped Codex, Cursor, and Go candidates also need
@@ -255,9 +257,13 @@ and optional variant itself.
 - `select({ agent, workType? })`, through `requestSelection`, still resolves an
   agent binding, work type, and that agent's pin.
 - `selectPlan({ plan })`, through `requestPlanSelection`, evaluates a named plan
-  in plan order. It does not require an agent binding or a session, and it does
-  not borrow another agent's pin. Unknown plans return `no-plan` with
-  `unknown-plan`. Exhausted plans return `no-eligible` and the skip reasons.
+  in plan order. It adopts current project options and refreshes the enabled
+  model list and cached usage before choosing, so a process that started while
+  the model was disabled or quota was limited does not keep using that startup
+  snapshot. An active cooldown or exclusive hold still wins. It does not require
+  an agent binding or a session, and it does not borrow another agent's pin.
+  Unknown plans return `no-plan` with `unknown-plan`. Exhausted plans return
+  `no-eligible` and the skip reasons.
 
 ```ts
 import { requestPlanSelection, requestSelection } from "opencode-quartermaster/rpc"
@@ -324,12 +330,11 @@ the revision unchanged; it is not a timestamp. Comments and trailing commas in
 the settings file are accepted on read and are not preserved on write.
 
 At plugin startup, Quartermaster parses an empty settings object, rejects
-non-empty `plugins[].options`, then adopts the winning `quartermaster.jsonc`
-when a project directory and provenance are available. Adoption failure leaves
-those empty settings in place. This is complete settings replacement, not a
-key-by-key merge. Invalid or unavailable provenance, no matching declaration or
-ambiguous entries in one document also leave startup settings empty. A
-different project may resolve a different file.
+non-empty `plugins[].options`, then adopts the winning `quartermaster.jsonc`.
+Adoption failure leaves those empty settings in place. This is complete settings
+replacement, not a key-by-key merge. Invalid configuration, no matching
+declaration, or ambiguous entries in one document also leave startup settings
+empty. A different project may resolve a different file.
 
 The gateway uses its existing authenticated connection and validates its fixed
 directory before requesting native configuration sources. In the plugin, normal
@@ -338,12 +343,19 @@ the registered background service. When that process is not the receiving
 server, the reader uses this process's loopback `--hostname` and `--port`,
 authenticating with the discovered basic credentials or the receiving process's
 server password. `/api/info` must still identify this process's PID before
-configuration is read. A different PID, a non-loopback address, or unavailable
-provenance makes editing unavailable. There is no filesystem guess, and no
-substitute server is started. These paths have disposable-file and authenticated
-loopback tests, not a new live-host certification. The project root and existing
-configuration paths are
-filesystem-resolved before reading. Config and backup targets must remain inside that resolved root;
+configuration is read. A different PID or a non-loopback address is not
+provenance. `serve --stdio` deletes `OPENCODE_SERVER_PASSWORD` and
+`OPENCODE_PASSWORD` before plugins load, so that loopback read cannot
+authenticate. Adoption then reads the local documents this process would have
+loaded: the user config directory (`OPENCODE_CONFIG_DIR`, otherwise the XDG
+config directory's `opencode` folder), then each ancestor from the filesystem
+root through the project, then `OPENCODE_CONFIG` when it is set. Project files
+are skipped when project config is disabled. The last matching registration
+still wins, and its sibling `quartermaster.jsonc` is adopted. No substitute
+server is started. Editing stays unavailable without verified loopback
+provenance. These paths have disposable-file and authenticated loopback tests,
+not a new live-host certification. The project root and existing
+configuration paths are filesystem-resolved before reading. Config and backup targets must remain inside that resolved root;
 escaping junctions/symlinks and unresolvable file links fail closed. Contained
 links are allowed, but multiply hard-linked files are rejected because their
 other paths cannot be confined by `realpath`. Apply rechecks containment before
@@ -387,7 +399,12 @@ options reads and applies. Its `quartermaster` grant remains read-only. The host
 checks the grant and enabled state, chooses the active directory, authenticates
 the RPC, and cancels stale requests without giving the guest an endpoint or
 credentials. The opted-in local gateway uses the same project-options reader
-and writer directly for its fixed directory. The offline draft at
+for its fixed directory. Its apply route saves a winning file inside the project
+through the project writer, and a winning sibling outside the project through a
+gateway-only writer with the same revision, backup, and basename checks. The
+plugin RPC writer still refuses that outside file. A pathless winner is not
+created. The outside-file lock sits beside that settings file, not in the
+project. The offline draft at
 [`web/README.md`](../web/README.md) stays syntax-only.
 
 ## Browser UI serving and authentication
