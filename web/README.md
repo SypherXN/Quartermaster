@@ -1,13 +1,19 @@
 # Opt-in local tools
 
 These tools require a repository checkout; they are not included in the installed
-plugin archive and do not start with the plugin.
+plugin archive. Loading that checkout starts the gateway on `127.0.0.1` port
+`4175` (`QUARTERMASTER_LOCAL_UI_PORT`). Set `QUARTERMASTER_LOCAL_UI=0` to keep
+it from starting. A port that is already accepting connections is left as it is.
+The process a checkout load starts stops when that host exits.
+Startup does not open a browser and does not start an OpenCode server. It uses
+the loaded project's directory and the existing loopback service credentials.
+An installed archive has no page to serve, so it does not start the gateway.
 
 ## Reports and local gateway
 
 Open `index.html` to import a saved report without a server. The dashboard has four
 bookmarkable views: **Overview**, **Plans**, **Providers & models**, and **Quota**.
-For live information and explicit configuration editing, start the local gateway instead. It stays bound
+For live information and explicit configuration editing, use the local gateway. A checkout load starts it. It stays bound
 to one configured project; it does not follow active-project switches.
 
 From the repository root, configure these environment variables:
@@ -19,10 +25,10 @@ From the repository root, configure these environment variables:
 | `QUARTERMASTER_PROJECT_DIR` | Absolute directory of the intended project |
 | `QUARTERMASTER_LOCAL_UI_PORT` | Optional gateway port; defaults to `4175` |
 
-Run `npm run local-ui` and open the printed loopback URL. Opening Quota reads the provider-quota snapshot once; **Refresh quota** reads it again. Opening Providers & models reads the catalog once; **Refresh catalog** reads it again. Catalog entries are metadata, not proof that a provider is connected or
+A checkout load stops its gateway when that host exits. `npm run local-ui` can start it manually and leaves that process running until you stop it. Unless `QUARTERMASTER_LOCAL_UI_OPEN_BROWSER=0`, the manual start opens the plans view. Open the printed loopback URL. Opening Quota reads the provider-quota snapshot once; **Refresh quota** reads it again. Opening Providers & models reads the catalog once; **Refresh catalog** reads it again. Catalog entries are metadata, not proof that a provider is connected or
 authenticated. A page opened as a file does not fetch. These reads do not run inference or recovery
 probes. Status reads may read quota sources; quota timestamps identify freshness,
-and rereading does not guarantee new observations. Stop the gateway when finished.
+and rereading does not guarantee new observations. Stop a manual gateway when finished.
 It does not start an OpenCode server.
 
 **Working offline? Import a report** is a secondary control on Overview. It reads

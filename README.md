@@ -76,7 +76,7 @@ alone, not a full OpenCode config. For other config locations, see
 
 On an OpenChamber build that includes the Quartermaster panel, allow `quartermaster` to read reports and `quartermaster-options` to save. The read grant cannot save. The panel is part of OpenChamber, not this package. See [the bridge](docs/OPENCHAMBER_BRIDGE.md).
 
-A checkout can also start the optional local page with `npm run local-ui`. See [`web/README.md`](web/README.md).
+Loading a checkout starts the local page at `http://127.0.0.1:4175/` without opening a browser, and that process stops when the host exits. A listener that is already up is left alone. Set `QUARTERMASTER_LOCAL_UI=0` to skip it. `npm run local-ui` starts it manually and leaves it running until you stop it. See [`web/README.md`](web/README.md).
 
 ### Package policy and updates
 

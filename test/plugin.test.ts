@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
-import plugin from "../src/index.ts"
+import plugin, { startCheckoutLocalUi } from "../src/index.ts"
 import { MODULE_COOLDOWN_STORAGE_KEY, type ModuleSelection } from "../src/modules.ts"
 import { fixtureConfiguration } from "./configuration-fixture.ts"
 
@@ -31,6 +31,7 @@ function fakeContext(extra: Record<string, unknown> = {}) {
       hook: async () => ({ dispose() {} }),
     },
     storage,
+    quartermasterLocalUi: async () => "skipped",
     ...extra,
   }
 }
@@ -129,4 +130,129 @@ test("modules-only startup supports recommendation status without native capabil
     await rm(directory, { recursive: true, force: true })
   }
   assert.equal(disposed, true)
+})
+
+test("plugin setup starts the local UI for the loaded project", async () => {
+  const calls: string[] = []
+  const cleanup = await plugin.setup(fakeContext({
+    location: { directory: "C:\\work", project: { id: "project-test" } },
+    quartermasterLocalUi: async (directory: string) => {
+      calls.push(directory)
+      return "running"
+    },
+    rpc: fakeRpc(),
+  }) as never)
+  if (typeof cleanup === "function") await cleanup()
+  assert.deepEqual(calls, ["C:\\work"])
+})
+
+test("plugin shutdown stops the local UI it started", async () => {
+  let stopped = false
+  const cleanup = await plugin.setup(fakeContext({
+    location: { directory: "C:\\work", project: { id: "project-test" } },
+    quartermasterLocalUi: async (_directory: string, options?: { retain?: (stop: () => void) => void }) => {
+      options?.retain?.(() => { stopped = true })
+      return "started"
+    },
+    rpc: fakeRpc(),
+  }) as never)
+  assert.equal(stopped, false)
+  if (typeof cleanup !== "function") throw new Error("plugin setup did not return cleanup")
+  await cleanup()
+  assert.equal(stopped, true)
+})
+
+test("plugin setup failure stops the local UI it started", async () => {
+  let stopped = false
+  await assert.rejects(() => plugin.setup(fakeContext({
+    location: { directory: "C:\\work", project: { id: "project-test" } },
+    quartermasterLocalUi: async (_directory: string, options?: { retain?: (stop: () => void) => void }) => {
+      options?.retain?.(() => { stopped = true })
+      return "started"
+    },
+    storage: { ...storage, get: async () => { throw new Error("storage down") } },
+    rpc: fakeRpc(),
+  }) as never), /storage down/)
+  assert.equal(stopped, true)
+})
+
+test("a local UI startup failure does not stop the plugin", async () => {
+  const warnings: unknown[][] = []
+  const warn = console.warn
+  console.warn = (...args: unknown[]) => { warnings.push(args) }
+  try {
+    const cleanup = await plugin.setup(fakeContext({
+      location: { directory: "C:\\work", project: { id: "project-test" } },
+      quartermasterLocalUi: async () => { throw new Error("ui down") },
+      rpc: fakeRpc(),
+    }) as never)
+    if (typeof cleanup === "function") await cleanup()
+    assert.match(warnings.map((entry) => entry.join(" ")).join("\n"), /ui down/)
+  } finally {
+    console.warn = warn
+  }
+})
+
+test("checkout local UI startup skips, disables, and reports the loopback URL", async () => {
+  let loaded = false
+  const load = async () => { loaded = true; return { ensureLocalUi: async () => "started" } }
+  assert.equal(await startCheckoutLocalUi(undefined, { env: {}, load }), "skipped")
+  assert.equal(await startCheckoutLocalUi("  ", { env: {}, load }), "skipped")
+  assert.equal(loaded, false)
+  assert.equal(await startCheckoutLocalUi("C:\\work", {
+    env: { QUARTERMASTER_LOCAL_UI: "0" },
+    load,
+  }), "disabled")
+  assert.equal(loaded, false)
+  assert.equal(await startCheckoutLocalUi("C:\\work", {
+    env: {},
+    scriptUrl: new URL("./missing-local-ui.mjs", import.meta.url),
+    load,
+  }), "absent")
+  assert.equal(loaded, false)
+  assert.equal(await startCheckoutLocalUi("C:\\work", {
+    env: {},
+    load: async () => ({}),
+  }), "absent")
+
+  const calls: { projectDirectory: string }[] = []
+  const notes: string[] = []
+  const info = console.info
+  console.info = (...args: unknown[]) => { notes.push(args.join(" ")) }
+  try {
+    assert.equal(await startCheckoutLocalUi("C:\\work", {
+      env: { QUARTERMASTER_LOCAL_UI_PORT: "4188" },
+      load: async () => ({
+        ensureLocalUi: async (options: { projectDirectory: string }) => {
+          calls.push(options)
+          return "started"
+        },
+      }),
+    }), "started")
+    assert.equal(await startCheckoutLocalUi("C:\\work", {
+      env: {},
+      load: async () => ({ ensureLocalUi: async () => "running" }),
+    }), "running")
+    assert.equal(await startCheckoutLocalUi("C:\\work", {
+      env: {},
+      load: async () => ({ ensureLocalUi: async () => "nope" }),
+    }), "unavailable")
+    const warn = console.warn
+    const warnings: string[] = []
+    console.warn = (...args: unknown[]) => { warnings.push(args.join(" ")) }
+    try {
+      assert.equal(await startCheckoutLocalUi("C:\\work", {
+        env: {},
+        load: async () => ({ ensureLocalUi: async () => { throw new Error("bind failed") } }),
+      }), "unavailable")
+    } finally {
+      console.warn = warn
+    }
+    assert.match(warnings.join("\n"), /bind failed/)
+  } finally {
+    console.info = info
+  }
+  assert.deepEqual(calls, [{ projectDirectory: "C:\\work" }])
+  assert.match(notes.join("\n"), /http:\/\/127\.0\.0\.1:4188\//)
+  assert.equal(notes.length, 1)
 })

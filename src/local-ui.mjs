@@ -3,7 +3,7 @@ import { homedir } from "node:os"
 import { applyDiscoveredQuartermasterOptions, readProjectQuartermasterOptions } from "./project-options.ts"
 import { spawn } from "node:child_process"
 import { createServer } from "node:http"
-import { isIP } from "node:net"
+import { connect as connectPort, isIP } from "node:net"
 import { resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -285,8 +285,162 @@ export function createLocalUiServer({ openCodeURL, token, projectDirectory, port
       send(res, 502, { error: "Quartermaster report unavailable" })
     }
   })
-  server.on("error", (error) => console.error("Quartermaster local UI stopped:", error.message))
+  server.on("error", (error) => {
+    if (localUiListenError(error) === "running") {
+      server.close()
+      return
+    }
+    console.error("Quartermaster local UI stopped:", error.message)
+  })
   return server
+}
+
+export function shouldOpenLocalUiBrowser(env = process.env) {
+  return env.QUARTERMASTER_LOCAL_UI_OPEN_BROWSER !== "0"
+}
+
+export function localUiListenError(error) {
+  return error?.code === "EADDRINUSE" ? "running" : "error"
+}
+
+function probeLocalUiPort(port) {
+  return new Promise((resolveProbe) => {
+    const socket = connectPort({ host: "127.0.0.1", port })
+    const finish = (open) => {
+      socket.removeAllListeners()
+      socket.destroy()
+      resolveProbe(open)
+    }
+    socket.setTimeout(300)
+    socket.once("connect", () => finish(true))
+    socket.once("timeout", () => finish(false))
+    socket.once("error", () => finish(false))
+  })
+}
+
+let localUiStartup
+let ownedChild
+let owners = 0
+
+export function localUiOwnerCount() {
+  return owners
+}
+
+function stopOwnedChild(child) {
+  if (!child || child.killed || child.exitCode != null || typeof child.kill !== "function") return false
+  try {
+    child.kill()
+  } catch {
+    return false
+  }
+  return true
+}
+
+export function releaseLocalUi() {
+  if (owners <= 0) return false
+  owners -= 1
+  if (owners > 0) return false
+  const child = ownedChild
+  ownedChild = undefined
+  return stopOwnedChild(child)
+}
+
+process.once("exit", () => { stopOwnedChild(ownedChild) })
+
+export function parentIsAlive(pid) {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return error?.code === "EPERM"
+  }
+}
+
+export function watchLocalUiParent(parentPid, { isAlive = parentIsAlive, onGone, intervalMs = 1000 } = {}) {
+  const pid = Number(parentPid)
+  if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) return undefined
+  let stopped = false
+  const check = () => {
+    if (stopped || isAlive(pid)) return
+    stopped = true
+    clearInterval(timer)
+    if (typeof onGone === "function") onGone()
+  }
+  const timer = setInterval(check, intervalMs)
+  if (typeof timer.unref === "function") timer.unref()
+  check()
+  return () => {
+    stopped = true
+    clearInterval(timer)
+  }
+}
+
+export function ensureLocalUi({
+  projectDirectory,
+  env = process.env,
+  spawnImpl = spawn,
+  connect = probeLocalUiPort,
+  scriptPath = fileURLToPath(import.meta.url),
+  sleep = (delay) => new Promise((done) => setTimeout(done, delay)),
+  attempts = 10,
+  retain,
+} = {}) {
+  if (!localUiStartup)
+    localUiStartup = startLocalUiProcess({ projectDirectory, env, spawnImpl, connect, scriptPath, sleep, attempts })
+      .finally(() => { localUiStartup = undefined })
+  if (typeof retain === "function") {
+    localUiStartup.then((status) => {
+      if (status === "started" || (status === "running" && ownedChild)) {
+        owners += 1
+        retain(() => releaseLocalUi())
+      }
+    }, () => {})
+  }
+  return localUiStartup
+}
+
+async function startLocalUiProcess({ projectDirectory, env, spawnImpl, connect, scriptPath, sleep, attempts }) {
+  if (typeof projectDirectory !== "string" || projectDirectory.trim() === "") return "skipped"
+  if (env.QUARTERMASTER_LOCAL_UI === "0") return "disabled"
+  const port = Number(env.QUARTERMASTER_LOCAL_UI_PORT ?? 4175)
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Invalid local UI port")
+  if (await connect(port)) return "running"
+  if (ownedChild) {
+    const stale = ownedChild
+    ownedChild = undefined
+    stopOwnedChild(stale)
+  }
+  const directory = resolve(projectDirectory)
+  let failure = ""
+  const child = spawnImpl(process.execPath, [scriptPath], {
+    cwd: directory,
+    detached: false,
+    windowsHide: true,
+    stdio: ["ignore", "ignore", "pipe"],
+    env: {
+      ...env,
+      QUARTERMASTER_PROJECT_DIR: directory,
+      QUARTERMASTER_GATEWAY_CHILD: "1",
+      QUARTERMASTER_LOCAL_UI_OPEN_BROWSER: "0",
+      QUARTERMASTER_LOCAL_UI_PARENT_PID: String(process.pid),
+    },
+  })
+  child.stderr?.setEncoding?.("utf8")
+  child.stderr?.on?.("data", (chunk) => { failure += chunk })
+  child.unref?.()
+  child.stderr?.unref?.()
+  ownedChild = child
+  try {
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      if (await connect(port)) return "started"
+      await sleep(100)
+    }
+    throw new Error(failure.trim() || `local UI did not accept connections on 127.0.0.1:${port}`)
+  } catch (error) {
+    if (ownedChild === child) ownedChild = undefined
+    stopOwnedChild(child)
+    throw error
+  }
 }
 
 async function localService() {
@@ -328,17 +482,27 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       }
       const port = Number(process.env.QUARTERMASTER_LOCAL_UI_PORT ?? 4175)
       const server = createLocalUiServer({ openCodeURL, token, projectDirectory, port })
+      watchLocalUiParent(process.env.QUARTERMASTER_LOCAL_UI_PARENT_PID, {
+        onGone: () => {
+          server.close(() => process.exit(0))
+          setTimeout(() => process.exit(0), 500).unref()
+        },
+      })
       server.listen(port, "127.0.0.1", () => {
         const origin = `http://127.0.0.1:${server.address().port}`
         console.log(`Quartermaster local UI: ${origin}/`)
-        spawn("cmd", ["/c", "start", "", `${origin}/#plans`], { stdio: "ignore", windowsHide: true }).unref()
+        if (shouldOpenLocalUiBrowser())
+          spawn("cmd", ["/c", "start", "", `${origin}/#plans`], { stdio: "ignore", windowsHide: true }).unref()
         fetch(`${origin}/api/options`, { headers: { origin, "sec-fetch-site": "same-origin" } }).then(async (response) => {
           const body = await response.json()
           const count = body?.options?.plans && typeof body.options.plans === "object" ? Object.keys(body.options.plans).length : 0
           console.log(`Plans endpoint ${response.status}; writable ${body.writable === true}; plans ${count}${typeof body.error === "string" && body.error ? `; ${body.error}` : ""}`)
         }).catch((error) => console.error(error instanceof Error ? error.message : "plans endpoint failed"))
       })
-      for (const signal of ["SIGINT", "SIGTERM"]) process.once(signal, () => server.close())
+      for (const signal of ["SIGINT", "SIGTERM"]) process.once(signal, () => {
+        server.close(() => process.exit(0))
+        setTimeout(() => process.exit(0), 500).unref()
+      })
     }).catch((error) => {
       console.error(error instanceof Error ? error.message : "local UI failed")
       process.exitCode = 1

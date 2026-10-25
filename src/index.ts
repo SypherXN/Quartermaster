@@ -1,3 +1,5 @@
+import { access } from "node:fs/promises"
+import { fileURLToPath } from "node:url"
 import { Plugin } from "@opencode/plugin"
 import { registerAgentRouting } from "./agent-routing.ts"
 import { parseConfig } from "./config.ts"
@@ -16,6 +18,60 @@ function startupConfigurationReader(ctx: object): ConfigurationReader | undefine
   return typeof reader === "function" ? reader as ConfigurationReader : undefined
 }
 
+type LocalUiStarter = {
+  ensureLocalUi?: (options: {
+    projectDirectory: string
+    retain?: (stop: () => void) => void
+  }) => Promise<unknown>
+  localUiOwnerCount?: () => number
+  releaseLocalUi?: () => void
+}
+
+export async function startCheckoutLocalUi(directory: string | undefined, options: {
+  env?: NodeJS.ProcessEnv
+  scriptUrl?: URL
+  load?: (script: URL) => Promise<LocalUiStarter>
+  retain?: (stop: () => void) => void
+} = {}): Promise<string> {
+  const env = options.env ?? process.env
+  if (typeof directory !== "string" || directory.trim() === "") return "skipped"
+  if (env.QUARTERMASTER_LOCAL_UI === "0") return "disabled"
+  const script = options.scriptUrl ?? new URL("./local-ui.mjs", import.meta.url)
+  try {
+    await access(fileURLToPath(script))
+  } catch {
+    return "absent"
+  }
+  try {
+    const load = options.load ?? ((url: URL) => import(url.href) as Promise<LocalUiStarter>)
+    const loaded = await load(script)
+    if (typeof loaded.ensureLocalUi !== "function") return "absent"
+    const status = await loaded.ensureLocalUi({
+      projectDirectory: directory,
+      ...(typeof options.retain === "function" ? { retain: options.retain } : {}),
+    })
+    if (status === "started") {
+      const port = env.QUARTERMASTER_LOCAL_UI_PORT ?? "4175"
+      console.info(`[quartermaster] local UI at http://127.0.0.1:${port}/`)
+    }
+    if (status === "started" || status === "running" || status === "skipped" || status === "disabled") return status
+    return "unavailable"
+  } catch (error) {
+    console.warn(`[quartermaster] local UI unavailable: ${error instanceof Error ? error.message : String(error)}`)
+    return "unavailable"
+  }
+}
+
+function startupLocalUi(ctx: object): (
+  directory: string | undefined,
+  options?: { retain?: (stop: () => void) => void },
+) => Promise<unknown> {
+  const hook = (ctx as { quartermasterLocalUi?: unknown }).quartermasterLocalUi
+  return typeof hook === "function"
+    ? hook as (directory: string | undefined, options?: { retain?: (stop: () => void) => void }) => Promise<unknown>
+    : startCheckoutLocalUi
+}
+
 export default Plugin.define({
   id: "quartermaster",
   async setup(ctx) {
@@ -24,76 +80,100 @@ export default Plugin.define({
     const config = parseConfig({})
     const readConfiguration = startupConfigurationReader(ctx)
     const directory = ctx.location.directory
-    let configurationError: unknown
-    if (directory) {
-      try {
-        await adoptProjectQuartermasterOptions(config, directory, readConfiguration)
-      } catch (error) {
-        configurationError = error
-        console.warn(`[quartermaster] project configuration unavailable: ${error instanceof Error ? error.message : String(error)}`)
-      }
+    let stopLocalUi: (() => void) | undefined
+    const stopUi = () => {
+      const stop = stopLocalUi
+      stopLocalUi = undefined
+      stop?.()
     }
-    const ledger = new TokenLedger(ctx.storage)
-    const errorLedger = new ProviderErrorLedger(ctx.storage)
-    const attributionLedger = new PluginAttributionLedger(ctx.storage)
-    const projectID = ctx.location.project.id
-    const modules = await ModuleCooldowns.load(config, ctx.storage, projectID, Date.now,
-      directory ? () => adoptProjectQuartermasterOptions(config, directory, readConfiguration) : undefined,
-      () => readUsageStatus(ctx))
-    if (configurationError) modules.noteConfigurationFailure(configurationError)
-    const budgetGate = config.budgets?.length
-      ? new TokenBudgetGate(config.budgets, projectID, await ledger.list({ projectID }))
-      : undefined
-    let usage: UsageReadResult | undefined
-    if (Object.keys(config.usageSources).length > 0) {
-      usage = await readUsageStatus(ctx)
-      if (usage.status === "unavailable") {
-        console.warn(`[quartermaster] opencode-usage status unavailable: ${usage.reason}`)
-      }
-    }
-    const routing = await registerAgentRouting(ctx, config, usage, budgetGate, readConfiguration)
     try {
-      const rpc = await registerQuartermasterRpc(ctx, config, routing, usage, {
-        projectID,
-        tokenLedger: ledger,
-        errorLedger,
-        attributionLedger,
-        budgets: config.budgets,
-        tokenRates: config.tokenRates,
-      }, ctx.location.directory, undefined, modules)
-      const collector = startTokenCollector(ctx, ledger, async () => {
-        if (!budgetGate) return
-        const changed = budgetGate.update(await ledger.list({ projectID }))
-        if (changed) await routing?.refreshBudgets()
-      })
-      let errorCollector
-      try {
-        errorCollector = typeof ctx.session?.hook === "function"
-          ? await startProviderErrorCollector(ctx, errorLedger)
-          : undefined
-      } catch (error) {
-        await collector.dispose()
-        await rpc.dispose()
-        throw error
-      }
-      return async () => {
+      await startupLocalUi(ctx)(directory, { retain: (stop) => { stopLocalUi = stop } })
+    } catch (error) {
+      console.warn(`[quartermaster] local UI unavailable: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    let hostReady = false
+    try {
+      let configurationError: unknown
+      if (directory) {
         try {
-          await errorCollector?.dispose()
-        } finally {
+          await adoptProjectQuartermasterOptions(config, directory, readConfiguration)
+        } catch (error) {
+          configurationError = error
+          console.warn(`[quartermaster] project configuration unavailable: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+      const ledger = new TokenLedger(ctx.storage)
+      const errorLedger = new ProviderErrorLedger(ctx.storage)
+      const attributionLedger = new PluginAttributionLedger(ctx.storage)
+      const projectID = ctx.location.project.id
+      const modules = await ModuleCooldowns.load(config, ctx.storage, projectID, Date.now,
+        directory ? () => adoptProjectQuartermasterOptions(config, directory, readConfiguration) : undefined,
+        () => readUsageStatus(ctx))
+      if (configurationError) modules.noteConfigurationFailure(configurationError)
+      const budgetGate = config.budgets?.length
+        ? new TokenBudgetGate(config.budgets, projectID, await ledger.list({ projectID }))
+        : undefined
+      let usage: UsageReadResult | undefined
+      if (Object.keys(config.usageSources).length > 0) {
+        usage = await readUsageStatus(ctx)
+        if (usage.status === "unavailable") {
+          console.warn(`[quartermaster] opencode-usage status unavailable: ${usage.reason}`)
+        }
+      }
+      const routing = await registerAgentRouting(ctx, config, usage, budgetGate, readConfiguration)
+      try {
+        const rpc = await registerQuartermasterRpc(ctx, config, routing, usage, {
+          projectID,
+          tokenLedger: ledger,
+          errorLedger,
+          attributionLedger,
+          budgets: config.budgets,
+          tokenRates: config.tokenRates,
+        }, ctx.location.directory, undefined, modules)
+        const collector = startTokenCollector(ctx, ledger, async () => {
+          if (!budgetGate) return
+          const changed = budgetGate.update(await ledger.list({ projectID }))
+          if (changed) await routing?.refreshBudgets()
+        })
+        let errorCollector
+        try {
+          errorCollector = typeof ctx.session?.hook === "function"
+            ? await startProviderErrorCollector(ctx, errorLedger)
+            : undefined
+        } catch (error) {
+          await collector.dispose()
+          await rpc.dispose()
+          throw error
+        }
+        const shutdown = async () => {
           try {
-            await rpc.dispose()
+            await errorCollector?.dispose()
           } finally {
             try {
-              await collector.dispose()
+              await rpc.dispose()
             } finally {
-              await routing?.dispose()
+              try {
+                await collector.dispose()
+              } finally {
+                await routing?.dispose()
+              }
             }
           }
         }
+        hostReady = true
+        return async () => {
+          try {
+            await shutdown()
+          } finally {
+            stopUi()
+          }
+        }
+      } catch (error) {
+        await routing?.dispose()
+        throw error
       }
-    } catch (error) {
-      await routing?.dispose()
-      throw error
+    } finally {
+      if (!hostReady) stopUi()
     }
   },
 })

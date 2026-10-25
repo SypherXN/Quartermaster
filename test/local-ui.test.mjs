@@ -3,9 +3,9 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { applyProjectQuartermasterOptions, parseProjectConfig, readProjectQuartermasterOptions } from "../src/project-options.ts"
 import { createServer } from "node:http"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 import test from "node:test"
-import { createLocalUiServer } from "../src/local-ui.mjs"
+import { createLocalUiServer, ensureLocalUi, localUiListenError, localUiOwnerCount, releaseLocalUi, shouldOpenLocalUiBrowser, watchLocalUiParent } from "../src/local-ui.mjs"
 import { fixtureConfiguration } from "./configuration-fixture.ts"
 
 const report = { apiVersion: 1, status: "ok", projectID: "project-a", generatedAt: 1, totals: {}, costs: {} }
@@ -377,4 +377,152 @@ test("local gateway saves the winning settings file outside the project", async 
   })
   assert.equal(refused.status, 409)
   assert.match(await readFile(join(home, "quartermaster.jsonc"), "utf8"), /provider-a\/saved/)
+})
+
+test("plugin startup leaves a busy local UI port alone and stops the process it starts", async () => {
+  assert.equal(localUiListenError({ code: "EADDRINUSE" }), "running")
+  assert.equal(localUiListenError({ code: "EACCES" }), "error")
+  assert.equal(shouldOpenLocalUiBrowser({}), true)
+  assert.equal(shouldOpenLocalUiBrowser({ QUARTERMASTER_LOCAL_UI_OPEN_BROWSER: "0" }), false)
+
+  const directory = process.cwd()
+  const env = { QUARTERMASTER_LOCAL_UI_PORT: "43111" }
+  let spawned = 0
+  const seen = []
+  const spawnImpl = (exe, args, options) => {
+    spawned += 1
+    const child = {
+      killed: false,
+      exitCode: null,
+      kill() { this.killed = true },
+      unref() {},
+      stderr: { setEncoding() {}, on() {}, unref() {} },
+    }
+    seen.push({ exe, args, options, child })
+    return child
+  }
+  assert.equal(await ensureLocalUi({
+    projectDirectory: "  ", env, spawnImpl, connect: async () => { throw new Error("probed") },
+  }), "skipped")
+  assert.equal(await ensureLocalUi({
+    projectDirectory: directory,
+    env: { ...env, QUARTERMASTER_LOCAL_UI: "0" },
+    spawnImpl,
+    connect: async () => { throw new Error("probed") },
+  }), "disabled")
+  let adopted = false
+  assert.equal(await ensureLocalUi({
+    projectDirectory: directory, env, spawnImpl, connect: async () => true,
+    retain() { adopted = true },
+  }), "running")
+  assert.equal(spawned, 0)
+  assert.equal(adopted, false)
+  assert.equal(localUiOwnerCount(), 0)
+
+  let probes = 0
+  let stop
+  let extraStop
+  try {
+    const started = ensureLocalUi({
+      projectDirectory: directory,
+      env,
+      scriptPath: "src/local-ui.mjs",
+      attempts: 3,
+      sleep: async () => {},
+      connect: async (port) => {
+        assert.equal(port, 43111)
+        probes += 1
+        return probes > 1
+      },
+      retain(fn) { stop = fn },
+      spawnImpl,
+    })
+    const shared = ensureLocalUi({
+      projectDirectory: directory,
+      env,
+      spawnImpl: () => { throw new Error("second spawn") },
+      connect: async () => { throw new Error("second probe") },
+    })
+    assert.equal(shared, started)
+    assert.equal(await started, "started")
+    assert.equal(spawned, 1)
+    assert.equal(probes, 2)
+    const child = seen[0]
+    assert.equal(child.exe, process.execPath)
+    assert.deepEqual(child.args, ["src/local-ui.mjs"])
+    assert.equal(child.options.detached, false)
+    assert.equal(child.options.windowsHide, true)
+    assert.equal(child.options.cwd, resolve(directory))
+    assert.equal(child.options.env.QUARTERMASTER_PROJECT_DIR, resolve(directory))
+    assert.equal(child.options.env.QUARTERMASTER_GATEWAY_CHILD, "1")
+    assert.equal(child.options.env.QUARTERMASTER_LOCAL_UI_OPEN_BROWSER, "0")
+    assert.equal(child.options.env.QUARTERMASTER_LOCAL_UI_PARENT_PID, String(process.pid))
+    assert.deepEqual(child.options.stdio, ["ignore", "ignore", "pipe"])
+    assert.equal(localUiOwnerCount(), 1)
+
+    assert.equal(await ensureLocalUi({
+      projectDirectory: directory,
+      env,
+      connect: async () => true,
+      spawnImpl: () => { throw new Error("owned spawn") },
+      retain(fn) { extraStop = fn },
+    }), "running")
+    assert.equal(localUiOwnerCount(), 2)
+    extraStop()
+    assert.equal(child.child.killed, false)
+    assert.equal(localUiOwnerCount(), 1)
+    stop()
+    assert.equal(child.child.killed, true)
+    assert.equal(localUiOwnerCount(), 0)
+
+    await assert.rejects(() => ensureLocalUi({
+      projectDirectory: directory,
+      env: { QUARTERMASTER_LOCAL_UI_PORT: "0" },
+      spawnImpl,
+      connect: async () => false,
+    }), /Invalid local UI port/)
+    await assert.rejects(() => ensureLocalUi({
+      projectDirectory: directory,
+      env,
+      attempts: 2,
+      sleep: async () => {},
+      connect: async () => false,
+      spawnImpl: () => ({
+        unref() {},
+        stderr: {
+          setEncoding() {},
+          on(event, callback) { if (event === "data") callback("port closed\n") },
+          unref() {},
+        },
+      }),
+    }), /port closed/)
+  } finally {
+    extraStop?.()
+    stop?.()
+  }
+})
+
+test("local UI parent watch stops when the parent is gone", async () => {
+  assert.equal(watchLocalUiParent(0), undefined)
+  assert.equal(watchLocalUiParent(process.pid), undefined)
+  let immediate = 0
+  const stopNow = watchLocalUiParent(4321, { isAlive: () => false, onGone: () => { immediate += 1 } })
+  assert.equal(immediate, 1)
+  stopNow?.()
+  assert.equal(immediate, 1)
+
+  let alive = true
+  let gone = 0
+  const stop = watchLocalUiParent(4321, {
+    isAlive: () => alive,
+    onGone: () => { gone += 1 },
+    intervalMs: 15,
+  })
+  assert.equal(gone, 0)
+  alive = false
+  await new Promise((done) => setTimeout(done, 50))
+  assert.equal(gone, 1)
+  stop?.()
+  await new Promise((done) => setTimeout(done, 40))
+  assert.equal(gone, 1)
 })

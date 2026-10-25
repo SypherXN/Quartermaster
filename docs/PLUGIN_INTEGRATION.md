@@ -411,11 +411,16 @@ project. The offline draft at
 
 The OpenCode V2 2.0.23 plugin surface used by this project does not provide this server plugin a web UI/router/static-asset mount; `app` is metadata, and the CLI/TUI router is not a server web mount. CORS is not authentication. Quartermaster does not claim an authenticated OpenCode UI mount or browser-safe active-project session.
 
-The optional gateway (`npm run local-ui`) starts separately from the plugin and
-binds to IPv4 loopback. It keeps credentials server-side, uses Basic local-service
-auth, fixes the directory at startup and checks report ownership. Its routes load
+Loading a checkout starts the loopback gateway on `127.0.0.1` port `4175`
+(`QUARTERMASTER_LOCAL_UI_PORT`). A port that is already accepting connections
+is left running. The process a checkout load starts stops when that host exits. That start does not open a browser and does not start an
+OpenCode server. `QUARTERMASTER_LOCAL_UI=0` skips it. An installed archive has
+no page to serve, so it does not start the gateway. `npm run local-ui` can
+start the same gateway manually. It binds to IPv4 loopback, keeps credentials
+server-side, uses Basic local-service auth, fixes the directory at startup and
+checks report ownership. Its routes load
 reports and read/apply project options; it is not a general proxy. Local processes
-can access the listener, including its writer. Stop it when finished and treat
+can access the listener, including its writer. Stop a manual gateway when finished and treat
 telemetry as sensitive. It does not follow host project switches. See
 [`web/README.md`](../web/README.md).
 
