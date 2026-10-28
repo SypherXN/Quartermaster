@@ -8,7 +8,7 @@ import { registerQuartermasterRpc } from "../src/rpc.ts"
 
 async function install(projectID = "a", stored = new Map<string, unknown>(), options: unknown = {
   plans: { review: ["local/primary", "remote/backup"] }, agents: { reviewer: "review" },
-}) {
+}, directory?: string) {
   const commands: Record<string, { execute(input: { sessionID: string }): Promise<void> }> = {}
   const hooks: Record<string, (input: unknown) => Promise<void>> = {}
   const sessions = new Map<string, unknown>([
@@ -24,7 +24,7 @@ async function install(projectID = "a", stored = new Map<string, unknown>(), opt
   const config = parseConfig(options)
   const context = {
     app: { name: "opencode", version: "2.0.25", channel: "stable" },
-    location: { project: { id: projectID } },
+    location: { project: { id: projectID }, ...(directory === undefined ? {} : { directory }) },
     agent: { transform: async () => ({ dispose: async () => {} }), reload: async () => { calls.reload++ } },
     model: { list: async () => {
       calls.registry++
@@ -173,4 +173,37 @@ test("qm-status reuses offline health and injected availability without probing 
     ]))
     assert.equal((await fixture.diagnose()).recommendation.selected.providerID, "local")
   } finally { await fixture.routing.dispose(); probe.mock.restore() }
+})
+
+test("a re-keyed project is confirmed by directory so its routed requests are admitted", async () => {
+  const directory = "C:\\Users\\mattg\\projects\\AionTools"
+  const fixture = await install("new-project", new Map(), undefined, directory)
+  try {
+    fixture.sessions.set("rekeyed", {
+      projectID: "old-project", agent: "reviewer", model: { providerID: "host", id: "manual" }, location: { directory },
+    })
+    const rekeyed = await fixture.diagnose("rekeyed")
+    assert.equal(rekeyed.session.scope, "confirmed-directory")
+    assert.equal(rekeyed.session.agent, "reviewer")
+    assert.equal(rekeyed.session.binding, "configured")
+    await fixture.hooks["model.request"]({
+      sessionID: "rekeyed", agent: "reviewer", kind: "primary", model: { providerID: "remote", id: "backup" },
+    })
+    assert.equal((await fixture.diagnose("rekeyed")).session.activePrimary, true)
+  } finally { await fixture.routing.dispose() }
+})
+
+test("a session from another directory is still rejected before provider dispatch", async () => {
+  const fixture = await install("new-project", new Map(), undefined, "C:\\Users\\mattg\\projects\\AionTools")
+  try {
+    fixture.sessions.set("elsewhere", {
+      projectID: "old-project", agent: "reviewer", location: { directory: "C:\\Users\\mattg\\projects\\Other" },
+    })
+    const elsewhere = await fixture.diagnose("elsewhere")
+    assert.equal(elsewhere.session.scope, "mismatch")
+    assert.equal(elsewhere.session.agent, "unknown")
+    await assert.rejects(() => fixture.hooks["model.request"]({
+      sessionID: "elsewhere", agent: "reviewer", kind: "primary", model: { providerID: "remote", id: "backup" },
+    }), /could not confirm request ownership/)
+  } finally { await fixture.routing.dispose() }
 })

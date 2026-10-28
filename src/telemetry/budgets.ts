@@ -1,22 +1,34 @@
-import type { TokenBudgetCalendarWindow, TokenBudgetConfig } from "../config.ts"
+import type { TokenBudgetCalendarWindow, TokenBudgetConfig, TokenRateConfig } from "../config.ts"
+import { estimateTokenCosts } from "./costs.ts"
+import type { PriceTable } from "./prices.ts"
 import type { TokenTelemetryRecord } from "./types.ts"
+
+export interface TokenBudgetPricing {
+  rates?: readonly TokenRateConfig[]
+  prices?: PriceTable
+}
 
 export interface TokenBudgetReading {
   id: string
   dimension: TokenBudgetConfig["dimension"]
   target?: string
-  limitTokens: number
+  limitTokens: number | null
+  limitUSD: number | null
   windowStart: number
   windowEnd: number
   windowMs?: number
   calendarWindow?: TokenBudgetCalendarWindow
   observedTokens: number
   unknownRecords: number
+  usedUSD: number | null
+  remainingUSD: number | null
+  costComplete: boolean
+  costUnknown: boolean
   /** The live event stream has no replay or completeness watermark. */
   complete: false
   /** Deliberately absent: observed usage is only a lower bound. */
   remainingTokens: null
-  /** True only when observed usage alone proves the limit was reached. */
+  /** True when observed token usage or known USD usage proves a limit was reached. */
   limitReached: boolean
 }
 
@@ -85,12 +97,37 @@ function calendarWindowStart(now: number, window: TokenBudgetCalendarWindow): nu
   return after
 }
 
+function usedUSDFromCosts(
+  limitUSD: number | undefined,
+  costs: ReturnType<typeof estimateTokenCosts>,
+): { usedUSD: number | null; costUnknown: boolean; costComplete: boolean } {
+  const costComplete = costs.pricedRecords > 0 && costs.unpricedRecords === 0
+  if (limitUSD === undefined) {
+    return { usedUSD: null, costUnknown: false, costComplete }
+  }
+
+  const pricedNonUsd = costs.currencies.some(
+    ({ currency, pricedRecords }) => currency !== "USD" && pricedRecords > 0,
+  )
+  if (pricedNonUsd) {
+    return { usedUSD: null, costUnknown: true, costComplete }
+  }
+
+  const usd = costs.currencies.find(({ currency }) => currency === "USD")
+  if (!usd) {
+    return { usedUSD: null, costUnknown: true, costComplete }
+  }
+
+  return { usedUSD: usd.estimatedAmount, costUnknown: false, costComplete }
+}
+
 /** Evaluate each budget independently over its rolling or calendar window. */
 export function evaluateTokenBudgets(
   budgets: readonly TokenBudgetConfig[] | undefined,
   records: readonly TokenTelemetryRecord[],
   now: number,
   projectID?: string,
+  pricing?: TokenBudgetPricing,
 ): TokenBudgetReading[] {
   if (budgets === undefined || budgets.length === 0) return []
   if (!Number.isFinite(now)) throw new TypeError("now must be finite")
@@ -101,11 +138,13 @@ export function evaluateTokenBudgets(
       : now - budget.windowMs!
     let observedTokens = 0
     let unknownRecords = 0
+    const windowRecords: TokenTelemetryRecord[] = []
 
     for (const record of records) {
       if (record.completedAt < windowStart || record.completedAt > now) continue
       const match = matches(budget, record, projectID)
       if (match === false) continue
+      windowRecords.push(record)
       if (match === undefined || record.counts === null) {
         unknownRecords += 1
         continue
@@ -126,20 +165,35 @@ export function evaluateTokenBudgets(
       observedTokens += total
     }
 
+    const costs = estimateTokenCosts(windowRecords, pricing?.rates, pricing?.prices)
+    const { usedUSD, costUnknown, costComplete } = usedUSDFromCosts(budget.limitUSD, costs)
+    const limitTokens = budget.limitTokens ?? null
+    const limitUSD = budget.limitUSD ?? null
+    const tokenLimitReached = limitTokens !== null && observedTokens >= limitTokens
+    const usdLimitReached = limitUSD !== null && usedUSD !== null && usedUSD >= limitUSD
+    const remainingUSD = limitUSD !== null && usedUSD !== null && costComplete
+      ? Math.max(0, limitUSD - usedUSD)
+      : null
+
     return {
       id: budget.id,
       dimension: budget.dimension,
       ...(budget.target === undefined ? {} : { target: budget.target }),
-      limitTokens: budget.limitTokens,
+      limitTokens,
+      limitUSD,
       windowStart,
       windowEnd: now,
       ...(budget.windowMs === undefined ? {} : { windowMs: budget.windowMs }),
       ...(budget.calendarWindow === undefined ? {} : { calendarWindow: budget.calendarWindow }),
       observedTokens,
       unknownRecords,
+      usedUSD,
+      remainingUSD,
+      costComplete,
+      costUnknown,
       complete: false,
       remainingTokens: null,
-      limitReached: observedTokens >= budget.limitTokens,
+      limitReached: tokenLimitReached || usdLimitReached,
     }
   })
 }

@@ -32,6 +32,9 @@ export interface TokenTelemetryRecord {
   completedAt: number
   counts: TokenCounts | null
   usageStatus: "reported" | "missing"
+  partial: boolean
+  // Host USD for this step. Absent on rows stored before the field existed.
+  hostCostUSD?: number | null
 }
 
 export type TokenEventContextResolver = (
@@ -52,22 +55,36 @@ function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value)
 }
 
-function tokenCounts(value: unknown): TokenCounts | null {
-  if (!isObject(value) || !isObject(value.cache)) return null
+function hostCostUSD(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null
+}
+
+function tokenCounts(value: unknown): { counts: TokenCounts; partial: boolean } | null {
+  if (!isObject(value)) return null
 
   const { input, output, reasoning } = value
-  const { read, write } = value.cache
-  if (
-    !isFiniteNumber(input) ||
-    !isFiniteNumber(output) ||
-    !isFiniteNumber(reasoning) ||
-    !isFiniteNumber(read) ||
-    !isFiniteNumber(write)
-  ) {
-    return null
-  }
+  if (!isFiniteNumber(input) || !isFiniteNumber(output)) return null
 
-  return { input, output, reasoning, cacheRead: read, cacheWrite: write }
+  let partial = false
+  let reasoningVal = 0
+  if (isFiniteNumber(reasoning)) reasoningVal = reasoning
+  else partial = true
+
+  const cache = isObject(value.cache) ? value.cache : {}
+  if (!isObject(value.cache)) partial = true
+
+  let cacheRead = 0
+  if (isFiniteNumber(cache.read)) cacheRead = cache.read
+  else partial = true
+
+  let cacheWrite = 0
+  if (isFiniteNumber(cache.write)) cacheWrite = cache.write
+  else partial = true
+
+  return {
+    counts: { input, output, reasoning: reasoningVal, cacheRead, cacheWrite },
+    partial,
+  }
 }
 
 function projectEvent(
@@ -89,7 +106,7 @@ function projectEvent(
   const providerID = nonEmptyString(model?.providerID)
   const modelID = nonEmptyString(model?.modelID)
   const hasModel = providerID !== undefined && modelID !== undefined
-  const counts = tokenCounts(event.data.tokens)
+  const parsed = tokenCounts(event.data.tokens)
 
   return {
     hostContractVersion: "2.0.18",
@@ -104,8 +121,10 @@ function projectEvent(
     modelID: hasModel ? modelID : null,
     variant: hasModel ? nonEmptyString(model?.variant) ?? null : null,
     completedAt: event.created,
-    counts,
-    usageStatus: counts ? "reported" : "missing",
+    counts: parsed?.counts ?? null,
+    usageStatus: parsed ? "reported" : "missing",
+    partial: parsed?.partial ?? false,
+    hostCostUSD: hostCostUSD(event.data.cost),
   }
 }
 

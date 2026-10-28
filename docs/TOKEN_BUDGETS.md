@@ -19,9 +19,12 @@ These examples are the contents of `quartermaster.jsonc`, not an OpenCode plugin
 }
 ```
 
-Each budget needs a unique `id`, a `dimension`, a positive integer
-`limitTokens`, and exactly one window. `mode` is optional and defaults to
-`advisory`; `strict` is accepted as a request but does not enable enforcement.
+Each budget needs a unique `id`, a `dimension`, at least one limit — a positive
+integer `limitTokens` and/or a positive `limitUSD` — and exactly one window.
+`limitTokens` caps observed tokens; `limitUSD` caps estimated cost, using the
+same config rates or catalog prices as the report. A budget with both is reached
+when either is reached. `mode` is optional and defaults to `advisory`; `strict`
+is accepted as a request but does not enable enforcement.
 
 - `windowMs`: a positive integer rolling duration in milliseconds.
 - `calendarWindow`: `{ "unit": "day" | "week" | "month", "timeZone": "…" }`.
@@ -59,11 +62,21 @@ event stream has no replay/completeness watermark, so readings always report
 observed lower bound alone reaches the configured limit. Do not present these
 readings as complete usage or remaining capacity.
 
+A `limitUSD` reading adds `usedUSD`, `remainingUSD`, `costComplete` and
+`costUnknown`. `usedUSD` sums the priced USD totals for the window; when a priced
+record is in another currency it stays `null` and `costUnknown` is true, because
+currencies are never added together. Unpriced records are counted through the
+cost summary rather than guessed at a price. `remainingUSD` is `null` unless the
+window is fully priced. A USD cap therefore reacts to the same estimate the
+report shows, not to an invoice.
+
 ## Assignment warnings
 
 At Quartermaster-owned agent assignment boundaries, advisory budgets log
 structured `budget-limit-reached` reasons when observed usage alone reaches a
-limit, and `budget-usage-unknown` when in-window records cannot be attributed
+limit, `budget-cost-reached` when a USD limit is reached, `budget-cost-unknown`
+when a USD limit is set but the window cannot be priced, and
+`budget-usage-unknown` when in-window records cannot be attributed
 or counted. Known usage below the limit does not produce a warning. These
 reasons accompany normal candidate selection; they never exclude a candidate,
 change plan order, or alter quota, pin, or explicit-choice precedence.

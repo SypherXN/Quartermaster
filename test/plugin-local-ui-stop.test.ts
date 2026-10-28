@@ -42,7 +42,7 @@ test("plugin shutdown stops the local UI it started", async () => {
 
 test("plugin setup failure stops the local UI it started", async () => {
   let stopped = false
-  await assert.rejects(() => plugin.setup(context({
+  await assert.rejects(async () => plugin.setup(context({
     quartermasterLocalUi: async (_directory: string, options?: { retain?: (stop: () => void) => void }) => {
       options?.retain?.(() => { stopped = true })
       return "started"

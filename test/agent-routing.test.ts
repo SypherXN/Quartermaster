@@ -92,6 +92,7 @@ test("budget warnings are reported without changing candidate selection", () => 
     completedAt: 9_500,
     counts: { input: 8, output: 5, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
     usageStatus: "reported",
+    partial: false,
   }
   const reasons = new TokenBudgetGate(budgetConfig.budgets, "project-a", [record]).reasons(10_000)
   const plain = editorWith({ reviewer: { id: "reviewer", model: { providerID: "host", id: "current" } } })

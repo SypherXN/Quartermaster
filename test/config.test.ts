@@ -64,6 +64,15 @@ test("rejects invalid budget dimensions, targets, windows, limits, and duplicate
   assert.throws(() => parseConfig({ budgets: [{ ...budget, dimension: "session" }] }), /budgets\[0\]\.dimension/)
   assert.throws(() => parseConfig({ budgets: [{ ...budget, target: "project-a" }] }), /project budgets do not accept a target/)
   assert.throws(() => parseConfig({ budgets: [{ ...budget, limitTokens: 0 }] }), /limitTokens: expected a positive safe integer/)
+  assert.throws(() => parseConfig({ budgets: [{ id: "day", dimension: "project", windowMs: 1_000 }] }), /at least one of limitTokens or limitUSD/)
+  assert.throws(() => parseConfig({ budgets: [{ ...budget, limitUSD: 0 }] }), /limitUSD: expected a finite number greater than zero/)
+  const usdOnly = parseConfig({ budgets: [{
+    id: "usd-only", dimension: "project", limitUSD: 12.5, windowMs: 1_000,
+  }] }).budgets
+  assert.ok(usdOnly)
+  assert.deepEqual(usdOnly[0], {
+    id: "usd-only", dimension: "project", mode: "advisory", limitUSD: 12.5, windowMs: 1_000,
+  })
   assert.throws(() => parseConfig({ budgets: [{ ...budget, windowMs: 1.5 }] }), /windowMs: expected a positive safe integer/)
   assert.throws(() => parseConfig({ budgets: [{ ...budget, id: "day" }, { ...budget, id: "day" }] }), /duplicate budget ID/)
   assert.throws(() => parseConfig({ budgets: [{ ...budget, dimension: "model", target: "unqualified" }] }), /target: expected providerID\/modelID/)

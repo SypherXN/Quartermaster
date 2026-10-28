@@ -9,7 +9,11 @@ import type { TokenBudgetConfig } from "./config.ts"
 import type { ProviderErrorLedger } from "./telemetry/errors.ts"
 import type { TokenLedger } from "./telemetry/ledger.ts"
 import { MAX_ATTRIBUTION_SESSIONS, type PluginAttributionLedger } from "./telemetry/attribution.ts"
+import type { CompactionLedger } from "./telemetry/compaction.ts"
+import type { WindowLedger } from "./telemetry/window.ts"
+import { type DirectUsageLedger } from "./telemetry/direct-usage.ts"
 import { buildQuartermasterReport, REPORT_MAX_OFFSET, REPORT_MAX_PAGE_SIZE, type QuartermasterReport, type ReportQuery } from "./telemetry/report.ts"
+import { readCatalogSnapshot, type CatalogSnapshot } from "./telemetry/prices.ts"
 import { applyProjectQuartermasterOptions, readProjectQuartermasterOptions, readNativeConfiguration, type ConfigurationReader } from "./project-options.ts"
 
 type AgentRouting = NonNullable<Awaited<ReturnType<typeof registerAgentRouting>>>
@@ -20,8 +24,13 @@ export type ReportingServices = {
   tokenLedger: TokenLedger
   errorLedger: ProviderErrorLedger
   attributionLedger: PluginAttributionLedger
+  directUsageLedger?: DirectUsageLedger
+  compactionLedger?: CompactionLedger
+  windowLedger?: WindowLedger
   budgets: readonly TokenBudgetConfig[] | undefined
   tokenRates: QuartermasterConfig["tokenRates"]
+  plans?: QuartermasterConfig["plans"]
+  catalog?: () => Promise<CatalogSnapshot>
   now?: () => number
 }
 
@@ -74,6 +83,25 @@ export const QUARTERMASTER_RPC = Rpc.define({
         pluginName: string,
         sessionIDs: { type: "array", items: string, minItems: 1, maxItems: MAX_ATTRIBUTION_SESSIONS },
       }, ["pluginID", "pluginName", "sessionIDs"]),
+      output,
+      errors: { invalid_input: errors.invalid_input },
+    },
+    reportDirectUsage: {
+      input: object({
+        pluginID: string,
+        pluginName: string,
+        usageID: string,
+        providerID: string,
+        modelID: string,
+        variant: string,
+        counts: object({
+          input: { type: "integer", minimum: 0 },
+          output: { type: "integer", minimum: 0 },
+          reasoning: { type: "integer", minimum: 0 },
+          cacheRead: { type: "integer", minimum: 0 },
+          cacheWrite: { type: "integer", minimum: 0 },
+        }, ["input", "output"]),
+      }, ["pluginID", "pluginName", "usageID", "providerID", "modelID", "counts"]),
       output,
       errors: { invalid_input: errors.invalid_input },
     },
@@ -383,7 +411,7 @@ export async function requestReport(
       isRecord(result.dimensions) && Array.isArray(result.dimensions.items) && Array.isArray(result.budgets) &&
        isRecord(result.pluginAttribution) && result.pluginAttribution.attribution === "self-reported-unverified" && result.pluginAttribution.verified === false &&
         isRecord(result.agentAttribution) && result.agentAttribution.evidence === "exact-assistant-message" && result.agentAttribution.complete === false &&
-        isRecord(result.planAttribution) && result.planAttribution.status === "unsupported" && result.planAttribution.complete === false &&
+        isRecord(result.planAttribution) && result.planAttribution.status === "model-match-unique" && result.planAttribution.complete === false &&
         isRecord(result.costs) && result.costs.status === "estimated-not-billed" && result.costs.complete === false &&
         isRecord(result.errors) && result.errors.complete === false && result.errors.unattributedExcluded === true &&
       isRecord(result.freshness) && result.freshness.complete === false) return result as unknown as QuartermasterReport
@@ -545,7 +573,11 @@ export async function registerQuartermasterRpc(
         limit,
         offset,
       }
-      return buildQuartermasterReport(reporting, query, input.refresh === true)
+      return buildQuartermasterReport({
+        ...reporting,
+        plans: reporting.plans ?? config.plans,
+        catalog: reporting.catalog ?? (() => readCatalogSnapshot(() => ctx.model.list())),
+      }, query, input.refresh === true)
     },
     async readOptions(_input, call) {
       if (!optionsDirectory) throw call.error("unavailable", "Project options are unavailable.", { reason: "no-project" })
@@ -600,6 +632,58 @@ export async function registerQuartermasterRpc(
         status: "accepted",
         attribution: "self-reported-unverified",
         acceptedSessions: sessionIDs.length,
+      }
+    },
+    async reportDirectUsage(input, call) {
+      const fields = ["pluginID", "pluginName", "usageID", "providerID", "modelID", "variant", "counts"]
+      if (!isRecord(input) || Object.keys(input).some((key) => !fields.includes(key))) {
+        throw call.error("invalid_input", "Invalid direct usage report.", { path: "request", message: "unexpected field" })
+      }
+      const text = (value: unknown, max: number, path: string) => {
+        if (typeof value !== "string" || value.length < 1 || value.length > max || value !== value.trim()) {
+          throw call.error("invalid_input", `Invalid ${path}.`, { path, message: `expected a non-empty string up to ${max} characters` })
+        }
+        return value
+      }
+      const pluginID = text(input.pluginID, 128, "pluginID")
+      const pluginName = text(input.pluginName, 128, "pluginName")
+      const usageID = text(input.usageID, 128, "usageID")
+      const providerID = text(input.providerID, 256, "providerID")
+      const modelID = text(input.modelID, 256, "modelID")
+      const variant = input.variant === undefined ? null : text(input.variant, 128, "variant")
+      const countFields = ["input", "output", "reasoning", "cacheRead", "cacheWrite"]
+      if (!isRecord(input.counts) || Object.keys(input.counts).some((key) => !countFields.includes(key))) {
+        throw call.error("invalid_input", "Invalid counts.", { path: "counts", message: "expected input, output, and optional reasoning or cache counts" })
+      }
+      const count = (value: unknown, path: string, required: boolean) => {
+        if (value === undefined && !required) return undefined
+        if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+          throw call.error("invalid_input", `Invalid ${path}.`, { path, message: "expected a non-negative integer" })
+        }
+        return value
+      }
+      const counts = {
+        input: count(input.counts.input, "counts.input", true)!,
+        output: count(input.counts.output, "counts.output", true)!,
+        reasoning: count(input.counts.reasoning, "counts.reasoning", false),
+        cacheRead: count(input.counts.cacheRead, "counts.cacheRead", false),
+        cacheWrite: count(input.counts.cacheWrite, "counts.cacheWrite", false),
+      }
+      if (!reporting?.directUsageLedger) return {
+        apiVersion: QUARTERMASTER_API_VERSION,
+        status: "unsupported",
+        reasonCode: "telemetry-unavailable",
+        reason: "Quartermaster direct usage reporting is not configured.",
+      }
+      const recorded = await reporting.directUsageLedger.record({
+        projectID: reporting.projectID,
+        pluginID, pluginName, usageID, providerID, modelID, variant, counts,
+      })
+      return {
+        apiVersion: QUARTERMASTER_API_VERSION,
+        status: "accepted",
+        attribution: "self-reported-unverified",
+        replaced: recorded.replaced,
       }
     },
     async pin(input, call) {

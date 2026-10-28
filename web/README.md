@@ -35,6 +35,35 @@ It does not start an OpenCode server.
 the report in the browser and displays partial telemetry and routing information;
 it does not invent catalog entries or account quota from that report.
 
+Overview also has a **Sessions ledger**: one row per root session, with its
+subagents rolled in and identified by a hashed session key rather than a session
+id, sorted by host-reported USD and limited to 25 rows. A root with any missing
+step cost stays **unknown** and sorts after the priced rows. When more exist,
+the page says how many are not listed. Each row shows messages, that host cost,
+observed tokens, cache hit rate (cache read divided by cache read plus cache
+write), the child sessions' share of tokens and host cost, cached share,
+context occupancy as a bar with a percentage (or **unknown**), a character
+split of the session's current context (user, assistant, tool, other), model,
+and last seen in local time. The cache-hit title splits cache writes into the
+first write after a compaction in that session and every other write. It does
+not guess any other cause. The **24h**,
+**7 days**, **30 days**, and **All** buttons reload the dashboard for that range
+and keep the choice in the URL hash. If the reload fails, the previous snapshot
+stays and the status line says so. **Export usage CSV** saves the rows shown,
+plus the raw token fields, the host-reported step cost, the cache hit rate and
+write split, the child share, and the character split, as a file from the
+browser; it makes no request. The **Estimated cost** stat
+prefers the host's own per-step USD total and says when steps have no figure;
+the catalog estimate is the fallback. **Plugin-reported calls**
+lists counts a plugin submitted for a request that never became a host step.
+Those rows stay separate from the session total. **Compaction by model** lists
+the summarizer's own tokens beside the model that ran the compaction and that
+model's context window. Those counts stay out of the session total, cost, and
+budgets. In Settings, a budget
+with a USD limit shows used, limit and remaining. If the cost cannot be fully
+priced, it says unknown instead of a number. Budgets always count all history,
+whatever range is selected. Token-only budgets read as before.
+
 The gateway listens on IPv4 loopback and accepts only a `127.0.0.1` upstream. It
 keeps credentials server-side, using Basic `opencode:<token>` authentication.
 It validates the fixed directory's project ID and rejects mismatched reports.
@@ -60,8 +89,7 @@ the heading arrows move a category without a mouse. Dropping a plan on another
 plan moves it before that plan, and dropping one on a category heading puts it
 at the end of that category and assigns it there. Choosing a category in the
 filter shows that group. Categories do
-not change routing or the saved file. The page uses four tabs — Plans holds the chains, Agent bindings holds agent and work-type bindings, Modules holds each module's own ordered chain with its module and per-model cooldowns, and Settings holds the cooldown floor and the configuration summary — and all panels stay in the page while you edit. Each binding chooses an existing plan from a menu.
-Other plan… accepts a typed name, and a name that is not listed yet stays marked until that plan exists.
+not change routing or the saved file. The page uses four tabs — Plans holds the chains, Agent bindings holds the agent bindings, Modules holds each module's own ordered chain with its module and per-model cooldowns. Modules use the same browser-only category panel as Plans: filter, collapsed headings, and a create row under New category. Those categories do not change the saved file, and Settings holds the cooldown floor and the configuration summary — and all panels stay in the page while you edit. Each agent binding is a text field that opens a dropdown of existing plan names. Typing filters that dropdown. A name that is not listed yet stays marked until that plan exists. Agents can be grouped with categories kept in this browser, separate from plan categories. Those headings start collapsed. Expand a heading to show the agents under it during the session, and both agents and category headings can be dragged by their `⋮⋮` handle to reorder; the heading arrows move a category without a mouse. Dropping an agent on another agent moves it before that agent, and dropping one on a category heading puts it at the end of that category and assigns it there. Choosing a category in the filter shows that group. Agent categories do not change routing or the saved file. Work-type bindings are not edited on this page; a loaded file still keeps them.
 
 Shared pools and recovery probes stay on Providers & models, below the catalog. They edit the same draft and are saved by Apply on Plans.
 
@@ -70,8 +98,9 @@ catalog refreshes. Choose a provider in the list or the menu, or choose
 **All providers** for catalog-wide search. Names, full model IDs, and exact variant
 IDs are searchable; counts distinguish matching models from the provider total.
 All model rows start collapsed, retaining name/ID, context/output limits, and a
-brief pricing glance. Inside each record, token limits, advertised capabilities,
-catalog pricing, and named variants expand independently; these sections also
+brief pricing glance. Possible variant IDs are always visible on each model card
+once its provider is expanded, with no extra model expansion required.
+Inside each record, token limits, advertised capabilities, and catalog pricing expand independently; these sections also
 start collapsed. Explicit expansion choices survive filtering and catalog rerenders.
 Each provider's model list is its own disclosure and starts closed. It keeps the provider
 name and match count visible when closed; open/closed state is kept per provider across
@@ -86,12 +115,12 @@ These are model catalog metadata, not subscription charges or an account bill;
 exact variants may have different pricing. Missing capabilities are distinct
 from an explicitly reported **No**.
 Large results show 30 models at a time; **Show more** reads only the loaded catalog.
-**Preferred** saves a multiple-model shortlist in this browser's `localStorage`,
-grouped by provider. It is not routing priority: it never changes configuration,
-plan values, fallback order, or variants. Identity is the exact `provider/model`
-ID, not a variant. Use **Preferred models only** to filter the catalog; review or
-remove saved IDs in **Saved shortlist**, including models absent from the current
-catalog. Missing entries are retained across refreshes.
+**Preferred** saves a multiple-model shortlist in this browser's `localStorage`.
+It is not routing priority: it never changes configuration, plan values,
+fallback order, or variants. Identity is the exact `provider/model` ID, not a
+variant. Preferred models stay inside their provider's own list and sort above
+the rest; **Preferred models only** hides every other model. Saved IDs absent
+from the current catalog stay stored but are not listed.
 
 Preferred IDs are listed first in Plans' native suggestions; all other catalog
 models and custom text entry remain available. Saving preferences does not rebuild
@@ -103,10 +132,15 @@ rereads storage; it does not call the gateway. A conflicting change in another t
 requires a reload before saving. Clearing browser storage removes the shortlist.
 
 The model catalog also supports
-a **Confirmed thinking only** filter. OpenCode V2 does not expose a thinking
-capability field, so official models show **Thinking unknown** and do not match
-that filter. Unknown does not mean unsupported. Exact named variant IDs remain
-selectable; no capability or effort level is inferred from a name. **Enabled**,
+a **Thinking variants only** filter. The thinking badge uses OpenCode’s capability
+flag when the catalog sends one. Otherwise it reads known effort IDs — `none`,
+`minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `thinking` — and Cursor names
+that end in those efforts. `Fast` and context sizes (`1M`, `500k`, `200k`) are
+not thinking. A model whose variants include an effort above `none` matches the
+filter and shows that span, for example **Thinking · low–max**. A model whose
+only recognized variant is `none` or **No Thinking** shows **No thinking**. Any
+other name stays **Thinking unknown**, and unknown does not mean unsupported.
+Exact named variant IDs remain selectable; plans store that exact ID. **Enabled**,
 **Disabled**, and **Enabled unknown** badges show only the optional enabled
 metadata, not connectivity or present availability. Model and variant fields use native catalog
 suggestions when a catalog has been loaded; custom values remain editable.
@@ -184,7 +218,7 @@ and [historical bridge evidence](../docs/OPENCHAMBER_BRIDGE.md).
 
 Open `index.html` directly. It does not fetch anything. In the browser console, `render`, `renderCatalog`, and `renderDashboard` accept local objects. Use fixture ids such as `fixture`. Then set `location.hash` to `#overview`, `#plans`, `#providers`, or `#quota`. `#usage` opens Quota.
 
-`renderDashboard` accepts `{apiVersion:1, projectID, generatedAt, plans, agents, workTypes, availability, report, reportError?, cooldowns?}`. `report` can be a valid telemetry report or `null`; status plans and project identity do not depend on it. `availability.sources` is keyed by provider, with `usedPercent`, `resetsAt`, `stale`, and `checkedAt` on source windows/readings. `cooldowns` entries have `providerID`, `modelID`, and `until` in epoch milliseconds. `renderCatalog` accepts `{apiVersion:1, generatedAt, providers:[{id,name,models:[{id,name,enabled?,variants:[string],limit?,cost?}]}]}`. Official V2 metadata does not expose thinking capability; exact variant IDs are not inferred effort levels. Missing percents, resets, prices, and cooldowns stay unknown.
+`renderDashboard` accepts `{apiVersion:1, projectID, generatedAt, plans, agents, workTypes, availability, report, reportError?, cooldowns?}`. `report` can be a valid telemetry report or `null`; status plans and project identity do not depend on it. `availability.sources` is keyed by provider, with `usedPercent`, `resetsAt`, `stale`, and `checkedAt` on source windows/readings. `cooldowns` entries have `providerID`, `modelID`, and `until` in epoch milliseconds. `renderCatalog` accepts `{apiVersion:1, generatedAt, providers:[{id,name,models:[{id,name,enabled?,reasoning?,variants:[string],limit?,cost?}]}]}`. A boolean `reasoning` value wins. Otherwise the thinking badge reads known effort IDs and Cursor effort suffixes; unrecognized names stay unknown. Missing percents, resets, prices, and cooldowns stay unknown.
 
 Opening Quota or Providers through the local gateway fetches that page once. Refresh calls `GET /api/dashboard` or `GET /api/providers` again. A file page does not fetch, and those routes are not required for the console fixtures.
 

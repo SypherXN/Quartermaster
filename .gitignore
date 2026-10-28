@@ -37,3 +37,6 @@ opencode-usage.json
 /scripts/start-live-gateway.mjs
 .qm-log-hits.txt
 .tmp-scan.mjs
+
+# Local OpenCode session state
+.opencode/

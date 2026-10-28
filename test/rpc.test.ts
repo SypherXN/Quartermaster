@@ -297,6 +297,34 @@ test("plugin usage claims are opt-in, bounded, and scoped to the active project"
   await assert.rejects(client.reportPluginUsage({ pluginID: "plugin-a", pluginName: "Plugin A", sessionIDs: Array.from({ length: 101 }, (_, index) => `session-${index}`) }), (error: Error & { code?: string }) => error.code === "invalid_input")
 })
 
+test("direct usage accepts a plugin's own counts and rejects extra fields", async () => {
+  const recorded: unknown[] = []
+  const testContext = context(undefined, {
+    projectID: "project-a",
+    tokenLedger: { list: async () => [] },
+    errorLedger: { list: async () => [] },
+    attributionLedger: { claim: async () => {}, list: async () => [] },
+    directUsageLedger: { record: async (input: unknown) => { recorded.push(input); return { replaced: false } }, list: async () => [] },
+    budgets: [],
+    tokenRates: undefined,
+  })
+  await testContext.register()
+  const client = testContext.client()
+  const accepted = await client.reportDirectUsage({
+    pluginID: "opr", pluginName: "OPR", usageID: "jev-1", providerID: "jev", modelID: "review",
+    counts: { input: 12, output: 3, cacheRead: 4 },
+  })
+  assert.equal(accepted.status, "accepted")
+  assert.equal(accepted.attribution, "self-reported-unverified")
+  assert.deepEqual(recorded, [{
+    projectID: "project-a", pluginID: "opr", pluginName: "OPR", usageID: "jev-1",
+    providerID: "jev", modelID: "review", variant: null,
+    counts: { input: 12, output: 3, reasoning: undefined, cacheRead: 4, cacheWrite: undefined },
+  }])
+  await assert.rejects(client.reportDirectUsage({ pluginID: "opr", pluginName: "OPR", usageID: "jev-1", providerID: "jev", modelID: "review", counts: { output: 1 } }), (error: Error & { code?: string }) => error.code === "invalid_input")
+  await assert.rejects(client.reportDirectUsage({ pluginID: "opr", pluginName: "OPR", usageID: "jev-1", providerID: "jev", modelID: "review", projectID: "other", counts: { input: 1, output: 1 } }), (error: Error & { code?: string }) => error.code === "invalid_input")
+})
+
 test("separate RPC client receives versioned selection and explanation", async () => {
   const routing = {
     select: async () => ({ status: "selected", selected: model, reasonCode: "highest-priority-eligible", reason: "Primary eligible.", skipped: [] }),

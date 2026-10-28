@@ -93,9 +93,15 @@ test("synthetic host-event replay reconciles to the active-project RPC report", 
     observedTokens: 20, unknownTokenRecords: 0,
   }])
   assert.equal(report.agentAttribution.unknownRecords, 1)
-  assert.deepEqual(report.planAttribution, {
-    status: "unsupported", reasonCode: "no-exact-plan-step-link", complete: false, unknownRecords: 3,
-  })
+  assert.equal(report.planAttribution.status, "model-match-unique")
+  assert.equal(report.planAttribution.evidence, "exact-model-reference")
+  assert.equal(report.planAttribution.complete, false)
+  assert.equal(report.planAttribution.totalRecords, 3)
+  assert.equal(report.planAttribution.unknownRecords, 2)
+  assert.equal(report.planAttribution.ambiguousRecords, 0)
+  assert.deepEqual(report.planAttribution.dimensions.items, [{
+    plan: "p", evidence: "exact-model-reference", records: 1, observedTokens: 2, unknownTokenRecords: 0,
+  }])
   assert.equal(report.errors.total, 1)
   assert.equal(report.errors.byClassification["rate-limit"].latestObservedAt, 1500)
   assert.equal(report.errors.complete, false)

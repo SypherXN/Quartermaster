@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto"
 import { readFileSync } from "node:fs"
+import { resolve } from "node:path"
 import type { Agent } from "@opencode/plugin"
 import type { AgentEditor } from "@opencode/plugin/promise/agent"
 import type { Context } from "@opencode/plugin/promise/plugin"
@@ -40,18 +41,40 @@ interface SessionModel {
   variant?: string
 }
 
-function sessionView(value: unknown): { agent?: string; model?: SessionModel; projectID?: string } {
+function sessionView(value: unknown): { agent?: string; model?: SessionModel; projectID?: string; directory?: string } {
   const record = value && typeof value === "object" && "data" in value && typeof (value as { data?: unknown }).data === "object"
     ? (value as { data: unknown }).data
     : value
   if (!record || typeof record !== "object") return {}
-  const info = record as { agent?: unknown; model?: unknown; projectID?: unknown }
+  const info = record as { agent?: unknown; model?: unknown; projectID?: unknown; directory?: unknown; location?: unknown }
   const agent = typeof info.agent === "string" && info.agent ? info.agent : undefined
   const raw = info.model && typeof info.model === "object" ? info.model as { providerID?: unknown; id?: unknown; variant?: string } : undefined
   const model = raw && typeof raw.providerID === "string" && typeof raw.id === "string"
     ? { providerID: raw.providerID, id: raw.id, ...(typeof raw.variant === "string" ? { variant: raw.variant } : {}) }
     : undefined
-  return { ...(agent ? { agent } : {}), ...(model ? { model } : {}), ...(typeof info.projectID === "string" ? { projectID: info.projectID } : {}) }
+  const location = info.location && typeof info.location === "object" ? info.location as { directory?: unknown } : undefined
+  const directory = typeof location?.directory === "string" && location.directory
+    ? location.directory
+    : typeof info.directory === "string" && info.directory ? info.directory : undefined
+  return {
+    ...(agent ? { agent } : {}),
+    ...(model ? { model } : {}),
+    ...(typeof info.projectID === "string" ? { projectID: info.projectID } : {}),
+    ...(directory ? { directory } : {}),
+  }
+}
+
+function sameDirectory(left: string, right: string) {
+  const a = resolve(left), b = resolve(right)
+  return process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b
+}
+
+// The host can re-key a project while sessions created under the old ID stay valid.
+// The directory is the evidence the project ID stands for, so either one confirms scope.
+function sameProject(view: { projectID?: string; directory?: string }, location: { projectID?: string; directory?: string } | undefined) {
+  if (!location?.projectID) return true
+  if (view.projectID === location.projectID) return true
+  return view.directory !== undefined && location.directory !== undefined && sameDirectory(view.directory, location.directory)
 }
 
 function diagnosticRead<T>(read: Promise<T>): Promise<T> {
@@ -433,7 +456,11 @@ export async function registerAgentRouting(
       ownershipRead = "unavailable"
     }
     const projectID = ctx.location?.project?.id
-    const scope = projectID && view.projectID ? (projectID === view.projectID ? "confirmed-project" : "mismatch") : "unknown"
+    const scope = projectID && view.projectID
+      ? (view.projectID === projectID ? "confirmed-project"
+        : view.directory !== undefined && ctx.location?.directory !== undefined && sameDirectory(view.directory, ctx.location.directory) ? "confirmed-directory"
+        : "mismatch")
+      : "unknown"
     if (scope === "mismatch") view = {}
     const now = Date.now()
     const agentID = view.agent
@@ -573,7 +600,8 @@ export async function registerAgentRouting(
           const ownership = await ctx.storage.get(ownershipKey(input.sessionID)) as { mode?: unknown; agent?: unknown } | undefined
           if (!(ownership?.agent === input.agent && ownership.mode === "manual")) {
             const view = sessionView(await ctx.session.get({ sessionID: input.sessionID } as never))
-            if (view.agent !== input.agent || (ctx.location?.project?.id && view.projectID !== ctx.location.project.id)) {
+            const location = ctx.location ? { projectID: ctx.location.project?.id, directory: ctx.location.directory } : undefined
+            if (view.agent !== input.agent || !sameProject(view, location)) {
               throw new Error("Quartermaster could not confirm request ownership before provider dispatch")
             }
             await ensureProjectOptions()
@@ -610,7 +638,7 @@ export async function registerAgentRouting(
           const view = sessionView(await ctx.session!.get({ sessionID: input.sessionID } as never))
           const ownership = await ctx.storage.get(ownershipKey(input.sessionID)) as { mode?: unknown; agent?: unknown } | undefined
           managed = Object.hasOwn(config.agents, input.agent) && view.agent === input.agent &&
-            (!ctx.location?.project?.id || view.projectID === ctx.location.project.id) &&
+            sameProject(view, { projectID: ctx.location?.project?.id, directory: ctx.location?.directory }) &&
             !(ownership?.agent === input.agent && ownership.mode === "manual")
         } catch { /* Missing ownership evidence must not authorize automatic recovery. */ }
         requestHistory.record({ sessionID: input.sessionID, kind: input.kind, agent: input.agent, model, observedAt, managed }, observedAt)

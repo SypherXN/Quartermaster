@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { resolve } from "node:path"
 import test from "node:test"
-import { ensureLocalUi, localUiOwnerCount, watchLocalUiParent } from "../src/local-ui.mjs"
+import { ensureLocalUi, localUiNodeExecutable, localUiOwnerCount, watchLocalUiParent } from "../src/local-ui.mjs"
 
 test("local UI parent watch stops when the parent is gone", async () => {
   assert.equal(watchLocalUiParent(0), undefined)
@@ -77,6 +77,41 @@ test("plugin startup keeps the local UI attached and the last owner stops it", a
     assert.equal(localUiOwnerCount(), 0)
   } finally {
     extraStop?.()
+    stop?.()
+  }
+})
+
+test("plugin startup launches node when the host executable is OpenCode", async () => {
+  const node = "C:\\node\\node.exe"
+  assert.equal(localUiNodeExecutable("C:\\node\\node.exe", {}, () => { throw new Error("lookup") }), "C:\\node\\node.exe")
+  assert.equal(localUiNodeExecutable("C:\\opencode\\opencode.exe", { QUARTERMASTER_NODE: node }, () => { throw new Error("lookup") }), node)
+  assert.equal(localUiNodeExecutable("C:\\opencode\\opencode.exe", {}, () => node), node)
+  assert.throws(() => localUiNodeExecutable("C:\\opencode\\opencode.exe", {}, () => " "), /Node is required/)
+
+  let exe
+  const spawnImpl = (command) => {
+    exe = command
+    return { killed: false, exitCode: null, kill() { this.killed = true }, unref() {}, stderr: { setEncoding() {}, on() {}, unref() {} } }
+  }
+  let probes = 0
+  let stop
+  try {
+    const started = await ensureLocalUi({
+      projectDirectory: process.cwd(),
+      env: { QUARTERMASTER_LOCAL_UI_PORT: "43112" },
+      execPath: "C:\\Users\\mattg\\.opencode\\bin\\opencode.exe",
+      nodeLookup: () => node,
+      scriptPath: "src/local-ui.mjs",
+      attempts: 2,
+      sleep: async () => {},
+      connect: async () => { probes += 1; return probes > 1 },
+      retain(fn) { stop = fn },
+      spawnImpl,
+    })
+    assert.equal(started, "started")
+    assert.equal(exe, node)
+    assert.equal(probes, 2)
+  } finally {
     stop?.()
   }
 })

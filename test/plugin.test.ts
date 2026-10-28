@@ -164,7 +164,7 @@ test("plugin shutdown stops the local UI it started", async () => {
 
 test("plugin setup failure stops the local UI it started", async () => {
   let stopped = false
-  await assert.rejects(() => plugin.setup(fakeContext({
+  await assert.rejects(async () => plugin.setup(fakeContext({
     location: { directory: "C:\\work", project: { id: "project-test" } },
     quartermasterLocalUi: async (_directory: string, options?: { retain?: (stop: () => void) => void }) => {
       options?.retain?.(() => { stopped = true })

@@ -3,10 +3,41 @@ import type { Schema } from "effect"
 import type { TokenTelemetryRecord } from "./types.ts"
 
 const PREFIX = "quartermaster:telemetry:v1:"
+const ROLLUP_PREFIX = "quartermaster:telemetry:rollup:v1:"
 const DAY_MS = 86_400_000
 export const TOKEN_LEDGER_RETENTION_MS = 90 * DAY_MS
 export const TOKEN_LEDGER_MAX_RECORDS_PER_PROJECT = 10_000
 const PAGE_SIZE = 1_000
+
+// Pruned records keep their daily counts so a report does not silently lose
+// usage older than the raw window. Detail (model, agent, plugin) is not kept.
+export interface TokenRollup {
+  projectID: string | null
+  day: number
+  records: number
+  observedTokens: number
+  unknownTokenRecords: number
+}
+
+const rollupKey = (projectID: string | null, day: number) =>
+  `${ROLLUP_PREFIX}${encodeURIComponent(JSON.stringify(projectID))}:${day}`
+
+function asRollup(value: unknown): TokenRollup | undefined {
+  if (typeof value !== "object" || value === null) return undefined
+  const rollup = value as Partial<TokenRollup>
+  const valid = (item: unknown) => typeof item === "number" && Number.isSafeInteger(item) && item >= 0
+  if (rollup.projectID !== null && (typeof rollup.projectID !== "string" || !rollup.projectID)) return undefined
+  if (!valid(rollup.day) || !valid(rollup.records) || !valid(rollup.observedTokens) || !valid(rollup.unknownTokenRecords)) {
+    return undefined
+  }
+  return {
+    projectID: rollup.projectID!,
+    day: rollup.day!,
+    records: rollup.records!,
+    observedTokens: rollup.observedTokens!,
+    unknownTokenRecords: rollup.unknownTokenRecords!,
+  }
+}
 
 export interface TokenLedgerOptions {
   now?: () => number
@@ -48,6 +79,10 @@ function asRecord(value: unknown): TokenTelemetryRecord | undefined {
       .every((item) => typeof item === "number" && Number.isFinite(item))
   )) return undefined
   if (record.usageStatus !== (counts === null ? "missing" : "reported")) return undefined
+  const partial = record.partial
+  if (partial !== undefined && typeof partial !== "boolean") return undefined
+  const hostCostUSD = record.hostCostUSD
+  const hostCost = typeof hostCostUSD === "number" && Number.isFinite(hostCostUSD) && hostCostUSD >= 0 ? hostCostUSD : null
 
   // Rebuild the whitelist so even a malformed stored value cannot export extra fields.
   return {
@@ -71,14 +106,16 @@ function asRecord(value: unknown): TokenTelemetryRecord | undefined {
       cacheWrite: counts.cacheWrite,
     },
     usageStatus: record.usageStatus,
+    partial: partial ?? false,
+    hostCostUSD: hostCost,
   }
 }
 
-async function scanAll(storage: StorageDomain) {
+async function scanAll(storage: StorageDomain, prefix: string = PREFIX) {
   const entries: Awaited<ReturnType<StorageDomain["scan"]>>["entries"][number][] = []
   let after: string | undefined
   while (true) {
-    const page = await storage.scan({ prefix: PREFIX, after, limit: PAGE_SIZE })
+    const page = await storage.scan({ prefix, after, limit: PAGE_SIZE })
     entries.push(...page.entries)
     if (!page.next || page.next === after) return entries
     after = page.next
@@ -127,10 +164,43 @@ export class TokenLedger {
       .slice(-limit)
   }
 
+  async listRollups(query: TokenLedgerQuery = {}): Promise<TokenRollup[]> {
+    const entries = await scanAll(this.storage, ROLLUP_PREFIX)
+    return entries
+      .map((entry) => asRollup(entry.value))
+      .filter((rollup): rollup is TokenRollup => rollup !== undefined)
+      .filter((rollup) => query.projectID === undefined || rollup.projectID === (query.projectID ?? null))
+      .sort((a, b) => a.day - b.day)
+  }
+
   private serialize<T>(operation: () => Promise<T>): Promise<T> {
     const task = this.pending.catch(() => {}).then(operation)
     this.pending = task.then(() => {}, () => {})
     return task
+  }
+
+  private async archive(records: readonly TokenTelemetryRecord[]): Promise<void> {
+    if (!records.length) return
+    const existing = new Map((await scanAll(this.storage, ROLLUP_PREFIX))
+      .map((entry) => asRollup(entry.value))
+      .filter((rollup): rollup is TokenRollup => rollup !== undefined)
+      .map((rollup) => [rollupKey(rollup.projectID, rollup.day), rollup] as const))
+    for (const record of records) {
+      const day = Math.floor(record.completedAt / DAY_MS) * DAY_MS
+      const key = rollupKey(record.hostProjectID, day)
+      const rollup = existing.get(key) ?? {
+        projectID: record.hostProjectID, day, records: 0, observedTokens: 0, unknownTokenRecords: 0,
+      }
+      const total = record.counts ? record.counts.input + record.counts.output : undefined
+      rollup.records += 1
+      if (total === undefined || !Number.isSafeInteger(total) || total < 0 ||
+        !Number.isSafeInteger(rollup.observedTokens + total)) {
+        rollup.unknownTokenRecords += 1
+      } else rollup.observedTokens += total
+      existing.set(key, rollup)
+    }
+    await Promise.all([...existing.entries()].map(([key, rollup]) =>
+      this.storage.set(key, rollup as unknown as Schema.Json)))
   }
 
   private async prune(projectID?: string | null): Promise<void> {
@@ -161,6 +231,8 @@ export class TokenLedger {
         .forEach(({ key }) => keepKeys.add(key))
     }
     const remove = rows.filter(({ key, record }) => !record || (record && key === keyFor(record.hostEventID) && !keepKeys.has(key)))
+    await this.archive(remove.flatMap(({ key, record }) =>
+      record && key === keyFor(record.hostEventID) ? [record] : []))
     await Promise.all(remove.map(({ key }) => this.storage.remove(key)))
   }
 }

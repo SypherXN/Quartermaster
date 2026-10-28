@@ -25,7 +25,8 @@ export interface TokenBudgetConfig {
   dimension: TokenBudgetDimension
   mode?: "advisory" | "strict"
   target?: string
-  limitTokens: number
+  limitTokens?: number
+  limitUSD?: number
   windowMs?: number
   calendarWindow?: TokenBudgetCalendarWindow
 }
@@ -240,7 +241,7 @@ function budgetsFrom(value: unknown): TokenBudgetConfig[] {
     const path = `budgets[${index}]`
     const budget = record(item, path)
     for (const key of Object.keys(budget)) {
-      if (!["id", "dimension", "mode", "target", "limitTokens", "windowMs", "calendarWindow"].includes(key)) {
+      if (!["id", "dimension", "mode", "target", "limitTokens", "limitUSD", "windowMs", "calendarWindow"].includes(key)) {
         throw new Error(`${path}.${key}: unknown field`)
       }
     }
@@ -275,6 +276,25 @@ function budgetsFrom(value: unknown): TokenBudgetConfig[] {
       }
       return number
     }
+    const limitTokens = budget.limitTokens === undefined
+      ? undefined
+      : positiveInteger("limitTokens")
+    const limitUSD = budget.limitUSD === undefined
+      ? undefined
+      : (() => {
+        const amount = budget.limitUSD
+        if (typeof amount !== "number" || !Number.isFinite(amount) || amount <= 0) {
+          throw new Error(`${path}.limitUSD: expected a finite number greater than zero`)
+        }
+        const scaled = amount * 1_000_000
+        if (!Number.isFinite(scaled) || Math.round(scaled) !== scaled) {
+          throw new Error(`${path}.limitUSD: expected at most six decimal places`)
+        }
+        return amount
+      })()
+    if (limitTokens === undefined && limitUSD === undefined) {
+      throw new Error(`${path}: specify at least one of limitTokens or limitUSD`)
+    }
     if ((budget.windowMs === undefined) === (budget.calendarWindow === undefined)) {
       throw new Error(`${path}: specify exactly one of windowMs or calendarWindow`)
     }
@@ -305,7 +325,8 @@ function budgetsFrom(value: unknown): TokenBudgetConfig[] {
       dimension: dimension as TokenBudgetDimension,
       mode,
       ...(target === undefined ? {} : { target }),
-      limitTokens: positiveInteger("limitTokens"),
+      ...(limitTokens === undefined ? {} : { limitTokens }),
+      ...(limitUSD === undefined ? {} : { limitUSD }),
       ...(budget.windowMs === undefined ? {} : { windowMs: positiveInteger("windowMs") }),
       ...(calendarWindow === undefined ? {} : { calendarWindow }),
     }

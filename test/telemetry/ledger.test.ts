@@ -54,6 +54,7 @@ function record(hostEventID: string, projectID: string | null, completedAt = 2_0
     completedAt,
     counts: { input: 10, output: 2, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
     usageStatus: "reported",
+    partial: false,
   }
 }
 
@@ -106,7 +107,30 @@ test("retries failed writes and applies retention caps without evicting another 
   assert.deepEqual(rows.map((row) => row.hostEventID), ["event-new-1", "event-new-2", "event-new-3"])
   assert.deepEqual((await ledger.list({ projectID: "project-a" })).map((row) => row.hostEventID), ["event-new-1", "event-new-3"])
   assert.deepEqual((await ledger.list({ projectID: "project-b" })).map((row) => row.hostEventID), ["event-new-2"])
-  assert.equal(storage.values.size, 3)
+  assert.equal(storage.values.size, 4)
+  const rollups = await ledger.listRollups({ projectID: "project-a" })
+  assert.equal(rollups.length, 1)
+  assert.deepEqual(
+    { records: rollups[0].records, observedTokens: rollups[0].observedTokens, unknownTokenRecords: rollups[0].unknownTokenRecords },
+    { records: 1, observedTokens: 12, unknownTokenRecords: 0 },
+  )
+  assert.equal(rollups[0].day, Math.floor((now - 101) / 86_400_000) * 86_400_000)
+})
+
+test("partial flag round-trips and defaults when omitted in storage", async () => {
+  const storage = new MemoryStorage()
+  const ledger = new TokenLedger(storage)
+  const withPartial = { ...record("event-partial", "project-a"), partial: true }
+  await ledger.ingest(withPartial)
+  assert.equal((await ledger.list({ projectID: "project-a" }))[0].partial, true)
+
+  const key = `quartermaster:telemetry:v1:${encodeURIComponent("event-legacy")}`
+  storage.values.set(key, {
+    ...record("event-legacy", "project-a"),
+    partial: undefined,
+  } as unknown as Schema.Json)
+  delete (storage.values.get(key) as Record<string, unknown>).partial
+  assert.equal((await ledger.list({ projectID: "project-a" })).find((row) => row.hostEventID === "event-legacy")?.partial, false)
 })
 
 test("stored and exported rows whitelist telemetry metadata", async () => {

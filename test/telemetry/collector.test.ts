@@ -3,6 +3,7 @@ import test from "node:test"
 import type { Schema } from "effect"
 import type { StorageDomain } from "@opencode/plugin/promise/storage"
 import { consumeTokenEvents } from "../../src/telemetry/collector.ts"
+import { CompactionLedger } from "../../src/telemetry/compaction.ts"
 import { TokenLedger } from "../../src/telemetry/ledger.ts"
 
 class MemoryStorage implements StorageDomain {
@@ -153,4 +154,50 @@ test("collector refresh callback runs after a token record is persisted", async 
   )
 
   assert.equal(observedRecords, 1)
+})
+
+test("compaction is stored beside its model and never becomes a step total", async () => {
+  const storage = new MemoryStorage()
+  const tokenLedger = new TokenLedger(storage)
+  const compactionLedger = new CompactionLedger(storage, () => 3_000)
+  const eventFor = (id: string, sessionID: string) => ({
+    id,
+    type: "session.compaction.ended",
+    created: 2_500,
+    data: {
+      sessionID,
+      reason: "auto",
+      model: { providerID: "provider-b", id: "summarizer" },
+      tokens: { input: 800, output: 40, cache: { read: 200, write: 0 } },
+      summary: "must not be stored",
+    },
+  })
+  await consumeTokenEvents({
+    event: {} as never,
+    storage,
+    session: {
+      get: async ({ sessionID }: { sessionID: string }) => {
+        if (sessionID === "gone") throw new Error("session gone")
+        return { projectID: "project-a" } as never
+      },
+      context: async () => [] as never,
+    },
+  }, tokenLedger, events([
+    eventFor("cmp-kept", "session-a"),
+    eventFor("cmp-unknown", "gone"),
+    { id: "deleted", type: "session.deleted", created: 2_600, data: { sessionID: "session-a" } },
+  ]), new AbortController().signal, undefined, compactionLedger)
+
+  const steps = await tokenLedger.list()
+  const stored = await compactionLedger.list("project-a")
+  assert.equal(steps.length, 0)
+  assert.equal(stored.length, 1)
+  assert.equal(stored[0]?.hostEventID, "cmp-kept")
+  assert.equal(stored[0]?.providerID, "provider-b")
+  assert.equal(stored[0]?.modelID, "summarizer")
+  assert.equal(stored[0]?.counts?.input, 800)
+  assert.equal(stored[0]?.partial, true)
+  assert.doesNotMatch(JSON.stringify(stored), /must not be stored|summary|session-a/)
+  const unknown = [...storage.values.values()].find((value) => (value as { hostEventID?: string }).hostEventID === "cmp-unknown") as { projectID: string | null }
+  assert.equal(unknown.projectID, null)
 })

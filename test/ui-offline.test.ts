@@ -99,12 +99,13 @@ test("report viewer uses only the opt-in same-origin report endpoint", async () 
   assert.match(page, /Observed tokens/)
   assert.match(page, /label for="plans"/)
   assert.match(page, /label for="agents"/)
-  assert.match(page, /label for="work-types"/)
+  assert.match(page, /id="agent-tools"/)
+  assert.doesNotMatch(page, /id="work-types"/)
   assert.match(page, /id="cancel-options"/)
   assert.match(page, /current session is unchanged/)
   assert.doesNotMatch(page, /password|OPENCODE_TOKEN/)
   assert.doesNotMatch(page, /\b(?:XMLHttpRequest|WebSocket|EventSource)\b/)
-  assert.doesNotMatch(page, /fetch\((?!'\/api\/(?:report|options|dashboard|providers)')/)
+  assert.doesNotMatch(page, /fetch\((?!['`]\/api\/(?:report|options|dashboard|providers))/)
 })
 
 test("assignment editor locks pending loads and saves, then restores Cancel on success or failure", async () => {
@@ -113,7 +114,7 @@ test("assignment editor locks pending loads and saves, then restores Cancel on s
   assert.ok(script)
   assert.match(page, /<fieldset id="options-fields" aria-labelledby="options-heading"/)
   const fields = page.match(/<fieldset[^>]*>([\s\S]*?)<\/fieldset>/)?.[1] ?? ""
-  for (const id of ["plans", "agents", "work-types", "load-options", "apply-options", "cancel-options"]) {
+  for (const id of ["plans", "agents", "agent-tools", "load-options", "apply-options", "cancel-options"]) {
     assert.ok(fields.includes(`id="${id}"`))
   }
   for (const action of ["load", "apply"]) for (const ok of [true, false]) {
@@ -438,21 +439,24 @@ test("large plan boards start compact while retaining each ordered chain preview
   }
 })
 
-test("V2 thinking stays unknown despite variant names and enabled metadata stays distinct", async () => {
+test("thinking badge reads known effort ids and leaves other names unknown", async () => {
   const { context, nodes, text }=await dashboardContext()
-  runInContext(`renderCatalog({apiVersion:1,generatedAt:1780000000000,providers:[{id:'fixture',name:'Fixture',models:[{id:'enabled',name:'Enabled model',enabled:true,variants:['Thinking High','Exact multiword effort']},{id:'disabled',name:'Disabled model',enabled:false,variants:['Reasoning']},{id:'unknown',name:'Unknown model',variants:[]}]}]})`,context)
+  runInContext(`renderCatalog({apiVersion:1,generatedAt:1780000000000,providers:[{id:'fixture',name:'Fixture',models:[{id:'enabled',name:'Enabled model',enabled:true,variants:['none','minimal','low','medium','high','xhigh','max']},{id:'cursor-model',name:'Cursor model',variants:['Claude Opus 5 High Fast','Claude Opus 5 1M No Thinking']},{id:'disabled',name:'Disabled model',enabled:false,variants:['Reasoning']},{id:'unknown',name:'Unknown model',variants:['Exact multiword effort']}]}]})`,context)
   const visible=text("#catalog")
-  assert.equal((visible.match(/Thinking unknown/g)||[]).length,3)
+  assert.match(visible,/Thinking · none–max/)
+  assert.match(visible,/Thinking · none · high/)
+  assert.equal((visible.match(/Thinking unknown/g)||[]).length,2)
   assert.match(visible,/Enabled/)
   assert.match(visible,/Disabled/)
   assert.match(visible,/Enabled unknown/)
   assert.doesNotMatch(visible,/No thinking/)
-  assert.deepEqual(JSON.parse(runInContext("JSON.stringify(catalogModels().map(model=>model.enabled??null))",context)),[true,false,null])
-  assert.deepEqual(JSON.parse(runInContext("JSON.stringify(catalogModels()[0].variants)",context)),['Thinking High','Exact multiword effort'])
+  assert.deepEqual(JSON.parse(runInContext("JSON.stringify(catalogModels().map(model=>model.enabled??null))",context)),[true,null,false,null])
+  assert.deepEqual(JSON.parse(runInContext("JSON.stringify(catalogModels()[0].variants)",context)),['none','minimal','low','medium','high','xhigh','max'])
   nodes.get("#thinking-filter")!.checked=true
   runInContext("paintCatalog()",context)
-  assert.match(text("#catalog"),/No confirmed thinking metadata/)
-  assert.match(text("#catalog"),/Unknown capability is not the same as no thinking support/)
+  assert.match(text("#catalog"),/Enabled model/)
+  assert.match(text("#catalog"),/Cursor model/)
+  assert.doesNotMatch(text("#catalog"),/Disabled model|Unknown model/)
   assert.match(text("#model-suggestions"),/fixture\/enabled/)
   runInContext(`renderDashboard({apiVersion:1,projectID:'fixture',generatedAt:1780000000000,plans:{},agents:{},workTypes:{},report:null,availability:{status:'unconfigured',sources:{}}})`,context)
   for(const selector of ['#dashboard-status','#quota-status']){
@@ -537,7 +541,7 @@ test("large catalogs reveal models locally in batches and reset the batch after 
   assert.equal(requests,0)
 })
 
-test("preferred models persist by exact model ID, grouped by provider, without touching plans or variants", async () => {
+test("preferred models persist by exact model ID and sort first inside their provider, without touching plans or variants", async () => {
   const localStorage=memoryStorage()
   let requests=0
   const {context,nodes,text}=await dashboardContext({localStorage,fetch:()=>{requests++;throw Error('No network expected')}})
@@ -552,8 +556,9 @@ test("preferred models persist by exact model ID, grouped by provider, without t
   toggle.click()
   runInContext(`togglePreferred('other/model')`,context)
   assert.deepEqual(JSON.parse(localStorage.value!).models,['fixture/primary','other/model'])
-  assert.match(text('#preferred-list'),/Fixture · 1/)
-  assert.match(text('#preferred-list'),/Other provider · 1/)
+  const pressed=descendants(nodes.get('#catalog')!).filter(node=>node.attributes?.['data-model-preference']&&node.attributes['aria-pressed']==='true')
+  assert.deepEqual(pressed.map(node=>node.attributes!['data-model-preference']),['fixture/primary'])
+  assert.match(text('#provider-list'),/★ 2/)
   assert.match(text('#preference-status'),/Saved 2 preferred models in this browser/)
   assert.match(text('#preference-status'),/plan order are unchanged/)
   assert.equal(nodes.get('#plans')!.children[0],planCard)
@@ -572,9 +577,8 @@ test("preferred filtering and suggestions retain missing catalog models without 
   runInContext(`loadPreferences();renderCatalog({providers:[{id:'fixture',name:'Fixture',models:[{id:'primary',name:'Primary',variants:[]},{id:'backup',name:'Backup',variants:['Exact Multiword']},{id:'custom',name:'Custom',variants:[]}]}]})`,context)
   const values=nodes.get('#model-suggestions')!.children.map(node=>node.value)
   assert.deepEqual(values,['fixture/backup','missing/model','__proto__/constructor','fixture/primary','fixture/custom'])
-  assert.match(text('#preferred-list'),/missing · 1/)
-  assert.match(text('#preferred-list'),/__proto__ · 1/)
-  assert.match(text('#preferred-list'),/Not in the current catalog · saved choice retained/)
+  const first=descendants(nodes.get('#catalog')!).find(node=>node.attributes?.class==='model-shell')!
+  assert.match(textOf(first),/fixture\/backup/)
   nodes.get('#preferred-filter')!.checked=true
   runInContext('paintCatalog()',context)
   assert.match(text('#catalog'),/fixture\/backup/)
@@ -627,14 +631,13 @@ test("failed or unconfirmed saves retain the last confirmed shortlist, and reloa
   }
 })
 
-test("shortlist removal is model-level and safe for constructor-style provider and model IDs", async () => {
+test("preferred toggling is model-level and safe for constructor-style provider and model IDs", async () => {
   const localStorage=memoryStorage(JSON.stringify({version:1,models:['__proto__/constructor','constructor/__proto__']}))
-  const {context,text,nodes}=await dashboardContext({localStorage})
+  const {context,nodes}=await dashboardContext({localStorage})
   runInContext(`loadPreferences();renderCatalog({providers:[{id:'__proto__',name:'Special provider',models:[{id:'constructor',name:'Special model',variants:['Exact High','Exact Low']}]}]})`,context)
-  assert.match(text('#preferred-list'),/Special provider · 1/)
-  const remove=descendants(nodes.get('#preferred-list')!).find(node=>node.attributes?.['aria-label']==='Remove __proto__/constructor from browser shortlist')!
-  assert.ok(remove)
-  remove.click()
+  const toggle=descendants(nodes.get('#catalog')!).find(node=>node.attributes?.['data-model-preference']==='__proto__/constructor')!
+  assert.equal(toggle.attributes?.['aria-pressed'],'true')
+  toggle.click()
   assert.deepEqual(JSON.parse(localStorage.value!).models,['constructor/__proto__'])
   assert.equal(runInContext('({}).polluted',context),undefined)
   assert.deepEqual(JSON.parse(runInContext('JSON.stringify(catalogModels()[0].variants)',context)),['Exact High','Exact Low'])
@@ -648,7 +651,8 @@ test("supply-office ledger uses one theme with decorative section indices and un
     assert.ok(page.includes(`<span class="register-index" aria-hidden="true">${index}</span>`))
   }
   assert.match(page,/\.content::before\{display:none\}/)
-  assert.match(page,/Personal reference \/ browser only/)
+  assert.match(page,/Preferred models only/)
+  assert.doesNotMatch(page,/id="preferred-list"/)
   assert.match(page,/prefers-reduced-motion/)
   const {context,nodes,text}=await dashboardContext()
   runInContext(`renderCatalog({providers:[{id:'cursor',name:'Cursor',models:[{id:'grok-4.7',name:'Grok 4.7',variants:['Grok 4.7 High']}]}]})`,context)
@@ -683,7 +687,7 @@ test("model details preserve ordered price tiers, cache rates, exact zero, and t
   assert.match(text('#catalog'),/Output modalities text/)
   assert.match(text('#catalog'),/Tools No/)
   assert.match(text('#catalog'),/Temperature control Yes/)
-  assert.match(text('#catalog'),/Thinking unknown/)
+  assert.match(text('#catalog'),/Thinking · high/)
   assert.doesNotMatch(text('#catalog'),/not rendered/)
   assert.deepEqual(JSON.parse(runInContext('JSON.stringify(catalogModels()[0].cost)',context)),cost)
   assert.deepEqual(JSON.parse(runInContext('JSON.stringify(catalogModels()[0].variants)',context)),['Grok 4.7 High','High fast'])
@@ -747,15 +751,19 @@ test("small catalogs start collapsed with independently collapsed model detail s
   assert.match(textOf(row.children[0]),/Context 128,000 tokens/)
   assert.match(textOf(row.children[0]),/Catalog \/ 1M: \$0\.1 in · \$0\.4 out/)
   const sections=descendants(row).filter(node=>node.tag==='details'&&node!==row)
-  assert.deepEqual(sections.map(node=>node.children[0].textContent),['Token limits','Advertised capabilities','Catalog pricing','Named variants · 1'])
+   assert.deepEqual(sections.map(node=>node.children[0].textContent),['Token limits','Advertised capabilities','Catalog pricing'])
   for(const section of sections){
     assert.equal(Object.hasOwn(section.attributes!,'open'),false)
     assert.equal(section.children[0].tag,'summary')
     assert.equal(descendants(section.children[0]).filter(node=>node.tag==='button').length,0)
   }
   assert.match(textOf(sections[2]),/Cache read \$0 Cache write \$0\.2/)
-  assert.match(textOf(sections[3]),/Grok 4\.7 High/)
-  assert.ok(descendants(shell.children[1]).find(node=>node.attributes?.['data-model-preference']==='cursor/grok-4.7'))
+   const variants=shell.children[1]
+   assert.equal(variants.tag,'section')
+   assert.equal(variants.attributes?.['aria-label'],'Possible variants')
+   assert.match(textOf(variants),/Possible variants · 1/)
+   assert.match(textOf(variants),/Grok 4\.7 High/)
+   assert.ok(descendants(shell).find(node=>node.attributes?.['data-model-preference']==='cursor/grok-4.7'))
 })
 
 test("explicit model and nested-section expansion survives filters, rerenders, and later closing", async () => {

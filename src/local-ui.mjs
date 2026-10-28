@@ -1,10 +1,11 @@
+import { existsSync } from "node:fs"
 import { readFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { applyDiscoveredQuartermasterOptions, readProjectQuartermasterOptions } from "./project-options.ts"
-import { spawn } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import { createServer } from "node:http"
 import { connect as connectPort, isIP } from "node:net"
-import { resolve } from "node:path"
+import { basename, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
 const page = new URL("../web/index.html", import.meta.url)
@@ -211,12 +212,14 @@ export function createLocalUiServer({ openCodeURL, token, projectDirectory, port
       }
       return
     }
-    if (req.method === "GET" && req.url === "/api/dashboard") {
+    if (req.method === "GET" && (req.url === "/api/dashboard" || req.url?.startsWith("/api/dashboard?"))) {
+      const since = Number(new URL(req.url ?? "/", "http://127.0.0.1").searchParams.get("since"))
+      const range = Number.isSafeInteger(since) && since > 0 ? { since } : {}
       try {
         const projectID = await projectIDForDirectory()
         const [plans, reportResult] = await Promise.all([
           rpc("status", {}).catch(() => null),
-          rpc("report", { limit: 50, offset: 0 }).catch(() => null),
+          rpc("report", { limit: 50, offset: 0, ...range }).catch(() => null),
         ])
         if (plans?.apiVersion !== 1 || !plans.plans || !plans.agents || !plans.workTypes)
           return send(res, 502, { error: "Quartermaster status unavailable" })
@@ -375,6 +378,34 @@ export function watchLocalUiParent(parentPid, { isAlive = parentIsAlive, onGone,
   }
 }
 
+export function localUiNodeExecutable(execPath = process.execPath, env = process.env, lookup = findNodeExecutable) {
+  const base = basename(execPath).toLowerCase()
+  if (base === "node" || base === "node.exe") return execPath
+  const override = env.QUARTERMASTER_NODE
+  if (typeof override === "string" && override.trim()) return override.trim()
+  const found = lookup(env)
+  if (typeof found !== "string" || found.trim() === "") throw new Error("Node is required to start the local UI")
+  return found.trim()
+}
+
+function findNodeExecutable(env = process.env) {
+  const command = process.platform === "win32" ? "where.exe" : "which"
+  const result = spawnSync(command, ["node"], { encoding: "utf8", windowsHide: true, env })
+  const found = String(result.stdout ?? "").split(/\r?\n/).map((line) => line.trim()).find((line) => line && !line.toLowerCase().includes(`${sep}windowsapps${sep}`))
+  if (found && existsSync(found)) return found
+  for (const candidate of nodeInstallCandidates(env)) {
+    if (existsSync(candidate)) return candidate
+  }
+  throw new Error("Node is required to start the local UI")
+}
+
+function nodeInstallCandidates(env) {
+  const roots = [env.ProgramFiles, env["ProgramFiles(x86)"], env.LOCALAPPDATA && resolve(env.LOCALAPPDATA, "Programs")].filter((root) => typeof root === "string" && root)
+  return roots.map((root) => resolve(root, "nodejs", "node.exe"))
+}
+
+const sep = process.platform === "win32" ? "\\" : "/"
+
 export function ensureLocalUi({
   projectDirectory,
   env = process.env,
@@ -383,10 +414,12 @@ export function ensureLocalUi({
   scriptPath = fileURLToPath(import.meta.url),
   sleep = (delay) => new Promise((done) => setTimeout(done, delay)),
   attempts = 10,
+  execPath = process.execPath,
+  nodeLookup = findNodeExecutable,
   retain,
 } = {}) {
   if (!localUiStartup)
-    localUiStartup = startLocalUiProcess({ projectDirectory, env, spawnImpl, connect, scriptPath, sleep, attempts })
+    localUiStartup = startLocalUiProcess({ projectDirectory, env, spawnImpl, connect, scriptPath, sleep, attempts, execPath, nodeLookup })
       .finally(() => { localUiStartup = undefined })
   if (typeof retain === "function") {
     localUiStartup.then((status) => {
@@ -399,7 +432,7 @@ export function ensureLocalUi({
   return localUiStartup
 }
 
-async function startLocalUiProcess({ projectDirectory, env, spawnImpl, connect, scriptPath, sleep, attempts }) {
+async function startLocalUiProcess({ projectDirectory, env, spawnImpl, connect, scriptPath, sleep, attempts, execPath, nodeLookup }) {
   if (typeof projectDirectory !== "string" || projectDirectory.trim() === "") return "skipped"
   if (env.QUARTERMASTER_LOCAL_UI === "0") return "disabled"
   const port = Number(env.QUARTERMASTER_LOCAL_UI_PORT ?? 4175)
@@ -412,7 +445,7 @@ async function startLocalUiProcess({ projectDirectory, env, spawnImpl, connect, 
   }
   const directory = resolve(projectDirectory)
   let failure = ""
-  const child = spawnImpl(process.execPath, [scriptPath], {
+  const child = spawnImpl(localUiNodeExecutable(execPath, env, nodeLookup), [scriptPath], {
     cwd: directory,
     detached: false,
     windowsHide: true,

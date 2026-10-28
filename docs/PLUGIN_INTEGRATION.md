@@ -716,8 +716,14 @@ operations:
 - `report({ since?, until?, limit?, offset?, refresh?, projectID? })` reads the
   active project's bounded telemetry summary; `projectID` must match the active
   project and is otherwise refused. `requestReport` adds timeout/response
-  validation. Plugin attribution uses the separate `reportPluginUsage` method;
-  see [telemetry contracts and limits](TOKEN_TELEMETRY.md).
+  validation. Plugin attribution uses the separate `reportPluginUsage` method.
+  A call that never became a host step, such as a direct Jev request, is
+  submitted with `reportDirectUsage({ pluginID, pluginName, usageID, providerID,
+  modelID, variant?, counts })`. `counts` requires `input` and `output`;
+  reasoning and cache counts are optional. The same `usageID` replaces that
+  plugin's earlier row. Those counts stay in `report.directUsage` and are not
+  added to host totals or budgets. See
+  [telemetry contracts and limits](TOKEN_TELEMETRY.md).
 - `pin({ agent, model })` and `unpin({ agent })` manage a manual agent
   preference. Call these only for an explicit user action; pins remain subject
   to model registration and current eligibility.

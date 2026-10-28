@@ -44,32 +44,38 @@ plugin restarts, within its retention limits.
 
 - Count a complete step token object once. Failed steps without counts remain
   `counts: null` and `usageStatus: "missing"`.
-- Ignore started/streamed events, retry markers, message updates, session
-  aggregates, and compaction events. A retry marker is not a provider response.
-  The v2.0.18 source reviewed for this contract repeats usage on compaction
-  completion; excluding it avoids mixing it with step records. Verify this
-  behavior against the host source when upgrading the locked version.
-  Compaction-only usage remains a coverage gap pending an unambiguous source.
+- Ignore streamed events, retry markers, message updates, and session
+  aggregates. A retry marker is not a provider response. `session.step.started`
+  is observed only to pair that step's own model with its terminal event; it
+  never becomes a record.
+- Keep `session.compaction.ended` and `session.compaction.failed` out of step
+  records. Their own token object is stored in a separate compaction ledger and
+  grouped by the model on that event. Those tokens are not added to observed
+  session totals, cost, or budgets. A missing token object is stored as missing.
 - Assistant message token snapshots are not the accounting unit: OpenCode
   overwrites the snapshot on each provider step, while one logical message may
   contain multiple steps. Never sum snapshots or deduplicate by message ID.
-- Step-ended has no model reference. Provider/model/variant stay null unless a
-  caller can correlate the model to that exact step; a session's last model or
-  message's final model is insufficient evidence. The collector looks up the
-  exact assistant message by matching `assistantMessageID` to
-  `SessionMessageInfo.id` and retains only its `agent` ID, never its content. If
-  that message is absent from active context, agent attribution stays unknown.
+- Step-ended carries no model reference, but `session.step.started` names the
+  model for that same step. `src/telemetry/step-model.ts` keeps the start events
+  per assistant message and pairs them in order with the terminal events, so a
+  step's provider/model/variant come from its own start event. A session's last
+  model, a message's final model, and a configured plan are still not evidence
+  and are never substituted. An unpaired terminal step keeps null model fields.
+  The collector also looks up the exact assistant message by matching
+  `assistantMessageID` to `SessionMessageInfo.id` and retains only its `agent`
+  ID, never its content. If that message is absent from active context, agent
+  attribution stays unknown.
 - Provider is a first-class token reporting dimension, not a fallback inferred
   from the model name. Each token record carries `providerID`; it is `null`
-  whenever the exact provider for that step cannot be established. The exact
-  message lookup establishes agent only; it does not correlate model selection
-  or configured plan to a terminal step.
+  whenever the exact provider for that step cannot be established.
 - Events carry session ID, not project or parent IDs. Resolve `projectID` and
   optional `parentID` from `Session.Info`. Its location contains a directory
   and optional workspace ID; the record omits the absolute path. Event location
   is optional and does not replace session metadata.
 - The record never copies prompts, content, errors, permissions, provider
-  state, snapshots, file lists, credentials, costs, or arbitrary event fields.
+  state, snapshots, file lists, credentials, or arbitrary event fields. Only the
+  host's own `Money.USD` step cost is kept, as `hostCostUSD`; a missing or
+  negative figure is stored as `null`, never zero.
   `opencode-usage.json` quota percentages are not token counts.
 
 `hostContractVersion`, `sourceEvent`, and `hostEventID` identify the contract
@@ -94,6 +100,12 @@ most 10,000 rows, in completion-time order. This is a per-project ceiling, not a
 single global storage ceiling. Expired/over-cap pruning is intentionally
 partitioned so activity in one project does not evict another project's
 unexpired rows.
+
+`src/telemetry/window.ts` keeps one character snapshot per host session, in its
+own `quartermaster:window:v1:` keyspace with the same 90-day, 10,000-per-project
+limits. It stores only four integer character counts and the observation time:
+no text, parts, or file bytes cross into the ledger. A snapshot replaces the
+previous one for that session.
 
 The host KV upserts each key atomically, but exposes no multi-key transaction,
 compare-and-swap, or cross-instance lock. Distinct host event IDs therefore
@@ -143,10 +155,13 @@ The report includes project totals and provider/model/agent breakdown pages (up 
 timestamped retry-error summaries grouped by classification. Unknown provider
 or model is an explicit `null` dimension. Agent is reported only from the exact
 assistant message matched by `assistantMessageID`; missing messages remain
-unknown and evidence is marked incomplete. Plan attribution is explicitly
-unsupported (`no-exact-plan-step-link`) for every record: agent names, current
-bindings, work-type choices, pins and later config cannot prove the historical
-plan for that step. Error rows without verified
+unknown and evidence is marked incomplete. Plan attribution matches each
+record's exact provider/model/variant against the configured plans: a record
+listed by exactly one plan is attributed to it (`model-match-unique`), a record
+no plan lists is unknown, and one listed by several plans is ambiguous. A step
+records no plan identity, so this reflects which plans list that model now;
+agent names, work-type choices, pins and later config cannot prove the
+historical choice. Error rows without verified
 session-to-project attribution are omitted and `unattributedExcluded` is true;
 error counts are retained observations, not a complete history.
 Budget windows read the most recent project rows (up to 10,000 on the report path; the assignment-warning gate reads only the newest 1,000), not the report's since/until
@@ -157,16 +172,28 @@ tokens are unknown.
 matching token event. Live events have no cursor/replay, so freshness does not
 prove completeness. `refresh: true` only rereads the durable local ledgers; it
 does not poll providers, trigger ingestion, or recover missed events. Reports
-do not expose session/message IDs, prompt contents, or raw errors.
+do not expose session/message IDs, prompt contents, or raw errors. Session rows
+carry a short hash of the root session id, so repeated observations group
+together without publishing the identifier.
 
 Configured `tokenRates` add a partial `costs` estimate. Rates match the exact
 provider/model/variant tuple and include input/output price per million tokens,
-currency, source and `asOf` timestamp. Only records with that exact model and
-both input/output counts are priced. Amounts use input plus output only;
-reasoning/cache component fields may overlap and are excluded. Results are
+currency, source and `asOf` timestamp. A record with no configured rate is
+priced from the model catalog instead: USD per million tokens, cheapest matching
+context tier at or below the record's input plus cache-read tokens, covering
+input, output, cache read and cache write. Reasoning stays out of the amount
+because the catalog does not price it, and each currency summary records whether
+it used `config`, `catalog` or both. Records with neither price stay unpriced;
+a configured rate prices no cache tokens, so such records increment
+`cacheUnpricedRecords`. Results are
 grouped by currency without conversion, marked `estimated-not-billed` and
 `complete: false`, and include priced/unpriced record and token coverage plus
-unknown-count records. Missing model evidence, rate or counts stays unpriced;
+unknown-count records. A separate `hostReported` block carries the host's own
+`Money.USD` step total: `currency: "USD"`, `amount` (null when no step reported
+one), and the reported and missing step counts. It is not added to the catalog
+estimate and does not change budgets; UI cost readings prefer it over the
+estimate.
+Missing model evidence, price or counts stays unpriced;
 records that would overflow the safe-integer priced subtotal also stay unpriced.
 Unpriced token totals exclude records that would overflow their safe-integer
 subtotal and count those records in `unknownTokenRecords`. Coverage totals are
@@ -174,6 +201,59 @@ therefore lower bounds, not rounded representations of oversized totals;
 these estimates are not invoices and do not change budgets, selection or
 provider polling. Rates are current user-configured values, so the report's
 `asOf` metadata does not reconstruct historical provider pricing.
+
+### Totals, retention and archived usage
+
+`observedTokens` remains `input + output`. Reasoning is part of output and cache
+counts are part of input, so totals also report `input`, `output`, `cacheRead`,
+`cacheWrite` and `reasoning` beside it instead of adding them again.
+`partialTokenRecords` counts records whose reasoning or cache fields were absent
+and were defaulted to zero. `range` echoes the applied `since`/`until` and states
+that budgets are evaluated over all history, not the report range.
+
+Raw records are retained for 90 days and up to 10,000 per project. Records
+pruned by age or by that cap are folded into per-day rollups with their record,
+observed-token and unknown-token counts. The report's `archived` block reports
+those rollups, and totals include them; dimensions, plan/plugin/agent
+attribution and the breakdown page stay raw-only and therefore cover the
+retained window. Records pruned before rollups existed are not recovered, and a
+rollup keeps counts only, never model, agent or plugin detail.
+
+`sessions` lists one row per root session with its child sessions rolled in: the
+session and message counts, records, observed tokens and the same
+input/output/cache/reasoning split, the last observed step, that step's model,
+and its prompt size (`lastInputTokens` = input + cache read) against the
+catalog's context limit. `contextPercent` is null when either value is unknown,
+so an unknown limit never renders as a full window. `hostCostUSD` sums the
+root's own reported step costs and `hostCostMissing` counts its steps with no
+host cost; both stay out of the catalog estimate, totals, and budgets. A step
+with no figure increments `hostCostMissing` and is not stored as zero. When
+that count is above zero the row is unknown for display and for ordering.
+`hostCostUSD` stays null when no step reported a figure. `cacheHitRate` is
+`cacheRead / (cacheRead + cacheWrite)` for that root. It is null when the root
+has no cache tokens or any step left a cache count unknown, and those counts
+stay out of `observedTokens`. `cacheWriteAfterCompaction` is the cache-write
+tokens on the first write after a host compaction in that same session;
+`cacheWriteOther` is every other cache write. The join uses the compaction
+row's session hash, and a write at the same timestamp is not after the
+compaction. No other miss cause is named. `childTokenShare` and
+`childHostCostShare` are the child sessions' share of that root. Either is null
+when its denominator is unknown or zero, and a missing host cost is not treated
+as zero. `window` is the latest character snapshot of that root's context, taken
+from `Context.session.context()` at a terminal step, split into `user`,
+`assistant`, `tool`, and `other`. It is a character length, not a token count,
+and is never added to `observedTokens`. A root with no snapshot keeps
+`window: null`. Rows are ordered by host-reported USD, highest first. A root
+with any missing step cost sorts after every fully priced root, then by observed
+tokens. The row key is a short hash of the root session id.
+
+`compaction` is the summarizer's own call, grouped by the provider, model and
+variant on `session.compaction.ended` or `session.compaction.failed`.
+`includedInTotals` is false. `lastInputTokens` is that call's input plus cache
+read, and `contextLimit` is the catalog window of the model that ran the
+summary, not the chat model's window. `contextPercent` is null when either
+value is unknown. The block is filtered by the report range, kept for 90 days
+and 10,000 rows per project, and is not folded into daily rollups.
 
 ### Opt-in plugin attribution
 
@@ -207,6 +287,35 @@ cross-project access or a hard budget cap. The host event stream is incomplete,
 so a claim may outlive or fail to match the token observations Quartermaster
 received; unobserved usage stays unknown. Attribution report fields explicitly
 use `self-reported-unverified`, `verified: false`, and `complete: false`.
+
+### Direct calls a plugin reports itself
+
+A call that never becomes a host step, such as OPR asking Jev directly, is absent
+from the session ledger. The same plugin can submit that call's own counts with
+`reportDirectUsage`. The project is the active project; the caller cannot choose
+another. `usageID` is the caller's idempotency key: the same plugin and usage id
+replaces the earlier row and keeps the first reported time. It is stored, not
+returned in the report.
+
+```ts
+await ctx.rpc(QUARTERMASTER_RPC).reportDirectUsage({
+  pluginID: "opr",
+  pluginName: "OPR",
+  usageID: "review-jev-01",
+  providerID: "jev",
+  modelID: "review",
+  counts: { input: 1200, output: 80, cacheRead: 400 },
+})
+```
+
+`input` and `output` are required non-negative integers. `reasoning`,
+`cacheRead`, and `cacheWrite` are optional; a missing one becomes zero and marks
+the row partial. The report's `directUsage` block groups those rows by plugin
+and model. It is self-reported and unverified, kept out of host totals, session
+rows, plan attribution, cost, and budgets, so a plugin cannot add to the
+observed ledger by claiming a number. Rows last 90 days, at most 10,000 per
+project. A host restart is required before a running OpenCode process exposes
+the method.
 
 ## Completeness limits
 

@@ -1,7 +1,19 @@
 import assert from "node:assert/strict"
 import test from "node:test"
+import type { TokenRateConfig } from "../../src/config.ts"
 import { evaluateTokenBudgets } from "../../src/telemetry/budgets.ts"
 import type { TokenTelemetryRecord } from "../../src/telemetry/types.ts"
+
+const usdRate = (overrides: Partial<TokenRateConfig> = {}): TokenRateConfig => ({
+  providerID: "provider-a",
+  modelID: "model-a",
+  inputPerMillion: 1_000_000,
+  outputPerMillion: 0,
+  currency: "USD",
+  source: "test",
+  asOf: 0,
+  ...overrides,
+})
 
 const baseRecord = (overrides: Partial<TokenTelemetryRecord> = {}): TokenTelemetryRecord => ({
   hostContractVersion: "2.0.18",
@@ -19,6 +31,7 @@ const baseRecord = (overrides: Partial<TokenTelemetryRecord> = {}): TokenTelemet
   counts: { input: 10, output: 5, reasoning: 2, cacheRead: 3, cacheWrite: 4 },
   usageStatus: "reported",
   ...overrides,
+  partial: overrides.partial ?? false,
 })
 
 test("no configured budgets produce no readings", () => {
@@ -158,4 +171,55 @@ test("calendar day window uses local midnight across daylight-saving change", ()
   )
   assert.equal(reading.windowStart, Date.parse("2024-03-10T05:00:00Z"))
   assert.equal(reading.observedTokens, 15)
+})
+
+test("USD cap reached and not reached from priced window usage", () => {
+  const budgets = [{ id: "project", dimension: "project" as const, limitUSD: 9.5, windowMs: 10_000 }]
+  const pricing = { rates: [usdRate()] }
+  const records = [baseRecord()]
+
+  const [belowCap] = evaluateTokenBudgets(
+    [{ ...budgets[0], limitUSD: 10.5 }],
+    records,
+    10_000,
+    "project-a",
+    pricing,
+  )
+  assert.equal(belowCap.usedUSD, 10)
+  assert.equal(belowCap.costUnknown, false)
+  assert.equal(belowCap.costComplete, true)
+  assert.equal(belowCap.limitReached, false)
+  assert.equal(belowCap.remainingUSD, 0.5)
+
+  const [atCap] = evaluateTokenBudgets(budgets, records, 10_000, "project-a", pricing)
+  assert.equal(atCap.usedUSD, 10)
+  assert.equal(atCap.limitReached, true)
+  assert.equal(atCap.remainingUSD, 0)
+})
+
+test("mixed-currency windows leave usedUSD null and costUnknown", () => {
+  const pricing = {
+    rates: [
+      usdRate(),
+      usdRate({ providerID: "provider-b", modelID: "model-b", currency: "EUR" }),
+    ],
+  }
+  const [reading] = evaluateTokenBudgets(
+    [{ id: "project", dimension: "project", limitUSD: 100, windowMs: 10_000 }],
+    [
+      baseRecord(),
+      baseRecord({
+        hostEventID: "eur",
+        providerID: "provider-b",
+        modelID: "model-b",
+        counts: { input: 1, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+      }),
+    ],
+    10_000,
+    "project-a",
+    pricing,
+  )
+  assert.equal(reading.usedUSD, null)
+  assert.equal(reading.costUnknown, true)
+  assert.equal(reading.limitReached, false)
 })

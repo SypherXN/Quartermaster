@@ -8,6 +8,7 @@ const row = (id: string, modelID: string | null, variant: string | null, counts:
   hostSessionID: `session-${id}`, hostMessageID: `message-${id}`, hostProjectID: "project",
   parentSessionID: null, hostAgentID: null, providerID: modelID ? "provider-a" : null,
   modelID, variant, completedAt: 100, counts, usageStatus: counts ? "reported" : "missing",
+  partial: false,
 })
 
 const counts = (input: number) => ({ input, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 })
