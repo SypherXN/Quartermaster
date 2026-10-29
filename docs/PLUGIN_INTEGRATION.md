@@ -722,8 +722,10 @@ operations:
   modelID, variant?, counts })`. `counts` requires `input` and `output`;
   reasoning and cache counts are optional. The same `usageID` replaces that
   plugin's earlier row. Those counts stay in `report.directUsage` and are not
-  added to host totals or budgets. After the 90-day or 10,000-row raw window,
-  the total keeps a daily count; the plugin and model groups do not. See
+  added to host totals or budgets. Raw calls last 90 days; after that the total,
+  and the plugin and model groups, keep one lifetime row per plugin, model and
+  variant with cache and the other token fields. A range report leaves that
+  older history out. The usage id is not kept. See
   [telemetry contracts and limits](TOKEN_TELEMETRY.md).
 - `pin({ agent, model })` and `unpin({ agent })` manage a manual agent
   preference. Call these only for an explicit user action; pins remain subject

@@ -91,6 +91,8 @@ test("synthetic host-event replay reconciles to the active-project RPC report", 
   assert.deepEqual(report.agentAttribution.dimensions.items, [{
     agentID: "reviewer", evidence: "exact-assistant-message", records: 2,
     observedTokens: 20, unknownTokenRecords: 0,
+    partialRecords: 0, input: 12, output: 8, cacheRead: 0, cacheWrite: 0, reasoning: 0,
+    unknownCacheRecords: 0, hostCostUSD: null, hostCostMissing: 2, cacheHitRate: null,
   }])
   assert.equal(report.agentAttribution.unknownRecords, 1)
   assert.equal(report.planAttribution.status, "model-match-unique")
@@ -101,6 +103,8 @@ test("synthetic host-event replay reconciles to the active-project RPC report", 
   assert.equal(report.planAttribution.ambiguousRecords, 0)
   assert.deepEqual(report.planAttribution.dimensions.items, [{
     plan: "p", evidence: "exact-model-reference", records: 1, observedTokens: 2, unknownTokenRecords: 0,
+    partialRecords: 0, input: 1, output: 1, cacheRead: 0, cacheWrite: 0, reasoning: 0,
+    unknownCacheRecords: 0, hostCostUSD: null, hostCostMissing: 1, cacheHitRate: null,
   }])
   assert.equal(report.errors.total, 1)
   assert.equal(report.errors.byClassification["rate-limit"].latestObservedAt, 1500)

@@ -522,7 +522,8 @@ function paintOverview(){
  const hostCost=report?hostCostText(report.costs):null
  mount('#overview-stats',stat('Observed tokens',number(totals?.observedTokens),telemetryIssue()?'Telemetry unavailable':'Input + output · partial telemetry',true),stat('Routing plans',plans?number(Object.keys(plans).length):'—','From the running host'),stat('Catalog providers',Array.isArray(providers)?number(providers.length):'—','Metadata · not a connectivity check'),stat('Estimated cost',report?(hostCost??costText(report.costs)):'—',hostCost?'Host-reported per step · not an invoice':'Partial estimate · not a bill'))
  const rows=providerDimensions(), max=Math.max(0,...rows.map(item=>item.observedTokens||0))
- mount('#overview-chart',...(rows.length?rows.map(item=>bar(item.value||'Unattributed',item.observedTokens,max)): [empty(telemetryIssue()?'Telemetry is unavailable.':'A little quiet, for now.',telemetryIssue()||'Refresh the workspace or import a report to see observed work.')]),h('p',{class:'chart-foot',text:'Observed input + output only. A share of observed tokens is not a share of provider quota.'}))
+  const providerLabel=item=>{const name=item.value||'Unattributed';if(item.unknownCacheRecords>0||item.cacheHitRate===null||!known(item.cacheHitRate))return name;return `${name} · ${Math.round(item.cacheHitRate*100)}% cache hit`}
+  mount('#overview-chart',...(rows.length?rows.map(item=>bar(providerLabel(item),item.observedTokens,max)): [empty(telemetryIssue()?'Telemetry is unavailable.':'A little quiet, for now.',telemetryIssue()||'Refresh the workspace or import a report to see observed work.')]),h('p',{class:'chart-foot',text:'Observed input + output, including older combinations on All. Cache hit rate is cache read divided by cache read plus cache write. It is omitted when a step left cache unknown. A share of observed tokens is not a share of provider quota.'}))
  const entries=Object.entries(plans||{})
  const shown=entries.slice(0,6)
   const planRows=shown.length?shown.map(([name,models])=>h('div',{class:'route-item'},h('strong',{text:name}),h('p',{class:'chain no-margin',text:chainText(models)||'No models in this chain'}))):[empty('Give your work a direction.','Refresh the workspace, or open Plans to load the winning settings file.')]
@@ -547,7 +548,7 @@ function paintOverview(){
    const usage=currentReport?.directUsage
    const items=Array.isArray(usage?.dimensions?.items)?usage.dimensions.items.filter(item=>item&&typeof item==='object'):[]
    const archivedRecords=known(usage?.archived?.records)?usage.archived.records:0
-   const kept=archivedRecords>0?(items.length?' The total keeps pruned calls. The table lists only retained calls.':' Pruned calls stay in this total.'):''
+   const kept=archivedRecords>0?' Pruned calls stay in this table, grouped by plugin and model.':''
    const note=usage?.complete===false?' Self-reported and unverified. These counts are not added to observed session tokens, cost, or budgets.':''
    const summary=`${number(usage?.records)} reported call${usage?.records===1?'':'s'} · ${number(usage?.observedTokens)} observed tokens.${kept}${note}`
    if(!items.length){
@@ -558,8 +559,10 @@ function paintOverview(){
    const body=items.slice(0,25).map(item=>{
     const name=typeof item.pluginName==='string'&&item.pluginName?item.pluginName:(typeof item.pluginID==='string'?item.pluginID:'unknown')
     const model=[item.providerID,item.modelID].filter(value=>typeof value==='string'&&value).join('/')
-    const share=cachedShare(item)
-    return h('tr',{},h('td',{title:typeof item.pluginID==='string'?item.pluginID:'',text:name}),h('td',{class:'mono',text:model||'—'}),h('td',{class:'num',text:number(item.records)}),h('td',{class:'num',text:number(item.observedTokens)}),h('td',{class:'num',text:share===null?'—':`${Math.round(share)}%`}))
+    const unknownCache=item.unknownCacheRecords>0
+    const share=unknownCache?null:cachedShare(item)
+    const hit=unknownCache?'A reported call left a cache count unknown.':known(item.cacheHitRate)?`Cache hit rate ${Math.round(item.cacheHitRate*100)}%.`:''
+    return h('tr',{},h('td',{title:typeof item.pluginID==='string'?item.pluginID:'',text:name}),h('td',{class:'mono',text:model||'—'}),h('td',{class:'num',text:number(item.records)}),h('td',{class:'num',text:number(item.observedTokens)}),h('td',{class:'num',title:hit,text:unknownCache?'unknown':share===null?'—':`${Math.round(share)}%`}))
    })
    const table=h('table',{class:'ledger'},h('caption',{class:'hint',text:'Plugin-reported calls, highest observed tokens first. Not part of the session total.'}),h('thead',{},h('tr',{},...cols.map(([label,cls])=>h('th',{scope:'col',class:cls,text:label})))),h('tbody',{},...body))
    mount('#overview-direct',h('div',{class:'ledger-wrap'},table),h('p',{class:'chart-foot',text:summary}))

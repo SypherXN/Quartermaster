@@ -94,12 +94,10 @@ delivery or revised record upserts the row rather than adding token counts.
 the plugin-scoped host KV. The KV is shared across this plugin's project
 contexts; each row retains its own project ID, including `null` for unknown,
 so a project query filters rather than relabels rows. Rows expire after 90
-days. Retention keeps at most 10,000 rows per project partition (the unknown
-project partition has its own cap); in-process list/export queries return at
-most 10,000 rows, in completion-time order. This is a per-project ceiling, not a
-single global storage ceiling. Expired/over-cap pruning is intentionally
-partitioned so activity in one project does not evict another project's
-unexpired rows.
+days, with no row cap, so a 24-hour, 7-day or 30-day report is exact. A row that
+passes 90 days is folded into its all-time combination row before deletion.
+Pruning is partitioned by project so expired rows in one project never touch
+another project's rows.
 
 `src/telemetry/window.ts` keeps one character snapshot per host session, in its
 own `quartermaster:window:v1:` keyspace with the same 90-day, 10,000-per-project
@@ -164,7 +162,7 @@ agent names, work-type choices, pins and later config cannot prove the
 historical choice. Error rows without verified
 session-to-project attribution are omitted and `unattributedExcluded` is true;
 error counts are retained observations, not a complete history.
-Budget windows read the most recent project rows (up to 10,000 on the report path; the assignment-warning gate reads only the newest 1,000), not the report's since/until
+Budget windows read the project's retained rows (the assignment-warning gate reads only the newest 1,000), not the report's since/until
 filter; observed usage is a lower bound, `complete` is false, and remaining
 tokens are unknown.
 
@@ -211,13 +209,38 @@ counts are part of input, so totals also report `input`, `output`, `cacheRead`,
 and were defaulted to zero. `range` echoes the applied `since`/`until` and states
 that budgets are evaluated over all history, not the report range.
 
-Raw records are retained for 90 days and up to 10,000 per project. Records
-pruned by age or by that cap are folded into per-day rollups with their record,
-observed-token and unknown-token counts. The report's `archived` block reports
-those rollups, and totals include them; dimensions, plan/plugin/agent
-attribution and the breakdown page stay raw-only and therefore cover the
-retained window. Records pruned before rollups existed are not recovered, and a
-rollup keeps counts only, never model, agent or plugin detail.
+Raw records are retained for 90 days with no row cap, so every step in that
+window is still there for an exact `since`/`until` filter. When a record passes
+90 days it is added to one lifetime row per project, agent, provider, model and
+variant, then deleted. That row keeps the record, observed-token and
+unknown-token counts, the input, output, reasoning and cache split, partial and
+unknown-cache counts, and the host USD sum plus the count of steps with no host
+cost. `cacheHitRate` is `cacheRead / (cacheRead + cacheWrite)`. It is null when
+any included step left cache unknown, or when there is no cache to divide.
+
+Host-step and direct-call pruning runs on the first read or write after startup,
+then at most once every 24 hours per ledger instance. There is no background
+timer; an idle ledger catches up on its next activity. A failed prune is retried
+on the next activity. Rows awaiting the next sweep still count in reports, so
+all-time totals do not temporarily drop; raw detail can remain for up to an
+extra day during active use. Report timestamp filters still apply normally.
+
+History is all-time only. A `since`/`until` report reads retained rows and
+leaves lifetime rows out, so a 24-hour, 7-day or 30-day view is exactly that
+range. An unfiltered report adds lifetime rows to the headline, provider and
+model dimensions, agent totals, plan matches, the breakdown, and its `archived`
+block, which is what makes the all-time cache hit rate cover the full history.
+Daily rollups written before lifetime rows existed are still read and counted
+the same way on an unfiltered report; nothing writes new ones, so a record
+lands in a lifetime row or a legacy daily count, never both.
+
+Plugin identity is not on the step, so a pruned row stays an unknown plugin.
+Session rows, child shares, and cache writes after compaction stay on the
+retained window: they need the session itself. Catalog cost and budgets stay
+on retained rows too. A daily count written before category totals existed has
+no split. It remains in the headline record and token totals only, and it makes
+`cacheQualityComplete` false. Records pruned before any rollup existed are not
+recovered.
 
 `sessions` lists one row per root session with its child sessions rolled in: the
 session and message counts, records, observed tokens and the same
@@ -253,7 +276,7 @@ variant on `session.compaction.ended` or `session.compaction.failed`.
 read, and `contextLimit` is the catalog window of the model that ran the
 summary, not the chat model's window. `contextPercent` is null when either
 value is unknown. The block is filtered by the report range, kept for 90 days
-and 10,000 rows per project, and is not folded into daily rollups.
+and 10,000 rows per project, and is never folded into an all-time total.
 
 ### Opt-in plugin attribution
 
@@ -310,18 +333,21 @@ await ctx.rpc(QUARTERMASTER_RPC).reportDirectUsage({
 
 `input` and `output` are required non-negative integers. `reasoning`,
 `cacheRead`, and `cacheWrite` are optional; a missing one becomes zero and marks
-the row partial. The report's `directUsage` block groups retained rows by plugin
-and model. Raw rows last 90 days and at most 10,000 per project. Pruned rows
-are not discarded: each project keeps one daily count of records, observed
-tokens, unknown-token records, partial records, and the five token fields.
-Plugin, model, variant, and usage id are not kept. Those daily counts stay in
-the `directUsage` total and in `directUsage.archived`. They stay out of the
-plugin and model groups. A `since`/`until` filter applies to the retained rows
-only; the total still includes every daily count, as host totals include every
-host rollup. The block is self-reported and unverified, kept out of host
-totals, session rows, plan attribution, cost, and budgets, so a plugin cannot
-add to the observed ledger by claiming a number. A host restart is required
-before a running OpenCode process exposes the method.
+the row partial. The report's `directUsage` block groups calls by plugin and
+model. Raw calls last 90 days with no row cap. A call past that is added to one
+lifetime row per project, plugin, provider, model and variant, then deleted.
+That row keeps the record, observed-token and unknown-token counts, partial
+records, and the five token fields. A partial call counts as unknown cache, so
+its group's `cacheHitRate` stays null. The usage id is not kept.
+
+Lifetime rows join the `directUsage` total, its plugin and model groups, and
+`directUsage.archived` on an unfiltered report only. A `since`/`until` report
+reads retained calls, so a short range excludes older history instead of mixing
+it in. Legacy daily counts written before lifetime rows existed are still read
+on an unfiltered report. The block is self-reported and unverified, kept out of
+host totals, session rows, plan attribution, cost, and budgets, so a plugin
+cannot add to the observed ledger by claiming a number. A host restart is
+required before a running OpenCode process exposes the method.
 
 ## Completeness limits
 

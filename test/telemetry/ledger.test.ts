@@ -91,10 +91,10 @@ test("concurrent project writes remain isolated and missing project stays explic
   assert.equal(unknown[0].usageStatus, "missing")
 })
 
-test("retries failed writes and applies retention caps without evicting another project", async () => {
+test("retries failed writes, keeps every row inside the window, and folds an expired row into its lifetime total", async () => {
   const storage = new MemoryStorage()
   const now = 2_000_000_000_000
-  const ledger = new TokenLedger(storage, { now: () => now, retentionMs: 100, maxRecords: 2 })
+  const ledger = new TokenLedger(storage, { now: () => now, retentionMs: 100 })
 
   storage.failNextSet = true
   await assert.rejects(ledger.ingest(record("event-failed", "project-a", now - 1)))
@@ -107,14 +107,57 @@ test("retries failed writes and applies retention caps without evicting another 
   assert.deepEqual(rows.map((row) => row.hostEventID), ["event-new-1", "event-new-2", "event-new-3"])
   assert.deepEqual((await ledger.list({ projectID: "project-a" })).map((row) => row.hostEventID), ["event-new-1", "event-new-3"])
   assert.deepEqual((await ledger.list({ projectID: "project-b" })).map((row) => row.hostEventID), ["event-new-2"])
+  // No row cap: only the expired row left, so three raw rows plus its lifetime total.
   assert.equal(storage.values.size, 4)
-  const rollups = await ledger.listRollups({ projectID: "project-a" })
-  assert.equal(rollups.length, 1)
-  assert.deepEqual(
-    { records: rollups[0].records, observedTokens: rollups[0].observedTokens, unknownTokenRecords: rollups[0].unknownTokenRecords },
-    { records: 1, observedTokens: 12, unknownTokenRecords: 0 },
-  )
-  assert.equal(rollups[0].day, Math.floor((now - 101) / 86_400_000) * 86_400_000)
+  assert.deepEqual(await ledger.listRollups({ projectID: "project-a" }), [])
+  const lifetime = await ledger.listLifetime({ projectID: "project-a" })
+  assert.equal(lifetime.length, 1)
+  assert.equal(lifetime[0].records, 1)
+  assert.equal(lifetime[0].observedTokens, 12)
+  assert.equal(lifetime[0].providerID, null)
+  assert.equal(lifetime[0].input, 10)
+  assert.equal(lifetime[0].cacheRead, 0)
+  assert.equal(lifetime[0].unknownCacheRecords, 0)
+  assert.equal(lifetime[0].hostCostMissing, 1)
+})
+
+test("an expired row and a fresh row with the same combination share one lifetime total", async () => {
+  const storage = new MemoryStorage()
+  let now = 2_000_000_000_000
+  const ledger = new TokenLedger(storage, { now: () => now, retentionMs: 100 })
+  await ledger.ingest({ ...record("old-1", "project-a", now - 300), hostAgentID: "build" })
+  now += 86_400_000
+  await ledger.ingest({ ...record("old-2", "project-a", now - 200), hostAgentID: "build" })
+  await ledger.ingest({ ...record("held", "project-a", now - 1), hostAgentID: "build" })
+
+  const lifetime = await ledger.listLifetime({ projectID: "project-a" })
+  assert.equal(lifetime.length, 1)
+  assert.equal(lifetime[0].agentID, "build")
+  assert.equal(lifetime[0].records, 2)
+  assert.deepEqual((await ledger.list({ projectID: "project-a" })).map((row) => row.hostEventID), ["held"])
+  // Re-pruning the same rows does not add them twice.
+  await ledger.list({ projectID: "project-a" })
+  assert.equal((await ledger.listLifetime({ projectID: "project-a" }))[0].records, 2)
+})
+
+test("host pruning scans once per day and keeps pending expiry in totals", async () => {
+  const storage = new MemoryStorage()
+  let scans = 0
+  const scan = storage.scan.bind(storage)
+  storage.scan = async (options) => { scans++; return scan(options) }
+  let now = 2_000_000_000_000
+  const ledger = new TokenLedger(storage, { now: () => now, retentionMs: 100 })
+  await ledger.ingest(record("aging", "project-a", now))
+  const initialScans = scans
+  now += 86_400_000 - 1
+  await ledger.ingest(record("fresh", "project-a", now))
+  assert.equal(scans, initialScans)
+  assert.equal((await ledger.list()).length, 2)
+  assert.equal(scans, initialScans + 1) // The read scans; pruning does not.
+  now += 1
+  await ledger.list()
+  assert.equal((await ledger.listLifetime())[0].records, 1)
+  assert.deepEqual((await ledger.list()).map((row) => row.hostEventID), ["fresh"])
 })
 
 test("partial flag round-trips and defaults when omitted in storage", async () => {

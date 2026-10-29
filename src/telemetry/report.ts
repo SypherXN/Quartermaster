@@ -3,10 +3,10 @@ import { evaluateTokenBudgets, type TokenBudgetReading } from "./budgets.ts"
 import { estimateTokenCosts } from "./costs.ts"
 import type { CatalogSnapshot } from "./prices.ts"
 import type { ProviderErrorLedger, ProviderErrorRecord } from "./errors.ts"
-import type { TokenLedger } from "./ledger.ts"
+import type { TokenLedger, TokenLifetime, TokenRollup, TokenRollupSlice } from "./ledger.ts"
 import type { PluginAttributionClaim, PluginAttributionLedger } from "./attribution.ts"
 import type { CompactionLedger, CompactionRecord } from "./compaction.ts"
-import type { DirectUsageLedger, DirectUsageRecord, DirectUsageRollup } from "./direct-usage.ts"
+import type { DirectUsageLedger, DirectUsageLifetime, DirectUsageRecord, DirectUsageRollup, DirectUsageRollupSlice } from "./direct-usage.ts"
 import type { WindowLedger, WindowRecord } from "./window.ts"
 import type { TokenTelemetryRecord } from "./types.ts"
 import { sessionKey } from "./session-key.ts"
@@ -29,6 +29,17 @@ export interface UsageDimension {
   records: number
   observedTokens: number
   unknownRecords: number
+  partialRecords: number
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
+  reasoning: number
+  unknownCacheRecords: number
+  hostCostUSD: number | null
+  hostCostMissing: number
+  // cacheRead / (cacheRead + cacheWrite). Null when cache is unknown or zero.
+  cacheHitRate: number | null
 }
 
 export interface PluginUsageDimension {
@@ -38,6 +49,16 @@ export interface PluginUsageDimension {
   records: number
   observedTokens: number
   unknownTokenRecords: number
+  partialRecords: number
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
+  reasoning: number
+  unknownCacheRecords: number
+  hostCostUSD: number | null
+  hostCostMissing: number
+  cacheHitRate: number | null
 }
 
 export interface DirectUsageDimension {
@@ -55,6 +76,8 @@ export interface DirectUsageDimension {
   cacheRead: number
   cacheWrite: number
   reasoning: number
+  unknownCacheRecords: number
+  cacheHitRate: number | null
 }
 
 // The model that ran the summary. Context is that model's catalog window, not the chat session's.
@@ -83,6 +106,16 @@ export interface AgentUsageDimension {
   records: number
   observedTokens: number
   unknownTokenRecords: number
+  partialRecords: number
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
+  reasoning: number
+  unknownCacheRecords: number
+  hostCostUSD: number | null
+  hostCostMissing: number
+  cacheHitRate: number | null
 }
 
 export interface PlanUsageDimension {
@@ -91,6 +124,16 @@ export interface PlanUsageDimension {
   records: number
   observedTokens: number
   unknownTokenRecords: number
+  partialRecords: number
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
+  reasoning: number
+  unknownCacheRecords: number
+  hostCostUSD: number | null
+  hostCostMissing: number
+  cacheHitRate: number | null
 }
 
 // Character length of one session's current context. Not a token count.
@@ -155,11 +198,16 @@ export interface UsageBreakdownItem {
   records: number
   observedTokens: number
   unknownTokenRecords: number
+  partialRecords: number
   input: number
   output: number
   cacheRead: number
   cacheWrite: number
   reasoning: number
+  unknownCacheRecords: number
+  hostCostUSD: number | null
+  hostCostMissing: number
+  cacheHitRate: number | null
 }
 
 export interface QuartermasterReport {
@@ -180,6 +228,11 @@ export interface QuartermasterReport {
     cacheRead: number
     cacheWrite: number
     reasoning: number
+    unknownCacheRecords: number
+    // False when a raw step or a pruned slice left cache unknown, or a daily
+    // count from before category slices has no cache split.
+    cacheQualityComplete: boolean
+    cacheHitRate: number | null
     complete: false
   }
   range: { since: number | null; until: number | null; budgets: "all-history" }
@@ -218,8 +271,9 @@ export interface QuartermasterReport {
     reasoning: number
     dimensions: { total: number; offset: number; limit: number; nextOffset: number | null; items: CompactionUsageDimension[] }
   }
-  // Calls a plugin reported itself. Totals include pruned daily counts.
-  // Plugin and model groups stay on the raw window. Separate from host totals.
+  // Calls a plugin reported itself. Totals and plugin/model groups include
+  // pruned slices. A day written before slices stays in the total only.
+  // Separate from host totals.
   directUsage: {
     attribution: "self-reported-unverified"
     verified: false
@@ -280,6 +334,19 @@ export interface QuartermasterReport {
     records: number
     observedTokens: number
     unknownTokenRecords: number
+    // Split fields cover slices only. Older daily counts stay in records and
+    // observedTokens, and leave cacheQualityComplete false.
+    partialRecords: number
+    input: number
+    output: number
+    cacheRead: number
+    cacheWrite: number
+    reasoning: number
+    unknownCacheRecords: number
+    cacheQualityComplete: boolean
+    cacheHitRate: number | null
+    hostCostUSD: number | null
+    hostCostMissing: number
   }
   refresh: "reread" | "not-requested"
 }
@@ -379,6 +446,7 @@ function summarizeUsageBreakdown(
   projectID: string,
   records: readonly TokenTelemetryRecord[],
   claims: readonly PluginAttributionClaim[],
+  rollups: readonly TokenRollup[],
 ): QuartermasterReport["breakdown"] {
   const claimsBySession = pluginClaimsBySession(projectID, claims)
   const byKey = new Map<string, UsageBreakdownItem>()
@@ -397,28 +465,28 @@ function summarizeUsageBreakdown(
       providerID,
       modelID,
       variant,
-      records: 0,
-      observedTokens: 0,
-      unknownTokenRecords: 0,
-      input: 0,
-      output: 0,
-      cacheRead: 0,
-      cacheWrite: 0,
-      reasoning: 0,
+      ...blankTotal(),
+      cacheHitRate: null,
     }
-    item.records += 1
-    const value = tokenValue(record)
-    if (value === undefined || !Number.isSafeInteger(item.observedTokens + value)) item.unknownTokenRecords += 1
-    else item.observedTokens += value
-    const sub = breakdownSubCounts(record)
-    if (Number.isSafeInteger(item.input + sub.input)) item.input += sub.input
-    if (Number.isSafeInteger(item.output + sub.output)) item.output += sub.output
-    if (Number.isSafeInteger(item.cacheRead + sub.cacheRead)) item.cacheRead += sub.cacheRead
-    if (Number.isSafeInteger(item.cacheWrite + sub.cacheWrite)) item.cacheWrite += sub.cacheWrite
-    if (Number.isSafeInteger(item.reasoning + sub.reasoning)) item.reasoning += sub.reasoning
+    absorbRecord(item, record)
     byKey.set(key, item)
   }
-  const items = [...byKey.values()].sort(compareBreakdownItems).slice(0, REPORT_BREAKDOWN_MAX_ITEMS)
+  for (const slice of hostSlices(rollups)) {
+    const key = JSON.stringify([slice.agentID, null, null, slice.providerID, slice.modelID, slice.variant])
+    const item = byKey.get(key) ?? {
+      agentID: slice.agentID,
+      pluginID: null,
+      pluginName: null,
+      providerID: slice.providerID,
+      modelID: slice.modelID,
+      variant: slice.variant,
+      ...blankTotal(),
+      cacheHitRate: null,
+    }
+    absorbSlice(item, slice)
+    byKey.set(key, item)
+  }
+  const items = [...byKey.values()].map((item) => ({ ...item, cacheHitRate: hitRate(item) })).sort(compareBreakdownItems).slice(0, REPORT_BREAKDOWN_MAX_ITEMS)
   return {
     attribution: "self-reported-unverified",
     complete: false,
@@ -431,6 +499,7 @@ function summarizePluginUsage(
   records: readonly TokenTelemetryRecord[],
   claims: readonly PluginAttributionClaim[],
   query: ReportQuery,
+  rollups: readonly TokenRollup[],
 ) {
   const claimsBySession = pluginClaimsBySession(projectID, claims)
 
@@ -450,18 +519,17 @@ function summarizePluginUsage(
       pluginID: claim.pluginID,
       pluginName: claim.pluginName,
       attribution: "self-reported-unverified" as const,
-      records: 0,
-      observedTokens: 0,
-      unknownTokenRecords: 0,
+      ...blankTotal(),
+      cacheHitRate: null,
     }
-    item.records += 1
-    const value = tokenValue(record)
-    if (value === undefined || !Number.isSafeInteger(item.observedTokens + value)) item.unknownTokenRecords += 1
-    else item.observedTokens += value
+    absorbRecord(item, record)
     usageByPlugin.set(key, item)
   }
+  // A pruned step has no plugin claim. It stays unknown, not a named plugin.
+  const prunedRecords = hostSlices(rollups).reduce((sum, slice) => addNumbers(sum, slice.records), 0)
+  unknownRecords += prunedRecords
 
-  const all = [...usageByPlugin.values()].sort((a, b) =>
+  const all = [...usageByPlugin.values()].map((item) => ({ ...item, cacheHitRate: hitRate(item) })).sort((a, b) =>
     a.pluginID.localeCompare(b.pluginID) || a.pluginName.localeCompare(b.pluginName),
   )
   const page = all.slice(query.offset, query.offset + query.limit)
@@ -469,7 +537,7 @@ function summarizePluginUsage(
     attribution: "self-reported-unverified" as const,
     verified: false as const,
     complete: false as const,
-    totalRecords: records.length,
+    totalRecords: records.length + prunedRecords,
     unknownRecords,
     ambiguousRecords,
     dimensions: {
@@ -482,33 +550,46 @@ function summarizePluginUsage(
   }
 }
 
-function summarizeAgentUsage(records: readonly TokenTelemetryRecord[], query: ReportQuery) {
+function summarizeAgentUsage(records: readonly TokenTelemetryRecord[], query: ReportQuery, rollups: readonly TokenRollup[]) {
   const usageByAgent = new Map<string, AgentUsageDimension>()
   let unknownRecords = 0
-  for (const record of records) {
-    if (!record.hostAgentID) {
+  const addAgent = (agentID: string | null, apply: (total: RunningTotal) => void) => {
+    if (!agentID) {
       unknownRecords += 1
+      return
+    }
+    const item = usageByAgent.get(agentID) ?? {
+      agentID,
+      evidence: "exact-assistant-message" as const,
+      ...blankTotal(),
+      cacheHitRate: null,
+    }
+    apply(item)
+    usageByAgent.set(agentID, item)
+  }
+  for (const record of records) addAgent(record.hostAgentID, (total) => absorbRecord(total, record))
+  let prunedRecords = 0
+  for (const slice of hostSlices(rollups)) {
+    prunedRecords = addNumbers(prunedRecords, slice.records)
+    if (!slice.agentID) {
+      unknownRecords += slice.records
       continue
     }
-    const item = usageByAgent.get(record.hostAgentID) ?? {
-      agentID: record.hostAgentID,
+    const item = usageByAgent.get(slice.agentID) ?? {
+      agentID: slice.agentID,
       evidence: "exact-assistant-message" as const,
-      records: 0,
-      observedTokens: 0,
-      unknownTokenRecords: 0,
+      ...blankTotal(),
+      cacheHitRate: null,
     }
-    item.records += 1
-    const value = tokenValue(record)
-    if (value === undefined || !Number.isSafeInteger(item.observedTokens + value)) item.unknownTokenRecords += 1
-    else item.observedTokens += value
-    usageByAgent.set(record.hostAgentID, item)
+    absorbSlice(item, slice)
+    usageByAgent.set(slice.agentID, item)
   }
-  const all = [...usageByAgent.values()].sort((a, b) => a.agentID.localeCompare(b.agentID))
+  const all = [...usageByAgent.values()].map((item) => ({ ...item, cacheHitRate: hitRate(item) })).sort((a, b) => a.agentID.localeCompare(b.agentID))
   const page = all.slice(query.offset, query.offset + query.limit)
   return {
     evidence: "exact-assistant-message" as const,
     complete: false as const,
-    totalRecords: records.length,
+    totalRecords: records.length + prunedRecords,
     unknownRecords,
     dimensions: {
       total: all.length,
@@ -565,44 +646,47 @@ function summarizePlanUsage(
   plans: Readonly<Record<string, readonly ModelRef[]>> | undefined,
   records: readonly TokenTelemetryRecord[],
   query: ReportQuery,
+  rollups: readonly TokenRollup[],
 ) {
   const index = planIndex(plans)
   const usageByPlan = new Map<string, PlanUsageDimension>()
   let unknownRecords = 0
   let ambiguousRecords = 0
-  for (const record of records) {
-    const owners = record.providerID && record.modelID
-      ? index.get(planRefKey(record.providerID, record.modelID, record.variant ?? null))
-      : undefined
+  const assign = (providerID: string | null, modelID: string | null, variant: string | null, weight: number, apply: (total: RunningTotal) => void) => {
+    const owners = providerID && modelID ? index.get(planRefKey(providerID, modelID, variant)) : undefined
     if (!owners || owners.length === 0) {
-      unknownRecords += 1
-      continue
+      unknownRecords += weight
+      return
     }
     if (owners.length > 1) {
-      ambiguousRecords += 1
-      continue
+      ambiguousRecords += weight
+      return
     }
     const plan = owners[0]!
     const item = usageByPlan.get(plan) ?? {
       plan,
       evidence: "exact-model-reference" as const,
-      records: 0,
-      observedTokens: 0,
-      unknownTokenRecords: 0,
+      ...blankTotal(),
+      cacheHitRate: null,
     }
-    item.records += 1
-    const value = tokenValue(record)
-    if (value === undefined || !Number.isSafeInteger(item.observedTokens + value)) item.unknownTokenRecords += 1
-    else item.observedTokens += value
+    apply(item)
     usageByPlan.set(plan, item)
   }
-  const all = [...usageByPlan.values()].sort((a, b) => a.plan.localeCompare(b.plan))
+  for (const record of records) {
+    assign(record.providerID, record.modelID, record.variant ?? null, 1, (total) => absorbRecord(total, record))
+  }
+  let prunedRecords = 0
+  for (const slice of hostSlices(rollups)) {
+    prunedRecords = addNumbers(prunedRecords, slice.records)
+    assign(slice.providerID, slice.modelID, slice.variant, slice.records, (total) => absorbSlice(total, slice))
+  }
+  const all = [...usageByPlan.values()].map((item) => ({ ...item, cacheHitRate: hitRate(item) })).sort((a, b) => a.plan.localeCompare(b.plan))
   const page = all.slice(query.offset, query.offset + query.limit)
   return {
     status: "model-match-unique" as const,
     evidence: "exact-model-reference" as const,
     complete: false as const,
-    totalRecords: records.length,
+    totalRecords: records.length + prunedRecords,
     unknownRecords,
     ambiguousRecords,
     dimensions: {
@@ -701,6 +785,119 @@ function ratio(part: number, whole: number): number | null {
   if (!Number.isFinite(part) || !Number.isFinite(whole) || whole <= 0) return null
   const value = part / whole
   return Number.isFinite(value) ? value : null
+}
+
+interface RunningTotal {
+  records: number
+  observedTokens: number
+  unknownTokenRecords: number
+  partialRecords: number
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
+  reasoning: number
+  unknownCacheRecords: number
+  hostCostUSD: number | null
+  hostCostMissing: number
+}
+
+function blankTotal(): RunningTotal {
+  return {
+    records: 0, observedTokens: 0, unknownTokenRecords: 0, partialRecords: 0,
+    input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0,
+    unknownCacheRecords: 0, hostCostUSD: null, hostCostMissing: 0,
+  }
+}
+
+function addNumbers(sum: number, value: number): number {
+  return Number.isSafeInteger(value) && value >= 0 && Number.isSafeInteger(sum + value) ? sum + value : sum
+}
+
+function absorbRecord(total: RunningTotal, record: TokenTelemetryRecord): void {
+  total.records += 1
+  const value = tokenValue(record)
+  if (value === undefined || !Number.isSafeInteger(total.observedTokens + value)) total.unknownTokenRecords += 1
+  else total.observedTokens += value
+  if (record.partial) total.partialRecords += 1
+  const sub = breakdownSubCounts(record)
+  total.input = addNumbers(total.input, sub.input)
+  total.output = addNumbers(total.output, sub.output)
+  total.cacheRead = addNumbers(total.cacheRead, sub.cacheRead)
+  total.cacheWrite = addNumbers(total.cacheWrite, sub.cacheWrite)
+  total.reasoning = addNumbers(total.reasoning, sub.reasoning)
+  if (!knownCache(record)) total.unknownCacheRecords += 1
+  const hostCost = record.hostCostUSD
+  if (typeof hostCost === "number" && Number.isFinite(hostCost) && hostCost >= 0 &&
+    (total.hostCostUSD === null || Number.isFinite(total.hostCostUSD + hostCost))) {
+    total.hostCostUSD = (total.hostCostUSD ?? 0) + hostCost
+  } else total.hostCostMissing += 1
+}
+
+function absorbSlice(total: RunningTotal, slice: TokenRollupSlice): void {
+  total.records = addNumbers(total.records, slice.records)
+  total.observedTokens = addNumbers(total.observedTokens, slice.observedTokens)
+  total.unknownTokenRecords = addNumbers(total.unknownTokenRecords, slice.unknownTokenRecords)
+  total.partialRecords = addNumbers(total.partialRecords, slice.partialRecords)
+  total.input = addNumbers(total.input, slice.input)
+  total.output = addNumbers(total.output, slice.output)
+  total.cacheRead = addNumbers(total.cacheRead, slice.cacheRead)
+  total.cacheWrite = addNumbers(total.cacheWrite, slice.cacheWrite)
+  total.reasoning = addNumbers(total.reasoning, slice.reasoning)
+  total.unknownCacheRecords = addNumbers(total.unknownCacheRecords, slice.unknownCacheRecords)
+  const reported = slice.records - slice.hostCostMissing
+  if (reported > 0 && Number.isFinite(slice.hostCostUSD)) {
+    const next = (total.hostCostUSD ?? 0) + slice.hostCostUSD
+    if (Number.isFinite(next)) total.hostCostUSD = next
+  }
+  total.hostCostMissing = addNumbers(total.hostCostMissing, slice.hostCostMissing)
+}
+
+function hitRate(total: Pick<RunningTotal, "cacheRead" | "cacheWrite" | "unknownCacheRecords">): number | null {
+  if (total.unknownCacheRecords > 0) return null
+  return ratio(total.cacheRead, total.cacheRead + total.cacheWrite)
+}
+
+function hostSlices(rollups: readonly TokenRollup[]): TokenRollupSlice[] {
+  return rollups.flatMap((rollup) => rollup.slices ?? [])
+}
+
+function blankDimension(dimension: UsageDimension["dimension"], value: string | null): UsageDimension {
+  return {
+    dimension, value, records: 0, observedTokens: 0, unknownRecords: 0,
+    partialRecords: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0,
+    unknownCacheRecords: 0, hostCostUSD: null, hostCostMissing: 0, cacheHitRate: null,
+  }
+}
+
+function absorbDimension(item: UsageDimension, apply: (total: RunningTotal) => void): void {
+  const total: RunningTotal = {
+    records: item.records,
+    observedTokens: item.observedTokens,
+    unknownTokenRecords: item.unknownRecords,
+    partialRecords: item.partialRecords,
+    input: item.input,
+    output: item.output,
+    cacheRead: item.cacheRead,
+    cacheWrite: item.cacheWrite,
+    reasoning: item.reasoning,
+    unknownCacheRecords: item.unknownCacheRecords,
+    hostCostUSD: item.hostCostUSD,
+    hostCostMissing: item.hostCostMissing,
+  }
+  apply(total)
+  item.records = total.records
+  item.observedTokens = total.observedTokens
+  item.unknownRecords = total.unknownTokenRecords
+  item.partialRecords = total.partialRecords
+  item.input = total.input
+  item.output = total.output
+  item.cacheRead = total.cacheRead
+  item.cacheWrite = total.cacheWrite
+  item.reasoning = total.reasoning
+  item.unknownCacheRecords = total.unknownCacheRecords
+  item.hostCostUSD = total.hostCostUSD
+  item.hostCostMissing = total.hostCostMissing
 }
 
 // A partial sum is not a rank. Any missing step leaves the root unknown, and
@@ -997,6 +1194,7 @@ function summarizeDirectUsage(
     pluginID: "", pluginName: "", providerID: "", modelID: "", variant: null,
     records: 0, observedTokens: 0, unknownTokenRecords: 0, partialRecords: 0,
     input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0,
+    unknownCacheRecords: 0, cacheHitRate: null,
   })
   const add = (sum: number, value: number) => Number.isSafeInteger(sum + value) && sum + value >= 0 ? sum + value : sum
   const groups = new Map<string, DirectUsageDimension>()
@@ -1032,6 +1230,7 @@ function summarizeDirectUsage(
     if (!known || !Number.isSafeInteger(item.observedTokens + total)) item.unknownTokenRecords += 1
     else item.observedTokens += total
     if (record.partial) item.partialRecords += 1
+    if (record.partial) item.unknownCacheRecords += 1
     item.input = add(item.input, record.counts.input)
     item.output = add(item.output, record.counts.output)
     item.cacheRead = add(item.cacheRead, record.counts.cacheRead)
@@ -1039,8 +1238,30 @@ function summarizeDirectUsage(
     item.reasoning = add(item.reasoning, record.counts.reasoning)
     groups.set(key, item)
   }
-  // Daily counts have no plugin or model, so they stay out of the groups.
+  const addSlice = (slice: DirectUsageRollupSlice) => {
+    const key = JSON.stringify([slice.pluginID, slice.pluginName, slice.providerID, slice.modelID, slice.variant])
+    const item = groups.get(key) ?? {
+      ...empty(),
+      pluginID: slice.pluginID,
+      pluginName: slice.pluginName,
+      providerID: slice.providerID,
+      modelID: slice.modelID,
+      variant: slice.variant,
+    }
+    item.records = add(item.records, slice.records)
+    item.observedTokens = add(item.observedTokens, slice.observedTokens)
+    item.unknownTokenRecords = add(item.unknownTokenRecords, slice.unknownTokenRecords)
+    item.partialRecords = add(item.partialRecords, slice.partialRecords)
+    item.unknownCacheRecords = add(item.unknownCacheRecords, slice.unknownCacheRecords)
+    item.input = add(item.input, slice.input)
+    item.output = add(item.output, slice.output)
+    item.cacheRead = add(item.cacheRead, slice.cacheRead)
+    item.cacheWrite = add(item.cacheWrite, slice.cacheWrite)
+    item.reasoning = add(item.reasoning, slice.reasoning)
+    groups.set(key, item)
+  }
   // A since/until filter does not apply: host totals include every rollup too.
+  // Slices carry the plugin and model. A day written before slices has none.
   let archivedRecords = 0
   let archivedTokens = 0
   let archivedUnknown = 0
@@ -1055,8 +1276,12 @@ function summarizeDirectUsage(
     cacheRead = add(cacheRead, rollup.cacheRead)
     cacheWrite = add(cacheWrite, rollup.cacheWrite)
     reasoning = add(reasoning, rollup.reasoning)
+    for (const slice of rollup.slices ?? []) addSlice(slice)
   }
-  const items = [...groups.values()].sort((a, b) =>
+  const items = [...groups.values()].map((item) => ({
+    ...item,
+    cacheHitRate: item.unknownCacheRecords > 0 ? null : ratio(item.cacheRead, item.cacheRead + item.cacheWrite),
+  })).sort((a, b) =>
     b.observedTokens - a.observedTokens || a.pluginID.localeCompare(b.pluginID) || a.modelID.localeCompare(b.modelID))
   const page = items.slice(query.offset, query.offset + query.limit)
   return {
@@ -1087,10 +1312,13 @@ function summarizeDirectUsage(
 export async function buildQuartermasterReport(
   deps: {
     projectID: string
-    tokenLedger: Pick<TokenLedger, "list" | "listRollups">
+    tokenLedger: Pick<TokenLedger, "list" | "listRollups"> & { listLifetime?: TokenLedger["listLifetime"] }
     errorLedger: Pick<ProviderErrorLedger, "list">
     attributionLedger: Pick<PluginAttributionLedger, "list">
-    directUsageLedger?: Pick<DirectUsageLedger, "list"> & { listRollups?: DirectUsageLedger["listRollups"] }
+    directUsageLedger?: Pick<DirectUsageLedger, "list"> & {
+      listRollups?: DirectUsageLedger["listRollups"]
+      listLifetime?: DirectUsageLedger["listLifetime"]
+    }
     compactionLedger?: Pick<CompactionLedger, "list">
     windowLedger?: Pick<WindowLedger, "list">
     budgets: readonly TokenBudgetConfig[] | undefined
@@ -1103,24 +1331,63 @@ export async function buildQuartermasterReport(
   refreshed: boolean,
 ): Promise<QuartermasterReport> {
   const now = (deps.now ?? Date.now)()
-  const [allTokens, allErrors, allClaims, catalog, rollups, directUsageRows, allCompaction, allWindows] = await Promise.all([
-    deps.tokenLedger.list({ projectID: deps.projectID, limit: 10_000 }),
+  // History is older than the raw window, so a since/until view leaves it out.
+  // Only an unfiltered view is all-time.
+  const allTime = query.since === undefined && query.until === undefined
+  const [allTokens, allErrors, allClaims, catalog, legacyRollups, legacyLifetime, directUsageRows, allCompaction, allWindows] = await Promise.all([
+    deps.tokenLedger.list({ projectID: deps.projectID }),
     deps.errorLedger.list({ projectID: deps.projectID, limit: 10_000 }),
     deps.attributionLedger.list(deps.projectID),
     deps.catalog ? deps.catalog() : Promise.resolve(undefined),
     deps.tokenLedger.listRollups ? deps.tokenLedger.listRollups({ projectID: deps.projectID }) : Promise.resolve([]),
-    // list prunes before it returns. Rollups are read after that so a row
-    // archived during this build is still in the direct-usage total.
+    deps.tokenLedger.listLifetime ? deps.tokenLedger.listLifetime({ projectID: deps.projectID }) : Promise.resolve([]),
+    // list prunes before it returns. History is read after that so a call
+    // folded during this build is still in the direct-usage total.
     deps.directUsageLedger
       ? deps.directUsageLedger.list(deps.projectID).then(async (records) => ({
           records,
           rollups: await (deps.directUsageLedger?.listRollups?.(deps.projectID) ?? []),
+          lifetime: await (deps.directUsageLedger?.listLifetime?.(deps.projectID) ?? []),
         }))
-      : Promise.resolve({ records: [] as DirectUsageRecord[], rollups: [] as DirectUsageRollup[] }),
+      : Promise.resolve({
+          records: [] as DirectUsageRecord[],
+          rollups: [] as DirectUsageRollup[],
+          lifetime: [] as DirectUsageLifetime[],
+        }),
     deps.compactionLedger ? deps.compactionLedger.list(deps.projectID) : Promise.resolve([]),
     deps.windowLedger ? deps.windowLedger.list(deps.projectID) : Promise.resolve([]),
   ])
   const prices = catalog?.prices
+  // A lifetime row is one combination. Presenting it as a day rollup with a
+  // single slice lets every existing fold treat both history shapes alike.
+  const rollups: TokenRollup[] = allTime ? [
+    ...legacyRollups,
+    ...legacyLifetime.map((row: TokenLifetime) => ({
+      projectID: row.projectID,
+      day: 0,
+      records: row.records,
+      observedTokens: row.observedTokens,
+      unknownTokenRecords: row.unknownTokenRecords,
+      slices: [row],
+    })),
+  ] : []
+  const directRollups: DirectUsageRollup[] = allTime ? [
+    ...directUsageRows.rollups,
+    ...directUsageRows.lifetime.map((row: DirectUsageLifetime) => ({
+      projectID: row.projectID,
+      day: 0,
+      records: row.records,
+      observedTokens: row.observedTokens,
+      unknownTokenRecords: row.unknownTokenRecords,
+      partialRecords: row.partialRecords,
+      input: row.input,
+      output: row.output,
+      cacheRead: row.cacheRead,
+      cacheWrite: row.cacheWrite,
+      reasoning: row.reasoning,
+      slices: [row],
+    })),
+  ] : []
   const archivedRecords = rollups.reduce((sum, rollup) => sum + rollup.records, 0)
   const archivedTokens = rollups.reduce((sum, rollup) => sum + rollup.observedTokens, 0)
   const archivedUnknown = rollups.reduce((sum, rollup) => sum + rollup.unknownTokenRecords, 0)
@@ -1137,6 +1404,13 @@ export async function buildQuartermasterReport(
   let cacheReadTokens = 0
   let cacheWriteTokens = 0
   let reasoningTokens = 0
+  let unknownCacheRecords = 0
+  const place = (dimension: UsageDimension["dimension"], value: string | null): UsageDimension => {
+    const key = JSON.stringify([dimension, value])
+    const item = dimensions.get(key) ?? blankDimension(dimension, value)
+    dimensions.set(key, item)
+    return item
+  }
   for (const record of tokens) {
     const value = tokenValue(record)
     if (value === undefined || !Number.isSafeInteger(observedTokens + value)) unknownTokenRecords += 1
@@ -1148,19 +1422,33 @@ export async function buildQuartermasterReport(
     if (Number.isSafeInteger(cacheReadTokens + sub.cacheRead)) cacheReadTokens += sub.cacheRead
     if (Number.isSafeInteger(cacheWriteTokens + sub.cacheWrite)) cacheWriteTokens += sub.cacheWrite
     if (Number.isSafeInteger(reasoningTokens + sub.reasoning)) reasoningTokens += sub.reasoning
+    if (!knownCache(record)) unknownCacheRecords += 1
     const targets: Array<[UsageDimension["dimension"], string | null]> = [
       ["provider", record.providerID],
       ["model", record.providerID && record.modelID ? `${record.providerID}/${record.modelID}` : null],
     ]
-    for (const [dimension, target] of targets) {
-      const key = JSON.stringify([dimension, target])
-      const item = dimensions.get(key) ?? { dimension, value: target, records: 0, observedTokens: 0, unknownRecords: 0 }
-      item.records += 1
-      if (value === undefined || !Number.isSafeInteger(item.observedTokens + value)) item.unknownRecords += 1
-      else item.observedTokens += value
-      dimensions.set(key, item)
-    }
+    for (const [dimension, target] of targets) absorbDimension(place(dimension, target), (total) => absorbRecord(total, record))
   }
+  const archivedSlices = hostSlices(rollups)
+  const archivedSplit = blankTotal()
+  for (const slice of archivedSlices) {
+    absorbSlice(archivedSplit, slice)
+    const targets: Array<[UsageDimension["dimension"], string | null]> = [
+      ["provider", slice.providerID],
+      ["model", slice.providerID && slice.modelID ? `${slice.providerID}/${slice.modelID}` : null],
+    ]
+    for (const [dimension, target] of targets) absorbDimension(place(dimension, target), (total) => absorbSlice(total, slice))
+  }
+  inputTokens = addNumbers(inputTokens, archivedSplit.input)
+  outputTokens = addNumbers(outputTokens, archivedSplit.output)
+  cacheReadTokens = addNumbers(cacheReadTokens, archivedSplit.cacheRead)
+  cacheWriteTokens = addNumbers(cacheWriteTokens, archivedSplit.cacheWrite)
+  reasoningTokens = addNumbers(reasoningTokens, archivedSplit.reasoning)
+  partialTokenRecords = addNumbers(partialTokenRecords, archivedSplit.partialRecords)
+  unknownCacheRecords = addNumbers(unknownCacheRecords, archivedSplit.unknownCacheRecords)
+  const legacyUnsplit = Math.max(0, archivedRecords - archivedSplit.records)
+  const cacheQualityComplete = unknownCacheRecords === 0 && legacyUnsplit === 0
+  for (const item of dimensions.values()) item.cacheHitRate = hitRate(item)
   const items = [...dimensions.values()].sort((a, b) =>
     a.dimension.localeCompare(b.dimension) || (a.value ?? "").localeCompare(b.value ?? ""),
   )
@@ -1185,6 +1473,9 @@ export async function buildQuartermasterReport(
       cacheRead: cacheReadTokens,
       cacheWrite: cacheWriteTokens,
       reasoning: reasoningTokens,
+      unknownCacheRecords,
+      cacheQualityComplete,
+      cacheHitRate: cacheQualityComplete ? ratio(cacheReadTokens, cacheReadTokens + cacheWriteTokens) : null,
       complete: false,
     },
     range: { since: query.since ?? null, until: query.until ?? null, budgets: "all-history" },
@@ -1199,15 +1490,15 @@ export async function buildQuartermasterReport(
       nextOffset: query.offset + page.length < items.length ? query.offset + page.length : null,
       items: page,
     },
-    pluginAttribution: summarizePluginUsage(deps.projectID, tokens, allClaims, query),
+    pluginAttribution: summarizePluginUsage(deps.projectID, tokens, allClaims, query, rollups),
     compaction: summarizeCompaction(compaction, query, catalog),
-    directUsage: summarizeDirectUsage(direct, directUsageRows.rollups, query),
-    agentAttribution: summarizeAgentUsage(tokens, query),
-    planAttribution: summarizePlanUsage(deps.plans, tokens, query),
+    directUsage: summarizeDirectUsage(direct, directRollups, query),
+    agentAttribution: summarizeAgentUsage(tokens, query, rollups),
+    planAttribution: summarizePlanUsage(deps.plans, tokens, query, rollups),
     budgets: evaluateTokenBudgets(deps.budgets, allTokens, now, deps.projectID, { rates: deps.tokenRates, prices }),
     costs: estimateTokenCosts(tokens, deps.tokenRates, prices),
     errors: summarizeErrors(errors),
-    breakdown: summarizeUsageBreakdown(deps.projectID, tokens, allClaims),
+    breakdown: summarizeUsageBreakdown(deps.projectID, tokens, allClaims, rollups),
     archived: {
       source: "daily-rollups",
       complete: false,
@@ -1215,6 +1506,19 @@ export async function buildQuartermasterReport(
       records: archivedRecords,
       observedTokens: archivedTokens,
       unknownTokenRecords: archivedUnknown,
+      partialRecords: archivedSplit.partialRecords,
+      input: archivedSplit.input,
+      output: archivedSplit.output,
+      cacheRead: archivedSplit.cacheRead,
+      cacheWrite: archivedSplit.cacheWrite,
+      reasoning: archivedSplit.reasoning,
+      unknownCacheRecords: archivedSplit.unknownCacheRecords,
+      cacheQualityComplete: archivedSplit.unknownCacheRecords === 0 && legacyUnsplit === 0,
+      cacheHitRate: archivedSplit.unknownCacheRecords === 0 && legacyUnsplit === 0
+        ? ratio(archivedSplit.cacheRead, archivedSplit.cacheRead + archivedSplit.cacheWrite)
+        : null,
+      hostCostUSD: archivedSplit.hostCostUSD,
+      hostCostMissing: archivedSplit.hostCostMissing,
     },
     refresh: refreshed ? "reread" : "not-requested",
   }

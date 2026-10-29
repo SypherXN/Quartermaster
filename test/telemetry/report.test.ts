@@ -68,7 +68,8 @@ test("report is project-scoped, bounded, unknown-aware, and rereads ledgers", as
   assert.equal(page.projectID, "project-a")
   assert.deepEqual(page.totals, {
     records: 3, observedTokens: 24, unknownTokenRecords: 1, partialTokenRecords: 0,
-    input: 14, output: 10, cacheRead: 0, cacheWrite: 0, reasoning: 0, complete: false,
+    input: 14, output: 10, cacheRead: 0, cacheWrite: 0, reasoning: 0,
+    unknownCacheRecords: 1, cacheQualityComplete: false, cacheHitRate: null, complete: false,
   })
   assert.deepEqual(page.costs, {
     status: "estimated-not-billed", basis: "input-output-cache-per-million", complete: false,
@@ -88,13 +89,17 @@ test("report is project-scoped, bounded, unknown-aware, and rereads ledgers", as
   assert.equal(page.pluginAttribution.verified, false)
   assert.equal(page.pluginAttribution.unknownRecords, 1)
   assert.equal(page.pluginAttribution.ambiguousRecords, 1)
+  const counted = {
+    partialRecords: 0, input: 14, output: 10, cacheRead: 0, cacheWrite: 0, reasoning: 0,
+    unknownCacheRecords: 0, hostCostUSD: null, hostCostMissing: 2, cacheHitRate: null,
+  }
   assert.deepEqual(page.pluginAttribution.dimensions.items, [{
     pluginID: "plugin-a", pluginName: "Plugin A", attribution: "self-reported-unverified",
-    records: 2, observedTokens: 24, unknownTokenRecords: 0,
+    records: 2, observedTokens: 24, unknownTokenRecords: 0, ...counted,
   }])
   assert.deepEqual(page.agentAttribution.dimensions.items, [{
     agentID: "reviewer", evidence: "exact-assistant-message", records: 2,
-    observedTokens: 24, unknownTokenRecords: 0,
+    observedTokens: 24, unknownTokenRecords: 0, ...counted,
   }])
   assert.equal(page.agentAttribution.unknownRecords, 1)
   assert.equal(page.planAttribution.status, "model-match-unique")
@@ -104,7 +109,7 @@ test("report is project-scoped, bounded, unknown-aware, and rereads ledgers", as
   assert.equal(page.planAttribution.unknownRecords, 1)
   assert.equal(page.planAttribution.ambiguousRecords, 0)
   assert.deepEqual(page.planAttribution.dimensions.items, [{
-    plan: "p", evidence: "exact-model-reference", records: 2, observedTokens: 24, unknownTokenRecords: 0,
+    plan: "p", evidence: "exact-model-reference", records: 2, observedTokens: 24, unknownTokenRecords: 0, ...counted,
   }])
   assert.equal(page.dimensions.nextOffset, 2)
   assert.equal(page.budgets[0].remainingTokens, null)
@@ -265,7 +270,7 @@ test("pruned direct usage stays in its total and out of host totals, cost, and b
   const storage = new MemoryStorage()
   const start = 2_000_000_000_000
   let now = start
-  const directUsageLedger = new DirectUsageLedger(storage, () => now, 1_000, 10)
+  const directUsageLedger = new DirectUsageLedger(storage, () => now, 1_000)
   await directUsageLedger.record({
     projectID: "project-a", pluginID: "old-plugin", pluginName: "Old", usageID: "old-secret",
     providerID: "opencode", modelID: "old-model", counts: { input: 100, output: 20 },
@@ -274,7 +279,7 @@ test("pruned direct usage stays in its total and out of host totals, cost, and b
     projectID: "project-b", pluginID: "other", pluginName: "Other", usageID: "other-secret",
     providerID: "opencode", modelID: "other-model", counts: { input: 999, output: 1 },
   })
-  now = start + 5_000
+  now = start + 86_400_000
   await directUsageLedger.record({
     projectID: "project-a", pluginID: "opr", pluginName: "OPR", usageID: "new-secret",
     providerID: "opencode", modelID: "jev",
@@ -294,7 +299,7 @@ test("pruned direct usage stays in its total and out of host totals, cost, and b
     tokenRates: config.tokenRates,
     now: () => now,
   }
-  const page = await buildQuartermasterReport(deps, { since: now - 100, until: now, limit: 10, offset: 0 }, false)
+  const page = await buildQuartermasterReport(deps, { limit: 10, offset: 0 }, false)
 
   assert.equal(page.totals.records, 0)
   assert.equal(page.totals.observedTokens, 0)
@@ -314,14 +319,20 @@ test("pruned direct usage stays in its total and out of host totals, cost, and b
   assert.deepEqual(page.directUsage.archived, {
     records: 1, observedTokens: 120, unknownTokenRecords: 0, partialRecords: 1,
   })
-  assert.equal(page.directUsage.dimensions.items.length, 1)
-  assert.equal(page.directUsage.dimensions.items[0]?.pluginID, "opr")
+  assert.equal(page.directUsage.dimensions.items.length, 2)
+  assert.equal(page.directUsage.dimensions.items[0]?.pluginID, "old-plugin")
+  assert.equal(page.directUsage.dimensions.items[0]?.modelID, "old-model")
   assert.equal(page.directUsage.dimensions.items[0]?.records, 1)
-  assert.equal(page.directUsage.dimensions.items[0]?.observedTokens, 10)
+  assert.equal(page.directUsage.dimensions.items[0]?.observedTokens, 120)
+  assert.equal(page.directUsage.dimensions.items[0]?.cacheHitRate, null)
+  assert.equal(page.directUsage.dimensions.items[1]?.pluginID, "opr")
+  assert.equal(page.directUsage.dimensions.items[1]?.records, 1)
+  assert.equal(page.directUsage.dimensions.items[1]?.observedTokens, 10)
+  assert.equal(page.directUsage.dimensions.items[1]?.cacheHitRate, 2 / 5)
   const serialized = JSON.stringify(page)
   assert.equal(serialized.includes("old-secret"), false)
   assert.equal(serialized.includes("new-secret"), false)
-  assert.equal(serialized.includes("old-plugin"), false)
+  assert.equal(serialized.includes("old-plugin"), true)
   assert.equal(serialized.includes("other-secret"), false)
   assert.equal(serialized.includes("other-model"), false)
 })
@@ -477,4 +488,105 @@ test("report breakdown aggregates flat usage rows for dashboard grouping", async
   assert.equal(cacheRow.cacheRead, 100)
   assert.equal(cacheRow.cacheWrite, 50)
   assert.equal(cacheRow.reasoning, 9)
+  assert.equal(cacheRow.cacheHitRate, 100 / 150)
+})
+
+test("pruned host rows keep model, agent, plan, and cache totals", async () => {
+  const storage = new MemoryStorage()
+  const now = 2_000_000_000_000
+  const ledger = new TokenLedger(storage, { now: () => now, retentionMs: 1_000 })
+  await ledger.ingest({
+    ...token("old", "project-a", "cursor", "grok", 100, now - 5_000),
+    hostAgentID: "build",
+    variant: "medium",
+    counts: { input: 100, output: 20, reasoning: 4, cacheRead: 80, cacheWrite: 20 },
+    hostCostUSD: 1.5,
+  })
+  await ledger.ingest(token("kept", "project-a", "cursor", "grok", 10, now - 10))
+  const config = parseConfig({
+    plans: { p: [{ id: "cursor/grok", variant: "medium" }] },
+    tokenRates: [{ providerID: "cursor", modelID: "grok", inputPerMillion: 1, outputPerMillion: 1, currency: "USD", source: "test fixture", asOf: 1 }],
+  })
+  const page = await buildQuartermasterReport({
+    projectID: "project-a",
+    tokenLedger: ledger,
+    errorLedger: { list: async () => [] },
+    attributionLedger: { list: async () => [] },
+    budgets: config.budgets,
+    tokenRates: config.tokenRates,
+    plans: config.plans,
+    now: () => now,
+  }, { limit: 20, offset: 0 }, false)
+
+  const model = page.dimensions.items.find((item) => item.dimension === "model" && item.value === "cursor/grok")
+  assert.ok(model)
+  assert.equal(model.observedTokens, 135)
+  assert.equal(model.cacheRead, 80)
+  assert.equal(model.cacheWrite, 20)
+  assert.equal(model.cacheHitRate, 0.8)
+  assert.equal(model.hostCostUSD, 1.5)
+  assert.equal(model.hostCostMissing, 1)
+  assert.equal(page.agentAttribution.totalRecords, 2)
+  assert.equal(page.agentAttribution.dimensions.items.find((item) => item.agentID === "build")?.observedTokens, 120)
+  assert.equal(page.agentAttribution.dimensions.items.find((item) => item.agentID === "build")?.cacheHitRate, 0.8)
+  assert.equal(page.planAttribution.totalRecords, 2)
+  assert.equal(page.planAttribution.dimensions.items.find((item) => item.plan === "p")?.observedTokens, 120)
+  assert.equal(page.sessions.items.reduce((sum, item) => sum + item.observedTokens, 0), 15)
+  assert.equal(page.totals.observedTokens, 135)
+  assert.equal(page.totals.cacheRead, 80)
+  assert.equal(page.totals.cacheHitRate, 0.8)
+  assert.equal(page.costs.pricedTokens, 15)
+  assert.equal(page.pluginAttribution.unknownRecords, 2)
+  assert.equal(JSON.stringify(page).includes("session-old"), false)
+})
+
+test("a daily count from before slices stays in the headline, and a sliced call stays in its group", async () => {
+  const page = await buildQuartermasterReport({
+    projectID: "project-a",
+    tokenLedger: {
+      list: async () => [token("kept", "project-a", "cursor", "grok", 10, 100)],
+      listRollups: async () => [{
+        projectID: "project-a", day: 0, records: 4, observedTokens: 40, unknownTokenRecords: 1, slices: [],
+      }],
+    },
+    errorLedger: { list: async () => [] },
+    attributionLedger: { list: async () => [] },
+    directUsageLedger: {
+      list: async () => [],
+      listRollups: async () => [{
+        projectID: "project-a", day: 0, records: 3, observedTokens: 30, unknownTokenRecords: 0,
+        partialRecords: 0, input: 20, output: 10, cacheRead: 0, cacheWrite: 0, reasoning: 0, slices: [],
+      }, {
+        projectID: "project-a", day: 86_400_000, records: 1, observedTokens: 10, unknownTokenRecords: 0,
+        partialRecords: 0, input: 4, output: 6, cacheRead: 2, cacheWrite: 3, reasoning: 1,
+        slices: [{
+          pluginID: "opr", pluginName: "OPR", providerID: "openai", modelID: "gpt-6-luna", variant: "medium",
+          records: 1, observedTokens: 10, unknownTokenRecords: 0, partialRecords: 0,
+          input: 4, output: 6, cacheRead: 2, cacheWrite: 3, reasoning: 1, unknownCacheRecords: 0,
+        }],
+      }],
+    },
+    budgets: [],
+    tokenRates: [],
+    now: () => 200,
+  }, { limit: 20, offset: 0 }, false)
+
+  assert.equal(page.totals.records, 5)
+  assert.equal(page.totals.observedTokens, 55)
+  assert.equal(page.totals.unknownTokenRecords, 1)
+  assert.equal(page.totals.cacheQualityComplete, false)
+  assert.equal(page.totals.cacheHitRate, null)
+  assert.equal(page.archived.records, 4)
+  assert.equal(page.archived.input, 0)
+  assert.equal(page.archived.cacheQualityComplete, false)
+  assert.equal(page.dimensions.items.find((item) => item.dimension === "model")?.observedTokens, 15)
+  assert.equal(page.agentAttribution.totalRecords, 1)
+  assert.equal(page.planAttribution.totalRecords, 1)
+  assert.equal(page.directUsage.records, 4)
+  assert.equal(page.directUsage.observedTokens, 40)
+  assert.equal(page.directUsage.dimensions.items.length, 1)
+  assert.equal(page.directUsage.dimensions.items[0]?.pluginID, "opr")
+  assert.equal(page.directUsage.dimensions.items[0]?.modelID, "gpt-6-luna")
+  assert.equal(page.directUsage.dimensions.items[0]?.records, 1)
+  assert.equal(page.directUsage.dimensions.items[0]?.cacheHitRate, 2 / 5)
 })

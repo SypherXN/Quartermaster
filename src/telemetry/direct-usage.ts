@@ -2,10 +2,11 @@ import type { StorageDomain } from "@opencode/plugin/promise/storage"
 import type { Schema } from "effect"
 
 const PREFIX = "quartermaster:direct-usage:v1:"
+// Read-only: daily rollups written before lifetime rows existed.
 const ROLLUP_PREFIX = "quartermaster:direct-usage:rollup:v1:"
+const LIFETIME_PREFIX = "quartermaster:direct-usage:lifetime:v1:"
 const DAY_MS = 86_400_000
 const RETENTION_MS = 90 * DAY_MS
-const MAX_RECORDS_PER_PROJECT = 10_000
 const PAGE_SIZE = 1_000
 const MAX_ID = 128
 const MAX_MODEL = 256
@@ -18,8 +19,29 @@ export interface DirectUsageCounts {
   cacheWrite: number
 }
 
+// One plugin and model inside a day's pruned direct calls. usageID is not kept.
+// unknownCacheRecords counts partial calls, whose missing cache was stored as zero.
+export interface DirectUsageRollupSlice {
+  pluginID: string
+  pluginName: string
+  providerID: string
+  modelID: string
+  variant: string | null
+  records: number
+  observedTokens: number
+  unknownTokenRecords: number
+  partialRecords: number
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
+  reasoning: number
+  unknownCacheRecords: number
+}
+
 // Pruned rows keep daily counts so the direct-usage total survives the raw
-// window. Plugin, model, and usage id are not kept.
+// window. slices keeps the plugin and model. A rollup written before slices
+// existed still counts in the day total only. usageID is not kept.
 export interface DirectUsageRollup {
   projectID: string
   day: number
@@ -32,6 +54,7 @@ export interface DirectUsageRollup {
   cacheRead: number
   cacheWrite: number
   reasoning: number
+  slices: DirectUsageRollupSlice[]
 }
 
 // A plugin-owned call that never became a host step. The usage id is the
@@ -72,6 +95,18 @@ const keyFor = (record: Pick<DirectUsageRecord, "projectID" | "pluginID" | "usag
 const rollupKey = (projectID: string, day: number) =>
   `${ROLLUP_PREFIX}${encodeURIComponent(JSON.stringify(projectID))}:${day}`
 
+// One all-time combination for a project, pruned from the raw direct calls.
+export interface DirectUsageLifetime extends DirectUsageRollupSlice {
+  projectID: string
+}
+
+const lifetimeKey = (
+  projectID: string,
+  item: Pick<DirectUsageRollupSlice, "pluginID" | "providerID" | "modelID" | "variant">,
+) => `${LIFETIME_PREFIX}${encodeURIComponent(JSON.stringify([
+  projectID, item.pluginID, item.providerID, item.modelID, item.variant,
+]))}`
+
 const id = (value: unknown, max: number) =>
   typeof value === "string" && value.length > 0 && value.length <= max && value.trim() === value
 
@@ -79,6 +114,36 @@ const count = (value: unknown) => typeof value === "number" && Number.isSafeInte
 
 const addCount = (sum: number, value: number) =>
   count(value) && Number.isSafeInteger(sum + value) ? sum + value : sum
+
+function asDirectSlice(value: unknown): DirectUsageRollupSlice | undefined {
+  if (typeof value !== "object" || value === null) return undefined
+  const slice = value as Partial<DirectUsageRollupSlice>
+  if (
+    !id(slice.pluginID, MAX_ID) || !id(slice.pluginName, MAX_ID) || !id(slice.providerID, MAX_MODEL) ||
+    !id(slice.modelID, MAX_MODEL) || (slice.variant !== null && !id(slice.variant, MAX_ID)) ||
+    !count(slice.records) || !count(slice.observedTokens) || !count(slice.unknownTokenRecords) ||
+    !count(slice.partialRecords) || !count(slice.input) || !count(slice.output) ||
+    !count(slice.cacheRead) || !count(slice.cacheWrite) || !count(slice.reasoning) ||
+    !count(slice.unknownCacheRecords)
+  ) return undefined
+  return {
+    pluginID: slice.pluginID!,
+    pluginName: slice.pluginName!,
+    providerID: slice.providerID!,
+    modelID: slice.modelID!,
+    variant: slice.variant!,
+    records: slice.records!,
+    observedTokens: slice.observedTokens!,
+    unknownTokenRecords: slice.unknownTokenRecords!,
+    partialRecords: slice.partialRecords!,
+    input: slice.input!,
+    output: slice.output!,
+    cacheRead: slice.cacheRead!,
+    cacheWrite: slice.cacheWrite!,
+    reasoning: slice.reasoning!,
+    unknownCacheRecords: slice.unknownCacheRecords!,
+  }
+}
 
 function asRollup(value: unknown): DirectUsageRollup | undefined {
   if (typeof value !== "object" || value === null) return undefined
@@ -89,6 +154,13 @@ function asRollup(value: unknown): DirectUsageRollup | undefined {
     !count(rollup.input) || !count(rollup.output) || !count(rollup.cacheRead) ||
     !count(rollup.cacheWrite) || !count(rollup.reasoning)
   ) return undefined
+  let slices: DirectUsageRollupSlice[] = []
+  if (rollup.slices !== undefined) {
+    if (!Array.isArray(rollup.slices)) return undefined
+    const parsed = rollup.slices.map((item) => asDirectSlice(item))
+    if (parsed.some((item) => item === undefined)) return undefined
+    slices = parsed as DirectUsageRollupSlice[]
+  }
   return {
     projectID: rollup.projectID!,
     day: rollup.day!,
@@ -101,7 +173,53 @@ function asRollup(value: unknown): DirectUsageRollup | undefined {
     cacheRead: rollup.cacheRead!,
     cacheWrite: rollup.cacheWrite!,
     reasoning: rollup.reasoning!,
+    slices,
   }
+}
+
+function asLifetime(value: unknown): DirectUsageLifetime | undefined {
+  if (typeof value !== "object" || value === null) return undefined
+  const projectID = (value as { projectID?: unknown }).projectID
+  if (!id(projectID, MAX_MODEL)) return undefined
+  const slice = asDirectSlice(value)
+  if (!slice) return undefined
+  return { projectID: projectID as string, ...slice }
+}
+
+function emptySlice(record: DirectUsageRecord): DirectUsageRollupSlice {
+  return {
+    pluginID: record.pluginID,
+    pluginName: record.pluginName,
+    providerID: record.providerID,
+    modelID: record.modelID,
+    variant: record.variant,
+    records: 0,
+    observedTokens: 0,
+    unknownTokenRecords: 0,
+    partialRecords: 0,
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    reasoning: 0,
+    unknownCacheRecords: 0,
+  }
+}
+
+// The one place a call's counters are added, shared by both folds.
+function addToSlice(slice: DirectUsageRollupSlice, record: DirectUsageRecord): void {
+  const total = record.counts.input + record.counts.output
+  const known = Number.isSafeInteger(total) && total >= 0 && Number.isSafeInteger(slice.observedTokens + total)
+  if (Number.isSafeInteger(slice.records + 1)) slice.records += 1
+  if (known) slice.observedTokens += total
+  else if (Number.isSafeInteger(slice.unknownTokenRecords + 1)) slice.unknownTokenRecords += 1
+  if (record.partial && Number.isSafeInteger(slice.partialRecords + 1)) slice.partialRecords += 1
+  slice.input = addCount(slice.input, record.counts.input)
+  slice.output = addCount(slice.output, record.counts.output)
+  slice.cacheRead = addCount(slice.cacheRead, record.counts.cacheRead)
+  slice.cacheWrite = addCount(slice.cacheWrite, record.counts.cacheWrite)
+  slice.reasoning = addCount(slice.reasoning, record.counts.reasoning)
+  if (record.partial && Number.isSafeInteger(slice.unknownCacheRecords + 1)) slice.unknownCacheRecords += 1
 }
 
 function asRecord(value: unknown): DirectUsageRecord | undefined {
@@ -164,21 +282,16 @@ export function directUsageFromInput(input: DirectUsageInput, reportedAt: number
 
 export class DirectUsageLedger {
   private pending = Promise.resolve()
+  // Per instance: first activity after startup, then at most once per 24 hours.
+  private lastPrunedAt: number | undefined
   private readonly storage: StorageDomain
   private readonly now: () => number
   private readonly retentionMs: number
-  private readonly maxRecords: number
 
-  constructor(
-    storage: StorageDomain,
-    now: () => number = Date.now,
-    retentionMs = RETENTION_MS,
-    maxRecords = MAX_RECORDS_PER_PROJECT,
-  ) {
+  constructor(storage: StorageDomain, now: () => number = Date.now, retentionMs = RETENTION_MS) {
     this.storage = storage
     this.now = now
     this.retentionMs = Math.max(1, retentionMs)
-    this.maxRecords = Math.max(1, Math.min(MAX_RECORDS_PER_PROJECT, Math.floor(maxRecords)))
   }
 
   record(input: DirectUsageInput): Promise<{ replaced: boolean }> {
@@ -196,7 +309,7 @@ export class DirectUsageLedger {
         throw new TypeError("Invalid direct usage report")
       }
       await this.storage.set(keyFor(record), record as unknown as Schema.Json)
-      await this.prune(record.projectID)
+      await this.prune()
       return { replaced: existing !== undefined }
     })
     this.pending = write.then(() => {}, () => {})
@@ -204,19 +317,28 @@ export class DirectUsageLedger {
   }
 
   async list(projectID: string): Promise<DirectUsageRecord[]> {
-    await this.serialize(() => this.prune(projectID))
+    await this.serialize(() => this.prune())
     const entries = await this.scan()
-    const cutoff = this.now() - this.retentionMs
+    // Keep pending expiry visible until it is folded, so All never loses usage.
     return entries
       .map((entry) => ({ entry, record: asRecord(entry.value) }))
       .filter(({ entry, record }) => record !== undefined && entry.key === keyFor(record))
       .map(({ record }) => record!)
-      .filter((record) => record.projectID === projectID && record.reportedAt >= cutoff)
+      .filter((record) => record.projectID === projectID)
       .sort((a, b) => a.reportedAt - b.reportedAt || a.usageID.localeCompare(b.usageID))
   }
 
+  // Legacy daily rollups, written before lifetime rows existed. Never written now.
   async listRollups(projectID: string): Promise<DirectUsageRollup[]> {
     return this.serialize(() => this.readRollups(projectID))
+  }
+
+  async listLifetime(projectID: string): Promise<DirectUsageLifetime[]> {
+    return this.serialize(async () => (await this.readLifetime())
+      .filter((row) => row.projectID === projectID)
+      .sort((a, b) => a.pluginID.localeCompare(b.pluginID) || a.pluginName.localeCompare(b.pluginName) ||
+        a.providerID.localeCompare(b.providerID) || a.modelID.localeCompare(b.modelID) ||
+        (a.variant ?? "").localeCompare(b.variant ?? "")))
   }
 
   private serialize<T>(operation: () => Promise<T>): Promise<T> {
@@ -246,44 +368,41 @@ export class DirectUsageLedger {
       .sort((a, b) => a.day - b.day || a.projectID.localeCompare(b.projectID))
   }
 
-  private async archive(records: readonly DirectUsageRecord[]): Promise<void> {
+  // One row per plugin, model, and variant, all-time, for this project.
+  private async readLifetime(): Promise<DirectUsageLifetime[]> {
+    const entries = await this.scan(LIFETIME_PREFIX)
+    return entries
+      .map((entry) => ({ entry, row: asLifetime(entry.value) }))
+      .filter(({ entry, row }) => row !== undefined && entry.key === lifetimeKey(row.projectID, row))
+      .map(({ row }) => row!)
+  }
+
+  private async foldLifetime(records: readonly DirectUsageRecord[]): Promise<void> {
     if (records.length === 0) return
-    const stored = new Map((await this.readRollups()).map((rollup) => [rollupKey(rollup.projectID, rollup.day), rollup] as const))
+    const stored = new Map((await this.readLifetime()).map((row) => [lifetimeKey(row.projectID, row), row] as const))
     const dirty = new Set<string>()
     for (const record of records) {
-      const day = Math.floor(record.reportedAt / DAY_MS) * DAY_MS
-      const key = rollupKey(record.projectID, day)
-      const rollup = stored.get(key) ?? {
-        projectID: record.projectID, day, records: 0, observedTokens: 0, unknownTokenRecords: 0,
-        partialRecords: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0,
-      }
-      const total = record.counts.input + record.counts.output
-      const known = Number.isSafeInteger(total) && total >= 0 && Number.isSafeInteger(rollup.observedTokens + total)
-      if (Number.isSafeInteger(rollup.records + 1)) rollup.records += 1
-      if (known) rollup.observedTokens += total
-      else if (Number.isSafeInteger(rollup.unknownTokenRecords + 1)) rollup.unknownTokenRecords += 1
-      if (record.partial && Number.isSafeInteger(rollup.partialRecords + 1)) rollup.partialRecords += 1
-      rollup.input = addCount(rollup.input, record.counts.input)
-      rollup.output = addCount(rollup.output, record.counts.output)
-      rollup.cacheRead = addCount(rollup.cacheRead, record.counts.cacheRead)
-      rollup.cacheWrite = addCount(rollup.cacheWrite, record.counts.cacheWrite)
-      rollup.reasoning = addCount(rollup.reasoning, record.counts.reasoning)
-      stored.set(key, rollup)
+      const key = lifetimeKey(record.projectID, record)
+      const row = stored.get(key) ?? { projectID: record.projectID, ...emptySlice(record) }
+      addToSlice(row, record)
+      stored.set(key, row)
       dirty.add(key)
     }
     await Promise.all([...dirty].map((key) => this.storage.set(key, stored.get(key)! as unknown as Schema.Json)))
   }
 
-  private async prune(projectID: string): Promise<void> {
+  // Age only. Every call inside the window is kept, so a range filter is exact.
+  private async prune(): Promise<void> {
+    const now = this.now()
+    if (this.lastPrunedAt !== undefined && now - this.lastPrunedAt < DAY_MS) return
+    const cutoff = now - this.retentionMs
     const entries = await this.scan()
-    const cutoff = this.now() - this.retentionMs
-    const valid = entries.map((entry) => ({ entry, record: asRecord(entry.value) }))
-      .filter(({ entry, record }) => record !== undefined && entry.key === keyFor(record))
-    const projectRows = valid.filter(({ record }) => record!.projectID === projectID && record!.reportedAt >= cutoff)
-      .sort((a, b) => b.record!.reportedAt - a.record!.reportedAt || a.entry.key.localeCompare(b.entry.key))
-    const keep = new Set(projectRows.slice(0, this.maxRecords).map(({ entry }) => entry.key))
-    const removed = valid.filter(({ record, entry }) => record!.projectID === projectID && !keep.has(entry.key))
-    await this.archive(removed.map(({ record }) => record!))
-    await Promise.all(removed.map(({ entry }) => this.storage.remove(entry.key)))
+    const expired = entries
+      .map((entry) => ({ entry, record: asRecord(entry.value) }))
+      .filter(({ entry, record }) => record === undefined || (entry.key === keyFor(record) && record.reportedAt < cutoff))
+    await this.foldLifetime(expired.flatMap(({ entry, record }) =>
+      record && entry.key === keyFor(record) ? [record] : []))
+    await Promise.all(expired.map(({ entry }) => this.storage.remove(entry.key)))
+    this.lastPrunedAt = now
   }
 }
