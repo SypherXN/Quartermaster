@@ -310,12 +310,18 @@ await ctx.rpc(QUARTERMASTER_RPC).reportDirectUsage({
 
 `input` and `output` are required non-negative integers. `reasoning`,
 `cacheRead`, and `cacheWrite` are optional; a missing one becomes zero and marks
-the row partial. The report's `directUsage` block groups those rows by plugin
-and model. It is self-reported and unverified, kept out of host totals, session
-rows, plan attribution, cost, and budgets, so a plugin cannot add to the
-observed ledger by claiming a number. Rows last 90 days, at most 10,000 per
-project. A host restart is required before a running OpenCode process exposes
-the method.
+the row partial. The report's `directUsage` block groups retained rows by plugin
+and model. Raw rows last 90 days and at most 10,000 per project. Pruned rows
+are not discarded: each project keeps one daily count of records, observed
+tokens, unknown-token records, partial records, and the five token fields.
+Plugin, model, variant, and usage id are not kept. Those daily counts stay in
+the `directUsage` total and in `directUsage.archived`. They stay out of the
+plugin and model groups. A `since`/`until` filter applies to the retained rows
+only; the total still includes every daily count, as host totals include every
+host rollup. The block is self-reported and unverified, kept out of host
+totals, session rows, plan attribution, cost, and budgets, so a plugin cannot
+add to the observed ledger by claiming a number. A host restart is required
+before a running OpenCode process exposes the method.
 
 ## Completeness limits
 

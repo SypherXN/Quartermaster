@@ -393,7 +393,7 @@ details.plan[open]>summary{margin-bottom:18px}
    <div id="overview-sessions"></div>
    <div class="ledger-actions"><button id="export-usage-csv" type="button">Export usage CSV</button><span class="hint no-margin">Exports the rows shown above. Nothing is sent anywhere.</span></div></section>
     <section class="panel section-gap" aria-labelledby="compaction-heading"><div class="panel-head"><div><h2 id="compaction-heading">Compaction by model</h2><p>The summarizer's own tokens, beside the model that ran it</p></div><span class="badge neutral">Not in session total</span></div><div id="overview-compaction"></div></section>
-    <section class="panel section-gap" aria-labelledby="direct-usage-heading"><div class="panel-head"><div><h2 id="direct-usage-heading">Plugin-reported calls</h2><p>Counts a plugin submitted for a call that never became a host step</p></div><span class="badge neutral">Self-reported</span></div><div id="overview-direct"></div></section>
+    <section class="panel section-gap" aria-labelledby="direct-usage-heading"><div class="panel-head"><div><h2 id="direct-usage-heading">Plugin-reported calls</h2><p>Counts a plugin submitted for a call that never became a host step. Pruned calls stay in the total.</p></div><span class="badge neutral">Self-reported</span></div><div id="overview-direct"></div></section>
   <div class="grid-two section-gap"><section class="panel"><div class="panel-head"><div><h2>Where the work goes</h2><p>Observed tokens by provider</p></div><span class="badge neutral">Telemetry</span></div><div id="overview-chart"></div></section><section class="panel"><div class="panel-head"><div><h2>Routing at a glance</h2><p>Ordered fallbacks from the running host</p></div><a class="mono" href="#plans">Edit plans ↗</a></div><div id="overview-plans"></div></section></div>
   <div id="overview-attention" class="note section-gap">Connect to your local gateway to see the state of this workspace. Nothing runs automatically.</div>
   <p id="dashboard-status" class="status-line" role="status" aria-live="polite">Waiting for your first refresh.</p>
@@ -543,20 +543,26 @@ function paintOverview(){
  }else if(attention&&dashboardData)attention.textContent=`${telemetryIssue()} Routing plans and quota state are shown independently from telemetry.${typeof snapshot.availability?.status==='string'?` Quota source status: ${snapshot.availability.status}.`:''}`
    paintSessions();paintCompaction();paintDirect();paintBudgets()
  }
- function paintDirect(){
-  const usage=currentReport?.directUsage
-  const items=Array.isArray(usage?.dimensions?.items)?usage.dimensions.items.filter(item=>item&&typeof item==='object'):[]
-  if(!items.length){mount('#overview-direct',empty(currentReport?'No plugin-reported calls in this range.':'No plugin-reported calls yet.',currentReport?'A plugin can submit counts for a call that never became a host step.':'Refresh the workspace after a plugin reports a direct call.'));return}
-  const cols=[['Plugin',''],['Model',''],['Calls','num'],['Tokens (observed)','num'],['Cached share','num']]
-  const body=items.slice(0,25).map(item=>{
-   const name=typeof item.pluginName==='string'&&item.pluginName?item.pluginName:(typeof item.pluginID==='string'?item.pluginID:'unknown')
-   const model=[item.providerID,item.modelID].filter(value=>typeof value==='string'&&value).join('/')
-   const share=cachedShare(item)
-   return h('tr',{},h('td',{title:typeof item.pluginID==='string'?item.pluginID:'',text:name}),h('td',{class:'mono',text:model||'—'}),h('td',{class:'num',text:number(item.records)}),h('td',{class:'num',text:number(item.observedTokens)}),h('td',{class:'num',text:share===null?'—':`${Math.round(share)}%`}))
-  })
-  const table=h('table',{class:'ledger'},h('caption',{class:'hint',text:'Plugin-reported calls, highest observed tokens first. Not part of the session total.'}),h('thead',{},h('tr',{},...cols.map(([label,cls])=>h('th',{scope:'col',class:cls,text:label})))),h('tbody',{},...body))
-  const note=usage?.complete===false?' Self-reported and unverified. These counts are not added to observed session tokens, cost, or budgets.':''
-   mount('#overview-direct',h('div',{class:'ledger-wrap'},table),h('p',{class:'chart-foot',text:`${number(usage?.records)} reported call${usage?.records===1?'':'s'} · ${number(usage?.observedTokens)} observed tokens.${note}`}))
+  function paintDirect(){
+   const usage=currentReport?.directUsage
+   const items=Array.isArray(usage?.dimensions?.items)?usage.dimensions.items.filter(item=>item&&typeof item==='object'):[]
+   const archivedRecords=known(usage?.archived?.records)?usage.archived.records:0
+   const kept=archivedRecords>0?(items.length?' The total keeps pruned calls. The table lists only retained calls.':' Pruned calls stay in this total.'):''
+   const note=usage?.complete===false?' Self-reported and unverified. These counts are not added to observed session tokens, cost, or budgets.':''
+   const summary=`${number(usage?.records)} reported call${usage?.records===1?'':'s'} · ${number(usage?.observedTokens)} observed tokens.${kept}${note}`
+   if(!items.length){
+    if(known(usage?.records)&&usage.records>0){mount('#overview-direct',h('p',{class:'chart-foot',text:summary}));return}
+    mount('#overview-direct',empty(currentReport?'No plugin-reported calls in this range.':'No plugin-reported calls yet.',currentReport?'A plugin can submit counts for a call that never became a host step.':'Refresh the workspace after a plugin reports a direct call.'));return
+   }
+   const cols=[['Plugin',''],['Model',''],['Calls','num'],['Tokens (observed)','num'],['Cached share','num']]
+   const body=items.slice(0,25).map(item=>{
+    const name=typeof item.pluginName==='string'&&item.pluginName?item.pluginName:(typeof item.pluginID==='string'?item.pluginID:'unknown')
+    const model=[item.providerID,item.modelID].filter(value=>typeof value==='string'&&value).join('/')
+    const share=cachedShare(item)
+    return h('tr',{},h('td',{title:typeof item.pluginID==='string'?item.pluginID:'',text:name}),h('td',{class:'mono',text:model||'—'}),h('td',{class:'num',text:number(item.records)}),h('td',{class:'num',text:number(item.observedTokens)}),h('td',{class:'num',text:share===null?'—':`${Math.round(share)}%`}))
+   })
+   const table=h('table',{class:'ledger'},h('caption',{class:'hint',text:'Plugin-reported calls, highest observed tokens first. Not part of the session total.'}),h('thead',{},h('tr',{},...cols.map(([label,cls])=>h('th',{scope:'col',class:cls,text:label})))),h('tbody',{},...body))
+   mount('#overview-direct',h('div',{class:'ledger-wrap'},table),h('p',{class:'chart-foot',text:summary}))
   }
  function paintCompaction(){
   const usage=currentReport?.compaction

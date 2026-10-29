@@ -2,6 +2,7 @@ import type { StorageDomain } from "@opencode/plugin/promise/storage"
 import type { Schema } from "effect"
 
 const PREFIX = "quartermaster:direct-usage:v1:"
+const ROLLUP_PREFIX = "quartermaster:direct-usage:rollup:v1:"
 const DAY_MS = 86_400_000
 const RETENTION_MS = 90 * DAY_MS
 const MAX_RECORDS_PER_PROJECT = 10_000
@@ -15,6 +16,22 @@ export interface DirectUsageCounts {
   reasoning: number
   cacheRead: number
   cacheWrite: number
+}
+
+// Pruned rows keep daily counts so the direct-usage total survives the raw
+// window. Plugin, model, and usage id are not kept.
+export interface DirectUsageRollup {
+  projectID: string
+  day: number
+  records: number
+  observedTokens: number
+  unknownTokenRecords: number
+  partialRecords: number
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
+  reasoning: number
 }
 
 // A plugin-owned call that never became a host step. The usage id is the
@@ -52,10 +69,40 @@ export interface DirectUsageInput {
 const keyFor = (record: Pick<DirectUsageRecord, "projectID" | "pluginID" | "usageID">) =>
   `${PREFIX}${encodeURIComponent(JSON.stringify([record.projectID, record.pluginID, record.usageID]))}`
 
+const rollupKey = (projectID: string, day: number) =>
+  `${ROLLUP_PREFIX}${encodeURIComponent(JSON.stringify(projectID))}:${day}`
+
 const id = (value: unknown, max: number) =>
   typeof value === "string" && value.length > 0 && value.length <= max && value.trim() === value
 
 const count = (value: unknown) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+
+const addCount = (sum: number, value: number) =>
+  count(value) && Number.isSafeInteger(sum + value) ? sum + value : sum
+
+function asRollup(value: unknown): DirectUsageRollup | undefined {
+  if (typeof value !== "object" || value === null) return undefined
+  const rollup = value as Partial<DirectUsageRollup>
+  if (
+    !id(rollup.projectID, MAX_MODEL) || !count(rollup.day) || !count(rollup.records) ||
+    !count(rollup.observedTokens) || !count(rollup.unknownTokenRecords) || !count(rollup.partialRecords) ||
+    !count(rollup.input) || !count(rollup.output) || !count(rollup.cacheRead) ||
+    !count(rollup.cacheWrite) || !count(rollup.reasoning)
+  ) return undefined
+  return {
+    projectID: rollup.projectID!,
+    day: rollup.day!,
+    records: rollup.records!,
+    observedTokens: rollup.observedTokens!,
+    unknownTokenRecords: rollup.unknownTokenRecords!,
+    partialRecords: rollup.partialRecords!,
+    input: rollup.input!,
+    output: rollup.output!,
+    cacheRead: rollup.cacheRead!,
+    cacheWrite: rollup.cacheWrite!,
+    reasoning: rollup.reasoning!,
+  }
+}
 
 function asRecord(value: unknown): DirectUsageRecord | undefined {
   if (typeof value !== "object" || value === null) return undefined
@@ -168,21 +215,63 @@ export class DirectUsageLedger {
       .sort((a, b) => a.reportedAt - b.reportedAt || a.usageID.localeCompare(b.usageID))
   }
 
+  async listRollups(projectID: string): Promise<DirectUsageRollup[]> {
+    return this.serialize(() => this.readRollups(projectID))
+  }
+
   private serialize<T>(operation: () => Promise<T>): Promise<T> {
     const task = this.pending.catch(() => {}).then(operation)
     this.pending = task.then(() => {}, () => {})
     return task
   }
 
-  private async scan() {
+  private async scan(prefix = PREFIX) {
     const entries: Awaited<ReturnType<StorageDomain["scan"]>>["entries"][number][] = []
     let after: string | undefined
     while (true) {
-      const page = await this.storage.scan({ prefix: PREFIX, after, limit: PAGE_SIZE })
+      const page = await this.storage.scan({ prefix, after, limit: PAGE_SIZE })
       entries.push(...page.entries)
       if (!page.next || page.next === after) return entries
       after = page.next
     }
+  }
+
+  private async readRollups(projectID?: string): Promise<DirectUsageRollup[]> {
+    const entries = await this.scan(ROLLUP_PREFIX)
+    return entries
+      .map((entry) => ({ entry, rollup: asRollup(entry.value) }))
+      .filter(({ entry, rollup }) => rollup !== undefined && entry.key === rollupKey(rollup.projectID, rollup.day))
+      .map(({ rollup }) => rollup!)
+      .filter((rollup) => projectID === undefined || rollup.projectID === projectID)
+      .sort((a, b) => a.day - b.day || a.projectID.localeCompare(b.projectID))
+  }
+
+  private async archive(records: readonly DirectUsageRecord[]): Promise<void> {
+    if (records.length === 0) return
+    const stored = new Map((await this.readRollups()).map((rollup) => [rollupKey(rollup.projectID, rollup.day), rollup] as const))
+    const dirty = new Set<string>()
+    for (const record of records) {
+      const day = Math.floor(record.reportedAt / DAY_MS) * DAY_MS
+      const key = rollupKey(record.projectID, day)
+      const rollup = stored.get(key) ?? {
+        projectID: record.projectID, day, records: 0, observedTokens: 0, unknownTokenRecords: 0,
+        partialRecords: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0,
+      }
+      const total = record.counts.input + record.counts.output
+      const known = Number.isSafeInteger(total) && total >= 0 && Number.isSafeInteger(rollup.observedTokens + total)
+      if (Number.isSafeInteger(rollup.records + 1)) rollup.records += 1
+      if (known) rollup.observedTokens += total
+      else if (Number.isSafeInteger(rollup.unknownTokenRecords + 1)) rollup.unknownTokenRecords += 1
+      if (record.partial && Number.isSafeInteger(rollup.partialRecords + 1)) rollup.partialRecords += 1
+      rollup.input = addCount(rollup.input, record.counts.input)
+      rollup.output = addCount(rollup.output, record.counts.output)
+      rollup.cacheRead = addCount(rollup.cacheRead, record.counts.cacheRead)
+      rollup.cacheWrite = addCount(rollup.cacheWrite, record.counts.cacheWrite)
+      rollup.reasoning = addCount(rollup.reasoning, record.counts.reasoning)
+      stored.set(key, rollup)
+      dirty.add(key)
+    }
+    await Promise.all([...dirty].map((key) => this.storage.set(key, stored.get(key)! as unknown as Schema.Json)))
   }
 
   private async prune(projectID: string): Promise<void> {
@@ -193,8 +282,8 @@ export class DirectUsageLedger {
     const projectRows = valid.filter(({ record }) => record!.projectID === projectID && record!.reportedAt >= cutoff)
       .sort((a, b) => b.record!.reportedAt - a.record!.reportedAt || a.entry.key.localeCompare(b.entry.key))
     const keep = new Set(projectRows.slice(0, this.maxRecords).map(({ entry }) => entry.key))
-    await Promise.all(valid
-      .filter(({ record, entry }) => record!.projectID === projectID && !keep.has(entry.key))
-      .map(({ entry }) => this.storage.remove(entry.key)))
+    const removed = valid.filter(({ record, entry }) => record!.projectID === projectID && !keep.has(entry.key))
+    await this.archive(removed.map(({ record }) => record!))
+    await Promise.all(removed.map(({ entry }) => this.storage.remove(entry.key)))
   }
 }

@@ -6,7 +6,7 @@ import type { ProviderErrorLedger, ProviderErrorRecord } from "./errors.ts"
 import type { TokenLedger } from "./ledger.ts"
 import type { PluginAttributionClaim, PluginAttributionLedger } from "./attribution.ts"
 import type { CompactionLedger, CompactionRecord } from "./compaction.ts"
-import type { DirectUsageLedger, DirectUsageRecord } from "./direct-usage.ts"
+import type { DirectUsageLedger, DirectUsageRecord, DirectUsageRollup } from "./direct-usage.ts"
 import type { WindowLedger, WindowRecord } from "./window.ts"
 import type { TokenTelemetryRecord } from "./types.ts"
 import { sessionKey } from "./session-key.ts"
@@ -218,7 +218,8 @@ export interface QuartermasterReport {
     reasoning: number
     dimensions: { total: number; offset: number; limit: number; nextOffset: number | null; items: CompactionUsageDimension[] }
   }
-  // Calls a plugin reported itself. Separate from host-observed totals.
+  // Calls a plugin reported itself. Totals include pruned daily counts.
+  // Plugin and model groups stay on the raw window. Separate from host totals.
   directUsage: {
     attribution: "self-reported-unverified"
     verified: false
@@ -232,6 +233,13 @@ export interface QuartermasterReport {
     cacheRead: number
     cacheWrite: number
     reasoning: number
+    // Pruned rows only. Not the host archived block, and not the plugin/model groups.
+    archived: {
+      records: number
+      observedTokens: number
+      unknownTokenRecords: number
+      partialRecords: number
+    }
     dimensions: { total: number; offset: number; limit: number; nextOffset: number | null; items: DirectUsageDimension[] }
   }
   agentAttribution: {
@@ -982,6 +990,7 @@ function summarizeCompaction(
 
 function summarizeDirectUsage(
   records: readonly DirectUsageRecord[],
+  rollups: readonly DirectUsageRollup[],
   query: ReportQuery,
 ): QuartermasterReport["directUsage"] {
   const empty = (): DirectUsageDimension => ({
@@ -1030,6 +1039,23 @@ function summarizeDirectUsage(
     item.reasoning = add(item.reasoning, record.counts.reasoning)
     groups.set(key, item)
   }
+  // Daily counts have no plugin or model, so they stay out of the groups.
+  // A since/until filter does not apply: host totals include every rollup too.
+  let archivedRecords = 0
+  let archivedTokens = 0
+  let archivedUnknown = 0
+  let archivedPartial = 0
+  for (const rollup of rollups) {
+    archivedRecords = add(archivedRecords, rollup.records)
+    archivedTokens = add(archivedTokens, rollup.observedTokens)
+    archivedUnknown = add(archivedUnknown, rollup.unknownTokenRecords)
+    archivedPartial = add(archivedPartial, rollup.partialRecords)
+    input = add(input, rollup.input)
+    output = add(output, rollup.output)
+    cacheRead = add(cacheRead, rollup.cacheRead)
+    cacheWrite = add(cacheWrite, rollup.cacheWrite)
+    reasoning = add(reasoning, rollup.reasoning)
+  }
   const items = [...groups.values()].sort((a, b) =>
     b.observedTokens - a.observedTokens || a.pluginID.localeCompare(b.pluginID) || a.modelID.localeCompare(b.modelID))
   const page = items.slice(query.offset, query.offset + query.limit)
@@ -1037,11 +1063,17 @@ function summarizeDirectUsage(
     attribution: "self-reported-unverified",
     verified: false,
     complete: false,
-    records: records.length,
-    observedTokens,
-    unknownTokenRecords,
-    partialRecords,
+    records: add(records.length, archivedRecords),
+    observedTokens: add(observedTokens, archivedTokens),
+    unknownTokenRecords: add(unknownTokenRecords, archivedUnknown),
+    partialRecords: add(partialRecords, archivedPartial),
     input, output, cacheRead, cacheWrite, reasoning,
+    archived: {
+      records: archivedRecords,
+      observedTokens: archivedTokens,
+      unknownTokenRecords: archivedUnknown,
+      partialRecords: archivedPartial,
+    },
     dimensions: {
       total: items.length,
       offset: query.offset,
@@ -1058,7 +1090,7 @@ export async function buildQuartermasterReport(
     tokenLedger: Pick<TokenLedger, "list" | "listRollups">
     errorLedger: Pick<ProviderErrorLedger, "list">
     attributionLedger: Pick<PluginAttributionLedger, "list">
-    directUsageLedger?: Pick<DirectUsageLedger, "list">
+    directUsageLedger?: Pick<DirectUsageLedger, "list"> & { listRollups?: DirectUsageLedger["listRollups"] }
     compactionLedger?: Pick<CompactionLedger, "list">
     windowLedger?: Pick<WindowLedger, "list">
     budgets: readonly TokenBudgetConfig[] | undefined
@@ -1071,13 +1103,20 @@ export async function buildQuartermasterReport(
   refreshed: boolean,
 ): Promise<QuartermasterReport> {
   const now = (deps.now ?? Date.now)()
-  const [allTokens, allErrors, allClaims, catalog, rollups, allDirect, allCompaction, allWindows] = await Promise.all([
+  const [allTokens, allErrors, allClaims, catalog, rollups, directUsageRows, allCompaction, allWindows] = await Promise.all([
     deps.tokenLedger.list({ projectID: deps.projectID, limit: 10_000 }),
     deps.errorLedger.list({ projectID: deps.projectID, limit: 10_000 }),
     deps.attributionLedger.list(deps.projectID),
     deps.catalog ? deps.catalog() : Promise.resolve(undefined),
     deps.tokenLedger.listRollups ? deps.tokenLedger.listRollups({ projectID: deps.projectID }) : Promise.resolve([]),
-    deps.directUsageLedger ? deps.directUsageLedger.list(deps.projectID) : Promise.resolve([]),
+    // list prunes before it returns. Rollups are read after that so a row
+    // archived during this build is still in the direct-usage total.
+    deps.directUsageLedger
+      ? deps.directUsageLedger.list(deps.projectID).then(async (records) => ({
+          records,
+          rollups: await (deps.directUsageLedger?.listRollups?.(deps.projectID) ?? []),
+        }))
+      : Promise.resolve({ records: [] as DirectUsageRecord[], rollups: [] as DirectUsageRollup[] }),
     deps.compactionLedger ? deps.compactionLedger.list(deps.projectID) : Promise.resolve([]),
     deps.windowLedger ? deps.windowLedger.list(deps.projectID) : Promise.resolve([]),
   ])
@@ -1087,7 +1126,7 @@ export async function buildQuartermasterReport(
   const archivedUnknown = rollups.reduce((sum, rollup) => sum + rollup.unknownTokenRecords, 0)
   const tokens = allTokens.filter((record) => inRange(record.completedAt, query))
   const errors = allErrors.filter((record) => inRange(record.observedAt, query))
-  const direct = allDirect.filter((record) => inRange(record.reportedAt, query))
+  const direct = directUsageRows.records.filter((record) => inRange(record.reportedAt, query))
   const compaction = allCompaction.filter((record) => inRange(record.completedAt, query))
   const dimensions = new Map<string, UsageDimension>()
   let observedTokens = 0
@@ -1162,7 +1201,7 @@ export async function buildQuartermasterReport(
     },
     pluginAttribution: summarizePluginUsage(deps.projectID, tokens, allClaims, query),
     compaction: summarizeCompaction(compaction, query, catalog),
-    directUsage: summarizeDirectUsage(direct, query),
+    directUsage: summarizeDirectUsage(direct, directUsageRows.rollups, query),
     agentAttribution: summarizeAgentUsage(tokens, query),
     planAttribution: summarizePlanUsage(deps.plans, tokens, query),
     budgets: evaluateTokenBudgets(deps.budgets, allTokens, now, deps.projectID, { rates: deps.tokenRates, prices }),

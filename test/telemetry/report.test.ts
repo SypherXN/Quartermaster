@@ -5,6 +5,7 @@ import type { StorageDomain } from "@opencode/plugin/promise/storage"
 import { parseConfig } from "../../src/config.ts"
 import { projectRetryError, ProviderErrorLedger } from "../../src/telemetry/errors.ts"
 import { PluginAttributionLedger } from "../../src/telemetry/attribution.ts"
+import { DirectUsageLedger } from "../../src/telemetry/direct-usage.ts"
 import { TokenLedger } from "../../src/telemetry/ledger.ts"
 import { buildQuartermasterReport } from "../../src/telemetry/report.ts"
 import { sessionKey } from "../../src/telemetry/session-key.ts"
@@ -254,7 +255,75 @@ test("direct plugin usage stays out of host totals and hides the usage id", asyn
   assert.equal(page.directUsage.partialRecords, 1)
   assert.equal(page.directUsage.verified, false)
   assert.equal(page.directUsage.dimensions.items[0]?.pluginID, "opr")
+  assert.deepEqual(page.directUsage.archived, {
+    records: 0, observedTokens: 0, unknownTokenRecords: 0, partialRecords: 0,
+  })
   assert.equal(JSON.stringify(page).includes("jev-call-secret"), false)
+})
+
+test("pruned direct usage stays in its total and out of host totals, cost, and budgets", async () => {
+  const storage = new MemoryStorage()
+  const start = 2_000_000_000_000
+  let now = start
+  const directUsageLedger = new DirectUsageLedger(storage, () => now, 1_000, 10)
+  await directUsageLedger.record({
+    projectID: "project-a", pluginID: "old-plugin", pluginName: "Old", usageID: "old-secret",
+    providerID: "opencode", modelID: "old-model", counts: { input: 100, output: 20 },
+  })
+  await directUsageLedger.record({
+    projectID: "project-b", pluginID: "other", pluginName: "Other", usageID: "other-secret",
+    providerID: "opencode", modelID: "other-model", counts: { input: 999, output: 1 },
+  })
+  now = start + 5_000
+  await directUsageLedger.record({
+    projectID: "project-a", pluginID: "opr", pluginName: "OPR", usageID: "new-secret",
+    providerID: "opencode", modelID: "jev",
+    counts: { input: 5, output: 5, reasoning: 1, cacheRead: 2, cacheWrite: 3 },
+  })
+  const config = parseConfig({
+    budgets: [{ id: "project-cap", dimension: "project", limitTokens: 10, windowMs: 10_000 }],
+    tokenRates: [{ providerID: "opencode", modelID: "jev", inputPerMillion: 1, outputPerMillion: 1, currency: "USD", source: "test fixture", asOf: 800 }],
+  })
+  const deps = {
+    projectID: "project-a",
+    tokenLedger: new TokenLedger(storage, { now: () => now }),
+    errorLedger: { list: async () => [] },
+    attributionLedger: { list: async () => [] },
+    directUsageLedger,
+    budgets: config.budgets,
+    tokenRates: config.tokenRates,
+    now: () => now,
+  }
+  const page = await buildQuartermasterReport(deps, { since: now - 100, until: now, limit: 10, offset: 0 }, false)
+
+  assert.equal(page.totals.records, 0)
+  assert.equal(page.totals.observedTokens, 0)
+  assert.equal(page.archived.records, 0)
+  assert.equal(page.costs.pricedRecords, 0)
+  assert.equal(page.costs.pricedTokens, 0)
+  assert.equal(page.budgets[0].observedTokens, 0)
+  assert.equal(page.budgets[0].limitReached, false)
+  assert.equal(page.directUsage.records, 2)
+  assert.equal(page.directUsage.observedTokens, 130)
+  assert.equal(page.directUsage.input, 105)
+  assert.equal(page.directUsage.output, 25)
+  assert.equal(page.directUsage.reasoning, 1)
+  assert.equal(page.directUsage.cacheRead, 2)
+  assert.equal(page.directUsage.cacheWrite, 3)
+  assert.equal(page.directUsage.partialRecords, 1)
+  assert.deepEqual(page.directUsage.archived, {
+    records: 1, observedTokens: 120, unknownTokenRecords: 0, partialRecords: 1,
+  })
+  assert.equal(page.directUsage.dimensions.items.length, 1)
+  assert.equal(page.directUsage.dimensions.items[0]?.pluginID, "opr")
+  assert.equal(page.directUsage.dimensions.items[0]?.records, 1)
+  assert.equal(page.directUsage.dimensions.items[0]?.observedTokens, 10)
+  const serialized = JSON.stringify(page)
+  assert.equal(serialized.includes("old-secret"), false)
+  assert.equal(serialized.includes("new-secret"), false)
+  assert.equal(serialized.includes("old-plugin"), false)
+  assert.equal(serialized.includes("other-secret"), false)
+  assert.equal(serialized.includes("other-model"), false)
 })
 
 test("compaction stays beside its model and out of host totals", async () => {
