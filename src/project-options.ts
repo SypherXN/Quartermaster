@@ -63,7 +63,7 @@ const flagValue = (args: readonly string[], name: string) => {
 }
 
 // `serve --service` is the only process Service.discover() can return. The receiving project server is separate.
-const receivingProcessEndpoint = (listen: ProcessListen): ServerEndpoint | undefined => {
+export const receivingProcessEndpoint = (listen: ProcessListen): ServerEndpoint | undefined => {
   if (!listen.argv.includes("serve")) return undefined
   const port = flagValue(listen.argv, "--port")
   if (!port || !/^[0-9]+$/.test(port)) return undefined

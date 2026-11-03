@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs"
 import { readFile } from "node:fs/promises"
-import { homedir } from "node:os"
+import { Service } from "@opencode/client/service"
 import { applyDiscoveredQuartermasterOptions, readProjectQuartermasterOptions } from "./project-options.ts"
 import { spawn, spawnSync } from "node:child_process"
 import { createServer } from "node:http"
@@ -45,22 +45,35 @@ async function readLimited(response) {
   return Buffer.concat(chunks).toString()
 }
 
-export function createLocalUiServer({ openCodeURL, token, projectDirectory, port = 4175 }) {
+function checkedOrigin(openCodeURL) {
   const upstream = new URL(openCodeURL)
-  if (!loopback.has(upstream.hostname) || !["http:", "https:"].includes(upstream.protocol) || upstream.username || upstream.password || upstream.pathname !== "/" || upstream.search || upstream.hash)
-    throw new Error("OpenCode URL must use the 127.0.0.1 loopback HTTP(S) origin without embedded credentials")
-  if (!token?.trim() || !projectDirectory?.trim()) throw new Error("OpenCode token and project directory are required")
+  if (upstream.hostname === "localhost") upstream.hostname = "127.0.0.1"
+  if ((!loopback.has(upstream.hostname) && upstream.hostname !== "[::1]") || !["http:", "https:"].includes(upstream.protocol) || upstream.username || upstream.password || upstream.pathname !== "/" || upstream.search || upstream.hash)
+    throw new Error("OpenCode URL must use a loopback HTTP(S) origin without embedded credentials")
+  return upstream
+}
+
+export function createLocalUiServer({ openCodeURL, token, resolveEndpoint, projectDirectory, port = 4175 }) {
+  const upstream = checkedOrigin(openCodeURL ?? "http://127.0.0.1")
+  if ((!resolveEndpoint && !token?.trim()) || !projectDirectory?.trim()) throw new Error("OpenCode token and project directory are required")
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error("Invalid local UI port")
-  const authorization = `Basic ${Buffer.from(`opencode:${token}`).toString("base64")}`
   const directory = resolve(projectDirectory)
   const sameDirectory = (value) => {
     const found = resolve(value)
     return found === directory || found.toLowerCase() === directory.toLowerCase()
   }
   async function upstreamJSON(url, { method = "GET", body } = {}) {
-    const response = await fetch(url, {
+    // Discover for each call: a restarted host can change both port and password.
+    // Never retry writes, whose response may have been lost after application.
+    const endpoint = resolveEndpoint ? await resolveEndpoint() : {
+      url: upstream.origin, auth: { type: "basic", username: "opencode", password: token },
+    }
+    if (!endpoint) throw new Error("No healthy OpenCode service is available")
+    const origin = checkedOrigin(endpoint.url)
+    const target = new URL(url.pathname + url.search, origin)
+    const response = await fetch(target, {
       method, body, redirect: "error", signal: AbortSignal.timeout(5_000),
-      headers: { authorization, accept: "application/json", ...(body ? { "content-type": "application/json" } : {}) },
+      headers: { ...Service.headers(endpoint), accept: "application/json", ...(body ? { "content-type": "application/json" } : {}) },
     })
     if (!response.ok) throw new Error("upstream")
     return JSON.parse(await readLimited(response))
@@ -417,9 +430,10 @@ export function ensureLocalUi({
   execPath = process.execPath,
   nodeLookup = findNodeExecutable,
   retain,
+  hostEndpoint,
 } = {}) {
   if (!localUiStartup)
-    localUiStartup = startLocalUiProcess({ projectDirectory, env, spawnImpl, connect, scriptPath, sleep, attempts, execPath, nodeLookup })
+    localUiStartup = startLocalUiProcess({ projectDirectory, env, spawnImpl, connect, scriptPath, sleep, attempts, execPath, nodeLookup, hostEndpoint })
       .finally(() => { localUiStartup = undefined })
   if (typeof retain === "function") {
     localUiStartup.then((status) => {
@@ -432,7 +446,7 @@ export function ensureLocalUi({
   return localUiStartup
 }
 
-async function startLocalUiProcess({ projectDirectory, env, spawnImpl, connect, scriptPath, sleep, attempts, execPath, nodeLookup }) {
+async function startLocalUiProcess({ projectDirectory, env, spawnImpl, connect, scriptPath, sleep, attempts, execPath, nodeLookup, hostEndpoint }) {
   if (typeof projectDirectory !== "string" || projectDirectory.trim() === "") return "skipped"
   if (env.QUARTERMASTER_LOCAL_UI === "0") return "disabled"
   const port = Number(env.QUARTERMASTER_LOCAL_UI_PORT ?? 4175)
@@ -456,6 +470,8 @@ async function startLocalUiProcess({ projectDirectory, env, spawnImpl, connect, 
       QUARTERMASTER_GATEWAY_CHILD: "1",
       QUARTERMASTER_LOCAL_UI_OPEN_BROWSER: "0",
       QUARTERMASTER_LOCAL_UI_PARENT_PID: String(process.pid),
+      // Private child environment, never command-line arguments or disk.
+      ...(hostEndpoint ? { QUARTERMASTER_HOST_ENDPOINT: JSON.stringify(hostEndpoint) } : {}),
     },
   })
   child.stderr?.setEncoding?.("utf8")
@@ -474,17 +490,6 @@ async function startLocalUiProcess({ projectDirectory, env, spawnImpl, connect, 
     stopOwnedChild(child)
     throw error
   }
-}
-
-async function localService() {
-  const info = JSON.parse(await readFile(resolve(homedir(), ".local", "state", "opencode", "service.json"), "utf8"))
-  const url = new URL(info.url)
-  if (url.hostname === "localhost" || url.hostname === "::1" || url.hostname === "[::1]") url.hostname = "127.0.0.1"
-  if ((url.protocol !== "http:" && url.protocol !== "https:") || url.hostname !== "127.0.0.1" || !url.port)
-    throw new Error("OpenCode service is not a loopback HTTP port")
-  const token = info.password
-  if (typeof token !== "string" || token.trim() === "") throw new Error("OpenCode service has no local password")
-  return { openCodeURL: `http://127.0.0.1:${url.port}`, token }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
@@ -506,15 +511,13 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     process.exitCode = 1
   } else {
     Promise.resolve().then(async () => {
-      let openCodeURL = process.env.OPENCODE_URL
-      let token = process.env.OPENCODE_TOKEN
-      if (!openCodeURL || !token) {
-        const discovered = await localService()
-        openCodeURL = openCodeURL || discovered.openCodeURL
-        token = token || discovered.token
-      }
+      const openCodeURL = process.env.OPENCODE_URL
+      const token = process.env.OPENCODE_TOKEN
+      const hostEndpoint = process.env.QUARTERMASTER_HOST_ENDPOINT
+        ? JSON.parse(process.env.QUARTERMASTER_HOST_ENDPOINT) : undefined
+      if (!hostEndpoint && Boolean(openCodeURL) !== Boolean(token)) throw new Error("Set both OPENCODE_URL and OPENCODE_TOKEN, or neither")
       const port = Number(process.env.QUARTERMASTER_LOCAL_UI_PORT ?? 4175)
-      const server = createLocalUiServer({ openCodeURL, token, projectDirectory, port })
+      const server = createLocalUiServer({ openCodeURL, token, resolveEndpoint: hostEndpoint ? async () => hostEndpoint : openCodeURL ? undefined : () => Service.discover(), projectDirectory, port })
       watchLocalUiParent(process.env.QUARTERMASTER_LOCAL_UI_PARENT_PID, {
         onGone: () => {
           server.close(() => process.exit(0))

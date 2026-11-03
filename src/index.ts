@@ -4,7 +4,7 @@ import { Plugin } from "@opencode/plugin"
 import { registerAgentRouting } from "./agent-routing.ts"
 import { parseConfig, type TokenRateConfig } from "./config.ts"
 import { ModuleCooldowns } from "./modules.ts"
-import { adoptProjectQuartermasterOptions, type ConfigurationReader } from "./project-options.ts"
+import { adoptProjectQuartermasterOptions, receivingProcessEndpoint, type ConfigurationReader } from "./project-options.ts"
 import { readUsageStatus, type UsageReadResult } from "./usage.ts"
 import { registerQuartermasterRpc } from "./rpc.ts"
 import { startTokenCollector } from "./telemetry/collector.ts"
@@ -27,6 +27,7 @@ type LocalUiStarter = {
   ensureLocalUi?: (options: {
     projectDirectory: string
     retain?: (stop: () => void) => void
+    hostEndpoint?: { url: string; auth?: { type: "basic"; username: string; password: string } }
   }) => Promise<unknown>
   localUiOwnerCount?: () => number
   releaseLocalUi?: () => void
@@ -34,6 +35,7 @@ type LocalUiStarter = {
 
 export async function startCheckoutLocalUi(directory: string | undefined, options: {
   env?: NodeJS.ProcessEnv
+  argv?: readonly string[]
   scriptUrl?: URL
   load?: (script: URL) => Promise<LocalUiStarter>
   retain?: (stop: () => void) => void
@@ -45,14 +47,20 @@ export async function startCheckoutLocalUi(directory: string | undefined, option
   try {
     await access(fileURLToPath(script))
   } catch {
+    // tsc does not emit this .mjs, so a stale or partial dist lands here. Say
+    // which path is missing instead of skipping the page silently.
+    console.warn(`[quartermaster] local UI script missing: ${fileURLToPath(script)}`)
     return "absent"
   }
   try {
     const load = options.load ?? ((url: URL) => import(url.href) as Promise<LocalUiStarter>)
     const loaded = await load(script)
     if (typeof loaded.ensureLocalUi !== "function") return "absent"
+    const own = receivingProcessEndpoint({ argv: options.argv ?? process.argv, env })
+    const password = env.OPENCODE_SERVER_PASSWORD || env.OPENCODE_PASSWORD
     const status = await loaded.ensureLocalUi({
       projectDirectory: directory,
+      ...(own ? { hostEndpoint: { ...own, ...(password ? { auth: { type: "basic" as const, username: "opencode", password } } : {}) } } : {}),
       ...(typeof options.retain === "function" ? { retain: options.retain } : {}),
     })
     if (status === "started") {

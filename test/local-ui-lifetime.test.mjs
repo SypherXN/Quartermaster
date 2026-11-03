@@ -28,6 +28,7 @@ test("local UI parent watch stops when the parent is gone", async () => {
 test("plugin startup keeps the local UI attached and the last owner stops it", async () => {
   const directory = process.cwd()
   const env = { QUARTERMASTER_LOCAL_UI_PORT: "43111" }
+  const hostEndpoint = { url: "http://127.0.0.1:49194", auth: { type: "basic", username: "opencode", password: "fake-host-password" } }
   let child
   const spawnImpl = (_exe, _args, options) => {
     child = {
@@ -47,6 +48,7 @@ test("plugin startup keeps the local UI attached and the last owner stops it", a
     const started = await ensureLocalUi({
       projectDirectory: directory,
       env,
+      hostEndpoint,
       scriptPath: "src/local-ui.mjs",
       attempts: 2,
       sleep: async () => {},
@@ -60,6 +62,7 @@ test("plugin startup keeps the local UI attached and the last owner stops it", a
     assert.equal(child.options.env.QUARTERMASTER_GATEWAY_CHILD, "1")
     assert.equal(child.options.env.QUARTERMASTER_LOCAL_UI_OPEN_BROWSER, "0")
     assert.equal(child.options.env.QUARTERMASTER_LOCAL_UI_PARENT_PID, String(process.pid))
+    assert.deepEqual(JSON.parse(child.options.env.QUARTERMASTER_HOST_ENDPOINT), hostEndpoint)
     assert.equal(localUiOwnerCount(), 1)
     const again = await ensureLocalUi({
       projectDirectory: directory,

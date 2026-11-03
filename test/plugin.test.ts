@@ -256,3 +256,19 @@ test("checkout local UI startup skips, disables, and reports the loopback URL", 
   assert.match(notes.join("\n"), /http:\/\/127\.0\.0\.1:4188\//)
   assert.equal(notes.length, 1)
 })
+
+test("checkout UI uses the receiving OpenChamber server, not a separate managed service", async () => {
+  let endpoint: unknown
+  await startCheckoutLocalUi("C:\\work", {
+    argv: ["opencode", "serve", "--port", "49194", "--hostname", "127.0.0.1"],
+    env: { OPENCODE_SERVER_PASSWORD: "fake-host-password" },
+    load: async () => ({ ensureLocalUi: async (options) => {
+      endpoint = options.hostEndpoint
+      return "running"
+    } }),
+  })
+  assert.deepEqual(endpoint, {
+    url: "http://127.0.0.1:49194",
+    auth: { type: "basic", username: "opencode", password: "fake-host-password" },
+  })
+})

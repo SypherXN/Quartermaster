@@ -44,16 +44,16 @@ try {
   } else {
     // Compile into owned staging storage; never rewrite checkout dist or an earlier archive.
     run(process.execPath, [join(root, "node_modules", "typescript", "bin", "tsc"), "-p", join(root, "tsconfig.build.json"), "--outDir", join(stage, "dist")])
-    await Promise.all(["package.json", "index.js", "README.md", "LICENSE", "docs"].map((path) => cp(join(root, path), join(stage, path), { recursive: true })))
+    await Promise.all(["package.json", "index.js", "README.md", "LICENSE", "docs", "web"].map((path) => cp(join(root, path), join(stage, path), { recursive: true })))
     const packed = JSON.parse(run(process.execPath, [npmCLI, "pack", "--ignore-scripts", "--json", "--pack-destination", artifacts], stage))[0]
     archive = join(artifacts, packed.filename)
     paths = packed.files.map((file) => file.path)
   }
   for (const path of paths) {
-    assert.match(path, /^(?:index\.js|dist\/(?:telemetry\/)?[a-z-]+\.(?:js|d\.ts)|docs\/[A-Z_]+\.md|README\.md|LICENSE|package\.json)$/,
+    assert.match(path, /^(?:index\.js|dist\/(?:telemetry\/)?[a-z-]+\.(?:js|d\.ts|mjs|d\.mts)|web\/index\.html|docs\/[A-Z_]+\.md|README\.md|LICENSE|package\.json)$/,
       `Unexpected archive content: ${path}`)
   }
-  for (const path of ["LICENSE", "package.json", "index.js", "dist/index.js", "dist/index.d.ts", "dist/rpc.js", "dist/rpc.d.ts"]) {
+  for (const path of ["LICENSE", "package.json", "index.js", "dist/index.js", "dist/index.d.ts", "dist/rpc.js", "dist/rpc.d.ts", "dist/local-ui.mjs", "web/index.html"]) {
     assert.ok(paths.includes(path), `Archive is missing ${path}`)
   }
   const sha256 = createHash("sha256").update(await readFile(archive)).digest("hex")
@@ -67,6 +67,8 @@ try {
     assert.equal(plugin.id, 'quartermaster');
     assert.equal(QUARTERMASTER_RPC.id, 'quartermaster');
     assert.equal(typeof requestSelection, 'function');
+    const { createLocalUiServer } = await import('./node_modules/opencode-quartermaster/dist/local-ui.mjs');
+    assert.equal(typeof createLocalUiServer, 'function');
     const { readProjectQuartermasterOptions } = await import('./node_modules/opencode-quartermaster/dist/project-options.js');
     const { readFile, writeFile } = await import('node:fs/promises');
     const { join } = await import('node:path');

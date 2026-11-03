@@ -18,7 +18,7 @@
     ".": { "types": "./dist/index.d.ts", "default": "./index.js" },
     "./rpc": { "types": "./dist/rpc.d.ts", "default": "./dist/rpc.js" }
   },
-  "files": ["index.js", "dist", "docs", "README.md", "LICENSE"],
+  "files": ["index.js", "dist", "web/index.html", "docs", "README.md", "LICENSE"],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "prepack": "npm run build",
