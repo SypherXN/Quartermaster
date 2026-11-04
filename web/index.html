@@ -399,7 +399,6 @@ details.plan[open]>summary{margin-bottom:18px}
 <section data-page="overview" class="fade-in" aria-labelledby="overview-heading">
    <div class="page-head"><div><div class="eyebrow"><span class="register-index" aria-hidden="true">01</span>Workspace ledger</div><h1 id="overview-heading">Workspace ledger.</h1><p>Your model inventory, routing plans, and available headroom.<br>A clear record of what keeps the work moving.</p></div><button id="refresh-dashboard" class="primary head-action" type="button">↻ &nbsp; Refresh workspace</button></div>
   <div id="overview-stats" class="stats"></div>
-  <section class="panel section-gap" aria-labelledby="routing-heading"><div class="panel-head"><div><h2 id="routing-heading">Routing at a glance</h2><p>Ordered fallbacks from the running host</p></div><a class="mono" href="#plans">Edit plans ↗</a></div><div id="overview-plans"></div></section>
   <div id="overview-attention" class="note section-gap">Connect to your local gateway to see the state of this workspace. Nothing runs automatically.</div>
   <p id="dashboard-status" class="status-line" role="status" aria-live="polite">Waiting for your first refresh.</p>
   <details class="import"><summary>Working offline? Import a report</summary><div class="import-body"><label for="file">Report JSON</label><input id="file" type="file" accept="application/json,.json"><button id="live" type="button">Load live report</button></div><p class="hint">Read-only snapshot. The gateway keeps the OpenCode token server-side.</p></details>
@@ -563,14 +562,6 @@ function paintOverview(){
  const rows=[...providerDimensions()].sort((a,b)=>(b.observedTokens||0)-(a.observedTokens||0)), max=Math.max(0,...rows.map(item=>item.observedTokens||0))
   const providerLabel=item=>{const name=item.value||'Unattributed';if(item.unknownCacheRecords>0||item.cacheHitRate===null||!known(item.cacheHitRate))return name;return `${name} · ${Math.round(item.cacheHitRate*100)}% cache hit`}
   mount('#overview-chart',...(rows.length?rows.map(item=>bar(providerLabel(item),item.observedTokens,max)): [empty(telemetryIssue()?'Telemetry is unavailable.':'A little quiet, for now.',telemetryIssue()||'Refresh the workspace or import a report to see observed work.')]),h('p',{class:'chart-foot',text:'Observed input + output, including older combinations on All. Cache hit rate is cache read divided by cache read plus cache write. It is omitted when a step left cache unknown. A share of observed tokens is not a share of provider quota.'}))
- const entries=Object.entries(plans||{})
- const shown=entries.slice(0,6)
-  const planRows=shown.length?shown.map(([name,models])=>h('div',{class:'route-item'},h('strong',{text:name}),h('p',{class:'chain no-margin',text:chainText(models)||'No models in this chain'}))):[empty('Give your work a direction.','Refresh the workspace, or open Plans to load the winning settings file.')]
- if(entries.length>shown.length)planRows.push(h('p',{class:'hint',text:`${entries.length-shown.length} more plans are on the Plans page.`}))
- const bindings=[]
- for(const [map,label] of [[snapshot?.agents??report?.agents,'agent binding'],[snapshot?.workTypes??report?.workTypes,'work type']])if(map&&typeof map==='object'&&!Array.isArray(map)){const count=Object.keys(map).length;bindings.push(`${count} ${label}${count===1?'':'s'}`)}
- if(bindings.length)planRows.push(h('p',{class:'chart-foot',text:bindings.join(' · ')}))
- mount('#overview-plans',...planRows)
  const projectID=snapshot?.projectID??report?.projectID
  const project=document.querySelector('#project-label');if(project)project.textContent=projectID?`PROJECT / ${projectID}`:'NOT CONNECTED'
  const attention=document.querySelector('#overview-attention')

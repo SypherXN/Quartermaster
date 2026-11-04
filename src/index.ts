@@ -60,6 +60,22 @@ async function verifiedHostEndpoint(
     if (await hostAccepts(endpoint.url, endpoint.auth)) return endpoint
   }
 
+  // OpenChamber proxies its own host under its origin and adds the credential
+  // itself, so it answers /api/info from localhost with nothing attached. That
+  // is the same host this session runs on, which is what the page should read.
+  const port = env.OPENCHAMBER_PORT?.trim()
+  const proxies = [...new Set([
+    env.OPENCHAMBER_URL?.trim(),
+    /^\d+$/.test(port ?? "") ? `http://127.0.0.1:${port}` : undefined,
+    "http://127.0.0.1:57123", // ponytail: OpenChamber's default port; env values above win
+  ].filter((url): url is string => typeof url === "string" && url !== ""))]
+  for (const url of proxies) {
+    if (await hostAccepts(url, undefined)) {
+      console.warn(`[quartermaster] receiving host credentials unavailable; local UI reads the host through ${url} instead`)
+      return { url }
+    }
+  }
+
   // No usable credential: the receiving process answers 401 to everything, so
   // reading it would only produce a permanently disconnected page. The
   // registered service carries its own credential, so prefer a working page.
