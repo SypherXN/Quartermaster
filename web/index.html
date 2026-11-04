@@ -1025,11 +1025,11 @@ function renderDashboard(data){
   const quotaStatus=data.availability?.status||report?.availability?.status
     setMessage('#quota-status',`${hasUsage?`Quota snapshot ${timeText(epoch(data.availability?.updatedAt)??epoch(data.updatedAt))}.${typeof quotaStatus==='string'?` Source status: ${quotaStatus}.`:''}`:'No quota payload in this workspace snapshot.'} No inference or recovery probes. Quota timestamps identify freshness; rereading does not guarantee new observations.`.trim())
 }
-async function refreshWorkspace(range=activeRange){
+async function refreshWorkspace(range=activeRange,silent=false){
  if(!Object.hasOwn(RANGES,range))range=activeRange
  const buttons=['#refresh-dashboard','#refresh-quota','#export-usage-csv'];for(const selector of buttons){const node=document.querySelector(selector);if(node)node.disabled=true}
  const presets=[...(document.querySelectorAll?.('#range-presets button') ?? [])];for(const node of presets)node.disabled=true
- setMessage('#dashboard-status','Reading workspace…');setMessage('#quota-status','Reading quota…')
+ if(!silent){setMessage('#dashboard-status','Reading workspace…');setMessage('#quota-status','Reading quota…')}
  try{
   const since=RANGES[range].ms?`?since=${Date.now()-RANGES[range].ms}`:''
   const response=await fetch(`/api/dashboard${since}`,{cache:'no-store',credentials:'same-origin'})
@@ -2195,5 +2195,16 @@ planTabs.forEach((tab,index)=>{if(!tab||typeof tab.addEventListener!=='function'
     selectPlanTab(next)})})
 if(typeof document.querySelectorAll==='function'){{const saved=/[?&]range=([a-z0-9]+)/.exec(window.location.hash)?.[1];if(saved&&Object.hasOwn(RANGES,saved))activeRange=saved}
  addEventListener('hashchange',navigate);navigate();loadPreferences();paintOverview();paintCatalog();paintUsage()}
+const AUTO_REFRESH_MS=30000
+function autoRefresh(){
+  if(document.visibilityState!=='visible')return
+  const route=window.location.hash.slice(1).split('?')[0]
+  if(route==='plans'||route==='providers')return
+  const guard=document.querySelector('#refresh-quota')
+  if(!guard||guard.disabled)return
+  void refreshWorkspace(activeRange,true)
+}
+setInterval(autoRefresh,AUTO_REFRESH_MS)
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')autoRefresh()})
 </script>
 </html>
