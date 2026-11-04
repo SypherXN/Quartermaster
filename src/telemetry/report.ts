@@ -1,7 +1,7 @@
 import { setImmediate as yieldToHost } from "node:timers/promises"
 import type { ModelRef, TokenBudgetConfig, TokenRateConfig } from "../config.ts"
 import { evaluateTokenBudgets, type TokenBudgetReading } from "./budgets.ts"
-import { estimateTokenCosts } from "./costs.ts"
+import { estimateComponentCosts, estimateTokenCosts, type ComponentCost } from "./costs.ts"
 import type { CatalogSnapshot } from "./prices.ts"
 import type { ProviderErrorLedger, ProviderErrorRecord } from "./errors.ts"
 import type { TokenLedger, TokenLifetime, TokenRollup, TokenRollupSlice } from "./ledger.ts"
@@ -41,6 +41,8 @@ export interface UsageDimension {
   hostCostMissing: number
   // cacheRead / (cacheRead + cacheWrite). Null when cache is unknown or zero.
   cacheHitRate: number | null
+  // Per-component cost for a model row; null when nothing could be priced.
+  costs: ComponentCost | null
 }
 
 export interface PluginUsageDimension {
@@ -175,6 +177,11 @@ export interface ProjectUsageDimension {
 
 export interface SessionUsageDimension {
   sessionKey: string
+  // Bucketed project this root's steps were recorded under, so a project row can
+  // list its own sessions. Null when no step carried a project.
+  projectID: string | null
+  // Agent that spent the most tokens in this root. Null when no step named one.
+  agentID: string | null
   sessions: number
   messages: number
   records: number
@@ -349,6 +356,17 @@ export interface QuartermasterReport {
     complete: false
     total: number
     byClassification: Record<string, { count: number; latestObservedAt: number | null }>
+    // One row per provider that retried, so a provider line can carry its own errors.
+    byProvider: Array<{
+      providerID: string | null
+      total: number
+      latestObservedAt: number | null
+      byClassification: Record<string, number>
+      // How often each HTTP status appeared, keyed on the status or "none".
+      byStatus: Record<string, number>
+      // Retry depth the host reached on its worst call for this provider.
+      maxAttempt: number
+    }>
   }
   breakdown: {
     attribution: "self-reported-unverified"
@@ -412,11 +430,21 @@ function pluginClaimsBySession(
 
 function summarizeErrors(records: readonly ProviderErrorRecord[]) {
   const byClassification: Record<string, { count: number; latestObservedAt: number | null }> = {}
+  const providers = new Map<string, { providerID: string | null; total: number; latestObservedAt: number | null; byClassification: Record<string, number>; byStatus: Record<string, number>; maxAttempt: number }>()
   for (const record of records) {
     const summary = byClassification[record.classification] ?? { count: 0, latestObservedAt: null }
     summary.count += 1
     summary.latestObservedAt = Math.max(summary.latestObservedAt ?? record.observedAt, record.observedAt)
     byClassification[record.classification] = summary
+    const key = record.providerID ?? ""
+    const provider = providers.get(key) ?? { providerID: record.providerID, total: 0, latestObservedAt: null, byClassification: {}, byStatus: {}, maxAttempt: 0 }
+    provider.total += 1
+    provider.latestObservedAt = Math.max(provider.latestObservedAt ?? record.observedAt, record.observedAt)
+    provider.byClassification[record.classification] = (provider.byClassification[record.classification] ?? 0) + 1
+    const status = record.httpStatus === null ? "none" : String(record.httpStatus)
+    provider.byStatus[status] = (provider.byStatus[status] ?? 0) + 1
+    provider.maxAttempt = Math.max(provider.maxAttempt, record.attempt)
+    providers.set(key, provider)
   }
   return {
     attribution: "session-project" as const,
@@ -424,6 +452,7 @@ function summarizeErrors(records: readonly ProviderErrorRecord[]) {
     complete: false as const,
     total: records.length,
     byClassification,
+    byProvider: [...providers.values()].sort((a, b) => b.total - a.total),
   }
 }
 
@@ -934,7 +963,7 @@ function blankDimension(dimension: UsageDimension["dimension"], value: string | 
   return {
     dimension, value, records: 0, observedTokens: 0, unknownRecords: 0,
     partialRecords: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0,
-    unknownCacheRecords: 0, hostCostUSD: null, hostCostMissing: 0, cacheHitRate: null,
+    unknownCacheRecords: 0, hostCostUSD: null, hostCostMissing: 0, cacheHitRate: null, costs: null,
   }
 }
 
@@ -976,11 +1005,13 @@ function sessionHostCostRank(item: SessionUsageDimension): number | null {
 }
 
 function compareSessionsByHostCost(a: SessionUsageDimension, b: SessionUsageDimension): number {
+  // Observed tokens first: the sessions list feeds the project and agent row
+  // expansions, and only the first page of it is sent to the page.
+  if (a.observedTokens !== b.observedTokens) return b.observedTokens - a.observedTokens
   const aCost = sessionHostCostRank(a)
   const bCost = sessionHostCostRank(b)
   if ((aCost !== null) !== (bCost !== null)) return aCost !== null ? -1 : 1
   if (aCost !== null && bCost !== null && aCost !== bCost) return bCost - aCost
-  if (a.observedTokens !== b.observedTokens) return b.observedTokens - a.observedTokens
   return a.sessionKey.localeCompare(b.sessionKey)
 }
 
@@ -991,6 +1022,9 @@ function summarizeSessions(
   windows: readonly WindowRecord[] = [],
   compactions: readonly CompactionRecord[] = [],
   archived: readonly TokenLifetime[] = [],
+  // Maps a host project id to the bucket the page shows, so a session row carries
+  // the same project as the projects table.
+  projectIDOf: (hostProjectID: string | null) => string | null = (hostProjectID) => hostProjectID,
 ): QuartermasterReport["sessions"] {
   const windowOf = latestWindows(windows, query)
   const ranged = records.filter((record) => inRange(record.completedAt, query))
@@ -1019,6 +1053,8 @@ function summarizeSessions(
 
   const blankUsage = (key: string): SessionUsageDimension => ({
     sessionKey: key,
+    projectID: null,
+    agentID: null,
     sessions: 0,
     messages: 0,
     records: 0,
@@ -1056,6 +1092,8 @@ function summarizeSessions(
   const cacheReadKnown = new Map<string, number>()
   const cacheWriteKnown = new Map<string, number>()
   const cacheBroken = new Set<string>()
+  // Agent tokens per root, so a session row can name the agent that did the work.
+  const agentTokens = new Map<string, Map<string, number>>()
   for (const record of ranged) {
     const root = rootOf(record.hostSessionID)
     const members = sessions.get(root) ?? new Set<string>()
@@ -1067,9 +1105,15 @@ function summarizeSessions(
 
     const item = usage.get(root) ?? blankUsage(sessionKey(root))
     item.records += 1
+    if (item.projectID === null) item.projectID = projectIDOf(record.hostProjectID)
     const value = tokenValue(record)
     if (value === undefined || !Number.isSafeInteger(item.observedTokens + value)) item.unknownTokenRecords += 1
     else item.observedTokens += value
+    if (record.hostAgentID) {
+      const tally = agentTokens.get(root) ?? new Map<string, number>()
+      tally.set(record.hostAgentID, (tally.get(record.hostAgentID) ?? 0) + (value ?? 0))
+      agentTokens.set(root, tally)
+    }
     const sub = breakdownSubCounts(record)
     if (Number.isSafeInteger(item.input + sub.input)) item.input += sub.input
     if (Number.isSafeInteger(item.output + sub.output)) item.output += sub.output
@@ -1156,6 +1200,16 @@ function summarizeSessions(
   const items = [...usage.entries()].map(([root, item]) => {
     item.sessions = sessions.get(root)?.size ?? 1
     item.messages = messages.get(root)?.size ?? 0
+    // Name the agent that spent the most tokens in this root; ties keep the first.
+    let topAgent: string | null = null
+    let topTokens = -1
+    for (const [agentID, spent] of agentTokens.get(root) ?? []) {
+      if (spent > topTokens) {
+        topAgent = agentID
+        topTokens = spent
+      }
+    }
+    item.agentID = topAgent
     item.window = windowOf.get(root) ?? null
     const limit = item.providerID && item.modelID
       ? catalog?.contextLimits.get(`${item.providerID}/${item.modelID}`)
@@ -1480,7 +1534,9 @@ export async function buildQuartermasterReport(
     // Every project: the page reads one ledger across all checkouts, so a fresh
     // host project id cannot hide the history recorded under an older one.
     deps.tokenLedger.list({}),
-    deps.errorLedger.list({ projectID: deps.projectID, limit: 10_000 }),
+    // Errors follow the token view: every project, so a provider line can carry
+    // the retries that belong to it.
+    deps.errorLedger.list({ limit: 10_000 }),
     deps.attributionLedger.list(deps.projectID),
     deps.catalog ? deps.catalog() : Promise.resolve(undefined),
     deps.tokenLedger.listRollups ? deps.tokenLedger.listRollups({}) : Promise.resolve([]),
@@ -1632,7 +1688,12 @@ export async function buildQuartermasterReport(
   unknownCacheRecords = addNumbers(unknownCacheRecords, archivedSplit.unknownCacheRecords)
   const legacyUnsplit = Math.max(0, archivedRecords - archivedSplit.records)
   const cacheQualityComplete = unknownCacheRecords === 0 && legacyUnsplit === 0
-  for (const item of dimensions.values()) item.cacheHitRate = hitRate(item)
+  const componentCosts = estimateComponentCosts(tokens, deps.tokenRates, prices)
+  for (const item of dimensions.values()) {
+    item.cacheHitRate = hitRate(item)
+    // Component costs for a model row, so the page can price each part of the split.
+    if (item.dimension === "model" && item.value) item.costs = componentCosts.get(item.value) ?? null
+  }
   const items = [...dimensions.values()].sort((a, b) =>
     a.dimension.localeCompare(b.dimension) || (a.value ?? "").localeCompare(b.value ?? ""),
   )
@@ -1681,7 +1742,7 @@ export async function buildQuartermasterReport(
     // Full history, not the page range: an earlier compaction or write still
     // decides which later write is the cache rebuild. The summary counts only
     // steps inside the range.
-    sessions: summarizeSessions(allTokens, query, catalog, allWindows, allCompaction, allTime ? legacyLifetime : []),
+    sessions: summarizeSessions(allTokens, query, catalog, allWindows, allCompaction, allTime ? legacyLifetime : [], bucketOf),
     projects: { complete: false, total: projects.length, items: projects },
     dimensions: {
       total: items.length,

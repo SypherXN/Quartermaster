@@ -288,7 +288,7 @@ export function createLocalUiServer({ openCodeURL, token, resolveEndpoint, proje
         const projects = await projectView(upstream, upstreamJSON).catch(() => [])
         const [plans, reportResult] = await Promise.all([
           rpc("status", {}).catch(() => null),
-          rpc("report", { limit: 50, offset: 0, ...range, projects }).catch(() => null),
+          rpc("report", { limit: 100, offset: 0, ...range, projects }).catch(() => null),
         ])
         if (plans?.apiVersion !== 1 || !plans.plans || !plans.agents || !plans.workTypes)
           return send(res, 502, { error: "Quartermaster status unavailable" })

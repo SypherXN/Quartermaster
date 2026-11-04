@@ -412,6 +412,7 @@ details.plan[open]>summary{margin-bottom:18px}
   <div id="range-presets" class="range-bar" role="group" aria-label="Time range"><button type="button" data-range="24h" aria-pressed="false">24h</button><button type="button" data-range="7d" aria-pressed="false">7 days</button><button type="button" data-range="30d" aria-pressed="false">30 days</button><button type="button" data-range="all" aria-pressed="true">All</button><span id="range-active" class="range-active">Range: all history</span></div>
   <div class="tab-panel" id="panel-models" role="tabpanel" aria-labelledby="tab-models" tabindex="0">
   <div id="models-stats" class="stats"></div>
+  <section class="panel section-gap" aria-labelledby="models-cost-heading"><div class="panel-head"><div><h2 id="models-cost-heading">Cost quality</h2><p>What the estimate priced, and what it could not</p></div><span class="badge neutral">Estimate, not a bill</span></div><div id="models-cost"></div></section>
   <section class="panel section-gap" aria-labelledby="models-table-heading"><div class="panel-head"><div><h2 id="models-table-heading">By model</h2><p>Observed tokens for the selected range in this project</p></div><span class="badge neutral">Telemetry</span></div><div id="models-table"></div></section>
   <section class="panel section-gap" aria-labelledby="models-compaction-heading"><div class="panel-head"><div><h2 id="models-compaction-heading">Compaction by model</h2><p>The summarizer's own tokens, beside the model that ran it</p></div><span class="badge neutral">Not in session total</span></div><div id="models-compaction"></div></section>
   <div id="models-attention" class="note section-gap">Refresh the workspace to read the ledger.</div>
@@ -559,7 +560,7 @@ function paintOverview(){
  const providers=catalogData?.providers
  const hostCost=report?hostCostText(report.costs):null
  mount('#overview-stats',stat('Observed tokens',number(totals?.observedTokens),telemetryIssue()?'Telemetry unavailable':'Input + output · partial telemetry',true),stat('Routing plans',plans?number(Object.keys(plans).length):'—','From the running host'),stat('Catalog providers',Array.isArray(providers)?number(providers.length):'—','Metadata · not a connectivity check'),stat('Estimated cost',report?(hostCost??costText(report.costs)):'—',hostCost?'Host-reported per step · not an invoice':'Partial estimate · not a bill'))
- const rows=providerDimensions(), max=Math.max(0,...rows.map(item=>item.observedTokens||0))
+ const rows=[...providerDimensions()].sort((a,b)=>(b.observedTokens||0)-(a.observedTokens||0)), max=Math.max(0,...rows.map(item=>item.observedTokens||0))
   const providerLabel=item=>{const name=item.value||'Unattributed';if(item.unknownCacheRecords>0||item.cacheHitRate===null||!known(item.cacheHitRate))return name;return `${name} · ${Math.round(item.cacheHitRate*100)}% cache hit`}
   mount('#overview-chart',...(rows.length?rows.map(item=>bar(providerLabel(item),item.observedTokens,max)): [empty(telemetryIssue()?'Telemetry is unavailable.':'A little quiet, for now.',telemetryIssue()||'Refresh the workspace or import a report to see observed work.')]),h('p',{class:'chart-foot',text:'Observed input + output, including older combinations on All. Cache hit rate is cache read divided by cache read plus cache write. It is omitted when a step left cache unknown. A share of observed tokens is not a share of provider quota.'}))
  const entries=Object.entries(plans||{})
@@ -580,7 +581,7 @@ function paintOverview(){
    const quota=typeof snapshot?.availability?.status==='string'?` Quota source status: ${snapshot.availability.status}.` : ''
   attention.textContent=`${number(totals?.records)} telemetry records · ${number(totals?.unknownTokenRecords)} with unknown token counts · ${number(report.errors?.total)} recorded provider errors.${named?` Classifications: ${named}.`:''}${latest}${quota} These are observations, not complete account usage.`
  }else if(attention&&dashboardData)attention.textContent=`${telemetryIssue()} Routing plans and quota state are shown independently from telemetry.${typeof snapshot.availability?.status==='string'?` Quota source status: ${snapshot.availability.status}.`:''}`
-   paintProjects();paintAgents();paintProviders();paintDirect();paintBudgets();paintModels();paintModelsCompaction();paintPlugins()
+   paintProjects();paintAgents();paintProviders();paintDirect();paintBudgets();paintModels();paintModelsCost();paintModelsCompaction();paintPlugins()
  }
     // Model rows carry value "provider/model"; agents and plugins are already folded in.
   function modelDimensions(){return (currentReport?.dimensions?.items||[]).filter(item=>item.dimension==='model')}
@@ -602,22 +603,77 @@ function paintOverview(){
       stat('Top model',top?modelLabel(top):'—',top&&share(top)!==null?`${share(top)}% of observed tokens`:'Share unknown'))
     if(!rows.length){mount('#models-table',empty('No model data yet.','Refresh the workspace to read the ledger.'));return}
     const cols=[['Model',''],['Steps','num'],['Tokens','num'],['Share','num'],['Cache hit','num'],['Cost','num']]
-    const body=rows.map(item=>h('tr',{},
-      h('td',{class:'mono',title:modelLabel(item)},h('span',{text:modelLabel(item)})),
-      h('td',{class:'num',text:number(item.records)}),
-      h('td',{class:'num',text:number(item.observedTokens)}),
-      h('td',{class:'num',text:share(item)===null?'—':`${share(item)}%`}),
-      h('td',{class:'num',text:known(item.cacheHitRate)?`${Math.round(item.cacheHitRate*100)}%`:'—'}),
-      h('td',{class:'num',text:typeof item.hostCostUSD==='number'?`${item.hostCostUSD.toFixed(2)} USD`:'—'})))
+    const body=rows.flatMap(item=>{
+      const key=String(item.value), name=modelLabel(item), open=expandedModels.has(key)
+      const toggle=()=>{if(expandedModels.has(key))expandedModels.delete(key);else expandedModels.add(key);paintModels()}
+      const line=h('tr',{class:'project-row'+(open?' row-open':''),tabindex:'0',role:'button','aria-expanded':String(open),onclick:toggle,onkeydown:event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();toggle()}}},
+        h('td',{class:'mono',title:name},h('span',{class:'caret','aria-hidden':'true',text:open?'▾':'▸'}),h('span',{text:name})),
+        h('td',{class:'num',text:number(item.records)}),
+        h('td',{class:'num',text:number(item.observedTokens)}),
+        h('td',{class:'num',text:share(item)===null?'—':`${share(item)}%`}),
+        h('td',{class:'num',text:known(item.cacheHitRate)?`${Math.round(item.cacheHitRate*100)}%`:'—'}),
+        h('td',{class:'num',text:typeof item.hostCostUSD==='number'?`${item.hostCostUSD.toFixed(2)} USD`:'—'}))
+      if(!open)return [line]
+      // The split the ledger recorded for this model: what was read, what was written,
+      // and what was spent thinking. Missing counters stay '—' rather than becoming 0.
+      const partsTotal=[item.input,item.output,item.cacheRead,item.cacheWrite,item.reasoning].reduce((sum,value)=>sum+(known(value)?value:0),0)
+      const shareBase=partsTotal>0?partsTotal:(known(item.observedTokens)?item.observedTokens:0)
+      const costs=item.costs&&typeof item.costs==='object'?item.costs:null
+      const money=value=>typeof value==='number'&&Number.isFinite(value)&&costs&&costs.pricedRecords>0?`${value.toFixed(2)} ${costs.currency||'USD'}`:'—'
+      const parts=[['Input',item.input,'input'],['Output',item.output,'output'],['Cache read',item.cacheRead,'cacheRead'],['Cache write',item.cacheWrite,'cacheWrite'],['Reasoning',item.reasoning,null]]
+      const unknownCache=known(item.unknownCacheRecords)?item.unknownCacheRecords:0
+      const unpriced=costs&&known(costs.unpricedRecords)?costs.unpricedRecords:0
+      const priced=costs&&typeof costs.total==='number'?money(costs.total):'—'
+      const detail=h('div',{class:'project-detail'},
+        h('p',{class:'hint',text:`${number(item.records)} steps · ${number(item.observedTokens)} observed tokens${unknownCache>0?` · ${number(unknownCache)} steps with unknown cache`:''}${known(item.hostCostMissing)&&item.hostCostMissing>0?` · ${number(item.hostCostMissing)} steps unpriced`:''}. Observed tokens are what the host reported for the step; the parts below are the counters the ledger recorded, priced at the configured or catalog rate.`}),
+        h('table',{class:'ledger'},
+          h('thead',{},h('tr',{},h('th',{scope:'col',text:'Component'}),h('th',{scope:'col',class:'num',text:'Tokens'}),h('th',{scope:'col',class:'num',text:'Share of split'}),h('th',{scope:'col',class:'num',text:'Estimated cost'}))),
+          h('tbody',{},
+            ...parts.map(([label,value,key])=>h('tr',{},
+              h('td',{text:label}),
+              h('td',{class:'num',text:known(value)?number(value):'—'}),
+              h('td',{class:'num',text:known(value)&&shareBase?`${Math.round(value/shareBase*100)}%`:'—'}),
+              h('td',{class:'num',text:key&&costs?money(costs[key]):'—'}))),
+            h('tr',{},h('td',{text:'Total'}),h('td',{class:'num',text:'—'}),h('td',{class:'num',text:'—'}),h('td',{class:'num',text:priced})))),
+        costs&&unpriced>0?h('p',{class:'hint',text:`${number(unpriced)} steps had no usable rate and are not in the estimate. Reasoning is billed as output by providers but no rate states it, so it carries no line.`}):h('p',{class:'hint',text:'Reasoning is billed as output by providers but no rate states it, so it carries no line.'}))
+      return [line,h('tr',{class:'project-detail-row'},h('td',{colspan:String(cols.length)},detail))]
+    })
     mount('#models-table',h('table',{class:'ledger'},
-      h('caption',{class:'hint',text:`Observed tokens by provider and model over ${RANGES[activeRange].label}, highest first. A share of observed tokens is not a share of provider quota.`}),
+      h('caption',{class:'hint',text:`Observed tokens by provider and model over ${RANGES[activeRange].label}, highest first. Expand a row for its input, output, cache and reasoning split. A share of observed tokens is not a share of provider quota.`}),
       h('thead',{},h('tr',{},...cols.map(([label,cls])=>h('th',{scope:'col',class:cls,text:label})))),
       h('tbody',{},...body)))
     const attention=document.querySelector('#models-attention')
-    if(attention)attention.textContent=`Showing ${number(rows.length)} provider/model combinations across ${number(total)} observed tokens over ${RANGES[activeRange].label}.${unknown>0?` ${number(unknown)} tokens have no recorded model and are not listed.`:''} Rows are recorded per step, so one session can appear under several models.`
+    if(attention)attention.textContent=`Showing ${number(rows.length)} of ${number(all.length)} provider/model combinations across ${number(total)} observed tokens over ${RANGES[activeRange].label}.${unknown>0?` ${number(unknown)} tokens have no recorded model and are not listed.`:''} Rows are recorded per step, so one session can appear under several models. ${coverageNote()}`
   }
  // Same summarizer numbers as the raw compaction rows, rolled up without the effort
   // variant: the compaction ledger keys rows by variant, the model table does not.
+  function paintModelsCost(){
+    const costs=currentReport?.costs
+    if(!costs){mount('#models-cost',empty('No cost estimate yet.','Refresh the workspace once the ledger has priced steps.'));return}
+    const currencies=Array.isArray(costs.currencies)?costs.currencies:[]
+    const sum=key=>currencies.reduce((total,item)=>total+(typeof item[key]==='number'&&Number.isFinite(item[key])?item[key]:0),0)
+    const currency=currencies.length===1?currencies[0].currency:'USD'
+    const estimated=sum('estimatedAmount')
+    const savings=sum('estimatedCacheReadSavings')
+    const host=costs.hostReported&&typeof costs.hostReported.amount==='number'?costs.hostReported:null
+    const priced=number(costs.pricedRecords), unpriced=number(costs.unpricedRecords)
+    const sources=[...new Set(currencies.map(item=>item.source).filter(value=>typeof value==='string'))]
+    const rows=[
+      ['Estimated total',currencies.length?`${estimated.toFixed(2)} ${currency}`:'—'],
+      ['Host-reported total',host?`${host.amount.toFixed(2)} ${host.currency}${host.missingRecords>0?` · ${number(host.missingRecords)} steps missing`:''}`:'—'],
+      ['Estimate minus host',host&&currencies.length===1?`${(estimated-host.amount).toFixed(2)} ${currency}`:'—'],
+      ['Cache-read savings',currencies.length?`${savings.toFixed(2)} ${currency} · ${number(sum('cacheSavingsRecords'))} steps priced below input`:'—'],
+      ['Priced steps',`${priced} of ${number(costs.pricedRecords+costs.unpricedRecords)}`],
+      ['Unpriced tokens',known(costs.unpricedTokenPercentage)?`${Math.round(costs.unpricedTokenPercentage)}% · ${number(costs.unpricedTokens)} tokens`:'—'],
+      ['Config-rate steps',`${number(costs.cacheUnpricedRecords)} priced without cache rates`],
+      ['Rate source',sources.length?sources.join(' + '):'—']
+    ]
+    const table=h('table',{class:'ledger'},
+      h('caption',{class:'hint',text:'Every number below comes from catalog or config rates applied to recorded counters. The host total is what the provider itself reported; they are not the same measure.'}),
+      h('thead',{},h('tr',{},h('th',{scope:'col',text:'Measure'}),h('th',{scope:'col',text:'Value'}))),
+      h('tbody',{},...rows.map(([label,value])=>h('tr',{},h('td',{text:label}),h('td',{class:'num mono',text:value})))))
+    mount('#models-cost',h('div',{class:'ledger-wrap'},table))
+  }
   function paintModelsCompaction(){
     const usage=currentReport?.compaction
     const items=Array.isArray(usage?.dimensions?.items)?usage.dimensions.items.filter(item=>item&&typeof item==='object'):[]
@@ -629,24 +685,32 @@ function paintOverview(){
     for(const item of items){
       if(!(typeof item.providerID==='string'&&item.providerID)){unnamed+=1;continue}
       const key=[item.providerID,item.modelID].filter(value=>typeof value==='string'&&value).join('/')||'unknown'
-      const row=groups.get(key)??{key,records:0,observedTokens:0,input:0,cacheRead:0,cacheWrite:0,unknownCacheRecords:0,lastObservedAt:0}
+      const row=groups.get(key)??{key,records:0,observedTokens:0,input:0,output:0,reasoning:0,cacheRead:0,cacheWrite:0,unknownCacheRecords:0,lastObservedAt:0,contextPercent:null,contextLimit:null}
       row.records+=known(item.records)?item.records:0
       row.observedTokens+=known(item.observedTokens)?item.observedTokens:0
       row.input+=known(item.input)?item.input:0
+      row.output+=known(item.output)?item.output:0
+      row.reasoning+=known(item.reasoning)?item.reasoning:0
       row.cacheRead+=known(item.cacheRead)?item.cacheRead:0
       row.cacheWrite+=known(item.cacheWrite)?item.cacheWrite:0
       row.unknownCacheRecords+=known(item.unknownCacheRecords)?item.unknownCacheRecords:0
-      if(known(item.lastObservedAt))row.lastObservedAt=Math.max(row.lastObservedAt,item.lastObservedAt)
+      if(known(item.lastObservedAt)&&item.lastObservedAt>row.lastObservedAt){
+        row.lastObservedAt=item.lastObservedAt
+        // The context figures belong to one call, so take them from the latest one.
+        row.contextPercent=known(item.contextPercent)?item.contextPercent:null
+        row.contextLimit=known(item.contextLimit)?item.contextLimit:null
+      }
       groups.set(key,row)
     }
     const rows=[...groups.values()].sort((a,b)=>b.observedTokens-a.observedTokens)
-    const cols=[['Model',''],['Calls','num'],['Tokens (observed)','num'],['Cached share','num'],['Last seen','']]
+    const cols=[['Model',''],['Calls','num'],['Tokens (observed)','num'],['Input','num'],['Output','num'],['Reasoning','num'],['Cached share','num'],['Context','num'],['Last seen','']]
     const body=rows.map(row=>{
       // cachedShare() is cache read over input plus cache read; mirror it on the sums
       // so rolled-up rows match the raw per-variant share.
       const cacheTotal=row.input+row.cacheRead
       const share=cacheTotal<=0?null:row.cacheRead/cacheTotal*100
-      return h('tr',{},h('td',{class:'mono',text:row.key}),h('td',{class:'num',text:number(row.records)}),h('td',{class:'num',text:number(row.observedTokens)}),h('td',{class:'num',text:share===null?'—':`${Math.round(share)}%`}),h('td',{text:row.lastObservedAt>0?new Date(row.lastObservedAt).toLocaleString():'—'}))
+      const context=row.contextPercent===null?'—':`${Math.round(row.contextPercent)}%${row.contextLimit?` of ${compactCount(row.contextLimit)}`:''}`
+      return h('tr',{},h('td',{class:'mono',text:row.key}),h('td',{class:'num',text:number(row.records)}),h('td',{class:'num',text:number(row.observedTokens)}),h('td',{class:'num',text:number(row.input)}),h('td',{class:'num',text:number(row.output)}),h('td',{class:'num',text:number(row.reasoning)}),h('td',{class:'num',text:share===null?'—':`${Math.round(share)}%`}),h('td',{class:'num',text:context}),h('td',{text:row.lastObservedAt>0?new Date(row.lastObservedAt).toLocaleString():'—'}))
     })
     mount('#models-compaction',h('div',{class:'ledger-wrap'},h('table',{class:'ledger'},h('caption',{class:'hint',text:'Compaction calls by model, highest observed tokens first. Every effort variant is folded into one row. Not part of the session total.'}),h('thead',{},h('tr',{},...cols.map(([label,cls])=>h('th',{scope:'col',class:cls,text:label})))),h('tbody',{},...body))),h('p',{class:'chart-foot',text:`${number(usage?.records)} compaction call${usage?.records===1?'':'s'} · ${number(usage?.observedTokens)} observed tokens. Not added to observed session tokens, cost, or budgets.${unnamed?` ${number(unnamed)} call${unnamed===1?'':'s'} named no model and ${unnamed===1?'is':'are'} not listed.`:''}`}))
   }
@@ -703,23 +767,56 @@ function paintOverview(){
   const total=rows.reduce((sum,item)=>sum+(item.observedTokens||0),0)
   const top=rows[0]
   const share=item=>total>0&&item.observedTokens?Math.round(item.observedTokens/total*100):null
+  const errors=Array.isArray(currentReport?.errors?.byProvider)?currentReport.errors.byProvider:[]
+  const errorOf=new Map(errors.map(item=>[item.providerID||'',item]))
+  const errorTotal=errors.reduce((sum,item)=>sum+(known(item.total)?item.total:0),0)
   mount('#providers-stats',
     stat('Providers in use',rows.length?number(rows.length):'—','Distinct providers in the ledger',true),
     stat('Observed tokens',number(total),`Input + output · ${RANGES[activeRange].label}`),
-    stat('Top provider',top?providerName(top):'—',top&&share(top)!==null?`${share(top)}% of observed tokens`:'Share unknown'))
-  if(!rows.length){mount('#providers-table',empty('No provider data yet.','Refresh the workspace to read the ledger.'));return}
-  const cols=[['Provider',''],['Steps','num'],['Tokens','num'],['Share','num'],['Cache hit','num'],['Cost','num']]
-  const body=rows.map(item=>h('tr',{},
-    h('td',{class:'mono',title:providerName(item)},h('span',{text:providerName(item)})),
-    h('td',{class:'num',text:number(item.records)}),
-    h('td',{class:'num',text:number(item.observedTokens)}),
-    h('td',{class:'num',text:share(item)===null?'—':`${share(item)}%`}),
-    h('td',{class:'num',text:known(item.cacheHitRate)?`${Math.round(item.cacheHitRate*100)}%`:'—'}),
-    h('td',{class:'num',text:typeof item.hostCostUSD==='number'?`${item.hostCostUSD.toFixed(2)} USD`:'—'})))
+    stat('Top provider',top?providerName(top):'—',top&&share(top)!==null?`${share(top)}% of observed tokens`:'Share unknown'),
+    stat('Reported errors',errorTotal?number(errorTotal):'—',`${number(errors.length)} provider${errors.length===1?'':'s'} · retries the host logged`))
+  // Only providers with tokens: an error with no steps belongs to a compatibility
+  // probe or a fixture, not to a provider this ledger ever ran work through.
+  const all=rows
+  if(!all.length){mount('#providers-table',empty('No provider data yet.','Refresh the workspace to read the ledger.'));return}
+  const rowsOf=(item,field)=>Object.entries(errorOf.get(item.value||'')?.[field]||{}).filter(([,count])=>known(count)&&count>0).sort((a,b)=>b[1]-a[1])
+  const modelsOf=item=>{
+   const prefix=typeof item.value==='string'&&item.value?`${item.value}/`:null
+   if(!prefix)return []
+   return (currentReport?.dimensions?.items||[]).filter(entry=>entry.dimension==='model'&&typeof entry.value==='string'&&entry.value.startsWith(prefix))
+  }
+  const cols=[['Provider',''],['Steps','num'],['Tokens','num'],['Share','num'],['Cache hit','num'],['Cost','num'],['Errors','num'],['Error types',''],['Statuses','']]
+  const body=all.flatMap(item=>{
+    const summary=errorOf.get(item.value||''), key=item.value||'', open=expandedProviders.has(key)
+    const types=rowsOf(item,'byClassification'), statuses=rowsOf(item,'byStatus')
+    const toggle=()=>{if(expandedProviders.has(key))expandedProviders.delete(key);else expandedProviders.add(key);paintProviders()}
+    const line=h('tr',{class:'project-row'+(open?' row-open':''),tabindex:'0',role:'button','aria-expanded':String(open),onclick:toggle,onkeydown:event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();toggle()}}},
+      h('td',{class:'mono',title:providerName(item)},h('span',{class:'caret','aria-hidden':'true',text:open?'▾':'▸'}),h('span',{text:providerName(item)})),
+      h('td',{class:'num',text:number(item.records)}),
+      h('td',{class:'num',text:number(item.observedTokens)}),
+      h('td',{class:'num',text:share(item)===null?'—':`${share(item)}%`}),
+      h('td',{class:'num',text:known(item.cacheHitRate)?`${Math.round(item.cacheHitRate*100)}%`:'—'}),
+      h('td',{class:'num',text:typeof item.hostCostUSD==='number'?`${item.hostCostUSD.toFixed(2)} USD`:'—'}),
+      h('td',{class:'num',text:summary?number(summary.total):'—'}),
+      h('td',{class:'mono',text:types.length?`${number(types.length)} type${types.length===1?'':'s'}`:'—'}),
+      h('td',{class:'mono',text:statuses.length?`${number(statuses.length)} status${statuses.length===1?'':''}es`:'—'}))
+    if(!open)return [line]
+    const counts=[...types.map(([name,count])=>[name,count]),...statuses.map(([code,count])=>[code==='none'?'no status':`HTTP ${code}`,count])]
+    const errorTable=counts.length?h('table',{class:'ledger'},h('thead',{},h('tr',{},h('th',{scope:'col',text:'Error type'}),h('th',{scope:'col',class:'num',text:'Count'}))),h('tbody',{},...counts.map(([name,count])=>h('tr',{},h('td',{class:'mono',text:name}),h('td',{class:'num',text:number(count)}))))):empty('No reported errors.','The host logged no retries for this provider.')
+    const models=modelsOf(item)
+    const modelTable=models.length?h('table',{class:'ledger'},h('thead',{},h('tr',{},h('th',{scope:'col',text:'Model'}),h('th',{scope:'col',class:'num',text:'Steps'}),h('th',{scope:'col',class:'num',text:'Tokens'}),h('th',{scope:'col',class:'num',text:'Share of provider'}))),h('tbody',{},...models.map(entry=>h('tr',{},h('td',{class:'mono',text:entry.value}),h('td',{class:'num',text:number(entry.records)}),h('td',{class:'num',text:number(entry.observedTokens)}),h('td',{class:'num',text:known(item.observedTokens)&&item.observedTokens>0?`${Math.round((entry.observedTokens||0)/item.observedTokens*100)}%`:'—'}))))):empty('No model detail for this provider.','Its tokens predate per-model attribution, so there is nothing truthful to list.')
+    const panel=h('div',{class:'project-detail'},
+      h('p',{class:'hint',text:`${number(item.records)} steps · ${number(item.observedTokens)} tokens · ${share(item)===null?'—':`${share(item)}% of observed tokens`}${known(item.hostCostMissing)&&item.hostCostMissing>0?` · ${number(item.hostCostMissing)} steps unpriced`:''}.`}),
+      h('p',{class:'hint',text:'Errors the host logged, by classification and HTTP status'}),
+      errorTable,
+      h('p',{class:'hint',text:'Models this provider ran, with their share of it'}),
+      modelTable)
+    return [line,h('tr',{class:'project-detail-row'},h('td',{colspan:String(cols.length)},panel))]
+  })
   mount('#providers-table',h('table',{class:'ledger'},
-    h('caption',{class:'hint',text:`Observed tokens by provider over ${RANGES[activeRange].label}, highest first. A share of observed tokens is not a share of provider quota.`}),
+    h('caption',{class:'hint',text:`Observed tokens by provider over ${RANGES[activeRange].label}, highest first. A share of observed tokens is not a share of provider quota. Errors are host retries, classified by HTTP status: 429 is a rate limit, 4xx a request error, 5xx a provider error, and no status stays unknown.`}),
     h('thead',{},h('tr',{},...cols.map(([label,cls])=>h('th',{scope:'col',class:cls,text:label})))),
-    h('tbody',{},...body)))
+    h('tbody',{},...body)),h('p',{class:'chart-foot',text:coverageNote()}))
  }
 function usd(value){return known(value)?`$${value.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:value<1?4:2})}`:'unknown'}
 function paintBudgets(){
@@ -743,6 +840,7 @@ const RANGES={'24h':{label:'last 24 hours',ms:86400000},'7d':{label:'last 7 days
 let activeRange='all', shownProjects=[]
 // Which project rows are expanded; kept across the 30s repaint.
 const expandedProjects=new Set()
+const expandedModels=new Set()
 function compactCount(value){return !known(value)?'':value>=1e6?`${+(value/1e6).toFixed(1)}M`:value>=1e3?`${+(value/1e3).toFixed(1)}k`:String(value)}
 function cachedShare(item){const read=item?.cacheRead, input=item?.input;return known(read)&&known(input)&&input+read>0?read/(input+read)*100:null}
  function hostCostLabel(item){
@@ -765,6 +863,41 @@ function cachedShare(item){const read=item?.cacheRead, input=item?.input;return 
   const cost=known(item.childHostCostShare)?`${Math.round(item.childHostCostShare*100)}%`:'unknown'
   return `${tokens} tokens · ${cost} cost`
  }
+// Steps whose counters were partial or missing can only undercount, so every table
+// that totals them says so.
+function coverageNote(){
+ const totals=currentReport?.totals, parts=[]
+ if(known(totals?.partialTokenRecords)&&totals.partialTokenRecords>0)parts.push(`${number(totals.partialTokenRecords)} steps reported partial counters, so their totals may undercount.`)
+ if(known(totals?.unknownTokenRecords)&&totals.unknownTokenRecords>0)parts.push(`${number(totals.unknownTokenRecords)} steps reported no token counts and stay out of the totals.`)
+ return parts.join(' ')
+}
+// A project or agent row opens its own sessions. The report carries one row per
+// root session, tagged with the project it was recorded under and its dominant
+// agent, so this is a join over what the report already returned.
+function sessionBlock(kind,id){
+ const items=Array.isArray(currentReport?.sessions?.items)?currentReport.sessions.items:[]
+ const rows=items.filter(item=>kind==='project'?item.projectID===id:item.agentID===id)
+ if(!rows.length)return h('p',{class:'hint',text:`Sessions for this ${kind} are outside the ${number(items.length)} session rows this report carries.`})
+ const cols=['Session','Messages','Tokens','Cache hit','Context','Child tokens','Cache write','Last seen']
+ const body=rows.slice(0,25).map(item=>{
+  const name=typeof item.sessionTitle==='string'&&item.sessionTitle?item.sessionTitle:`${String(item.sessionKey).slice(0,8)}…`
+  const context=known(item.contextPercent)?`${Math.round(item.contextPercent)}%${item.contextLimit?` of ${compactCount(item.contextLimit)}`:''}`:'—'
+  const child=known(item.childTokenShare)?`${Math.round(item.childTokenShare*100)}%`:'—'
+  return h('tr',{},
+   h('td',{class:'mono',title:String(item.sessionKey)},h('span',{text:name})),
+   h('td',{class:'num',text:number(item.messages)}),
+   h('td',{class:'num',text:number(item.observedTokens)}),
+   h('td',{class:'num',text:cacheHitLabel(item)}),
+   h('td',{class:'num',text:context}),
+   h('td',{class:'num',text:child}),
+   h('td',{class:'num',title:cacheHitTitle(item),text:`${number(item.cacheWriteAfterCompaction)} + ${number(item.cacheWriteOther)}`}),
+   h('td',{text:known(item.lastObservedAt)&&item.lastObservedAt>0?new Date(item.lastObservedAt).toLocaleString():'—'}))
+ })
+ const shown=Math.min(rows.length,25)
+ return h('div',{class:'project-session-detail'},
+  h('p',{class:'hint',text:`Sessions in this ${kind} · ${number(shown)} of ${number(rows.length)} the report carries. Cache write reads after-compaction + other.`}),
+  h('table',{class:'ledger'},h('thead',{},h('tr',{},...cols.map((label,index)=>h('th',{scope:'col',class:index>0&&index<7?'num':'',text:label})))),h('tbody',{},...body)))
+}
 function paintRange(){
  for(const button of document.querySelectorAll?.('#range-presets button[data-range]') ?? [])button.setAttribute('aria-pressed',String(button.getAttribute('data-range')===activeRange))
  const range=currentReport?.range, note=typeof range?.budgets==='string'&&range.budgets==='all-history'?' Budgets always count all history.':''
@@ -802,15 +935,17 @@ function paintProjects(){
   const projectShare=total>0&&known(item.observedTokens)?Math.round(item.observedTokens/total*100):null
   const summary=[`${number(item.sessions)} session${item.sessions===1?'':'s'}`,`${number(item.records)} steps`,`${number(item.observedTokens)} tokens${projectShare===null?'':` · ${projectShare}% of all projects`}`,item.unknownTokenRecords?`${number(item.unknownTokenRecords)} steps with unknown tokens`:null,known(item.lastObservedAt)&&item.lastObservedAt>0?`last seen ${new Date(item.lastObservedAt).toLocaleString()}`:null].filter(Boolean).join(' · ')
   const panel=h('div',{class:'project-detail'},h('p',{class:'hint',text:summary}),
-   models.length?h('table',{class:'ledger'},h('thead',{},h('tr',{},h('th',{scope:'col',text:'Model'}),h('th',{scope:'col',class:'num',text:'Steps'}),h('th',{scope:'col',class:'num',text:'Tokens'}),h('th',{scope:'col',class:'num',text:'Share of project'}))),h('tbody',{},...full)):empty('No model detail for this project.','Its tokens predate per-model attribution, so there is nothing truthful to list.'))
+   models.length?h('table',{class:'ledger'},h('thead',{},h('tr',{},h('th',{scope:'col',text:'Model'}),h('th',{scope:'col',class:'num',text:'Steps'}),h('th',{scope:'col',class:'num',text:'Tokens'}),h('th',{scope:'col',class:'num',text:'Share of project'}))),h('tbody',{},...full)):empty('No model detail for this project.','Its tokens predate per-model attribution, so there is nothing truthful to list.'),
+   sessionBlock('project',item.projectID))
   return [line,h('tr',{class:'project-detail-row'},h('td',{colspan:String(cols.length)},panel))]
  })
  const table=h('table',{class:'ledger'},h('caption',{class:'hint',text:'Observed tokens by host project, highest first. A checkout registered again after a restart is a separate project id. Expand a row for that project\'s models.'}),h('thead',{},h('tr',{},...cols.map(([label,cls])=>h('th',{scope:'col',class:cls,text:label})))),h('tbody',{},...body))
  const partial=(Number(currentReport?.archived?.observedTokens)>0?` ${number(currentReport.archived.observedTokens)} archived tokens predate per-project attribution.`:'')
  const foot=all.length>rows.length?`Showing the top ${rows.length} of ${number(all.length)} projects by observed tokens.`:`Showing all ${rows.length} project${rows.length===1?'':'s'}.`
- mount('#projects-table',h('div',{class:'ledger-wrap'},table),h('p',{class:'chart-foot',text:`${foot} Steps the host never named a project for stay under Unattributed; ids it no longer lists are grouped under Unlisted projects.${partial}`}))
+ mount('#projects-table',h('div',{class:'ledger-wrap'},table),h('p',{class:'chart-foot',text:`${foot} Steps the host never named a project for stay under Unattributed; ids it no longer lists are grouped under Unlisted projects.${partial} ${coverageNote()}`}))
 }
 const expandedAgents=new Set()
+const expandedProviders=new Set()
 function paintAgents(){
  paintRange()
  const usage=currentReport?.agentAttribution, all=[...(usage?.dimensions?.items||[])], rows=all.slice(0,50)
@@ -842,13 +977,14 @@ function paintAgents(){
   const share=known(item.cacheHitRate)?`${Math.round(item.cacheHitRate*100)}% cached`:null
   const summary=[`${number(item.sessions)} session${item.sessions===1?'':'s'}`,`${number(item.records)} steps`,`${number(item.observedTokens)} tokens${agentShare===null?'':` · ${agentShare}% of all agents`}`,share,item.unknownTokenRecords?`${number(item.unknownTokenRecords)} steps with unknown tokens`:null,known(item.lastObservedAt)&&item.lastObservedAt>0?`last seen ${new Date(item.lastObservedAt).toLocaleString()}`:null].filter(Boolean).join(' · ')
   const panel=h('div',{class:'project-detail'},h('p',{class:'hint',text:summary}),
-   models.length?h('table',{class:'ledger'},h('thead',{},h('tr',{},h('th',{scope:'col',text:'Model'}),h('th',{scope:'col',class:'num',text:'Steps'}),h('th',{scope:'col',class:'num',text:'Tokens'}),h('th',{scope:'col',class:'num',text:'Share of agent'}))),h('tbody',{},...full)):empty('No model detail for this agent.','Its tokens predate per-model attribution, so there is nothing truthful to list.'))
+   models.length?h('table',{class:'ledger'},h('thead',{},h('tr',{},h('th',{scope:'col',text:'Model'}),h('th',{scope:'col',class:'num',text:'Steps'}),h('th',{scope:'col',class:'num',text:'Tokens'}),h('th',{scope:'col',class:'num',text:'Share of agent'}))),h('tbody',{},...full)):empty('No model detail for this agent.','Its tokens predate per-model attribution, so there is nothing truthful to list.'),
+   sessionBlock('agent',item.agentID))
   return [line,h('tr',{class:'project-detail-row'},h('td',{colspan:String(cols.length)},panel))]
  })
  const table=h('table',{class:'ledger'},h('caption',{class:'hint',text:'Observed tokens by agent, highest first. An agent is named by the assistant message that spent the tokens, so a session can span several agents. Expand a row for its models.'}),h('thead',{},h('tr',{},...cols.map(([label,cls])=>h('th',{scope:'col',class:cls,text:label})))),h('tbody',{},...body))
  const unknown=Number(usage?.unknownRecords)||0
  const foot=all.length>rows.length?`Showing the top ${rows.length} of ${number(all.length)} agents by observed tokens.`:`Showing all ${rows.length} agent${rows.length===1?'':'s'}.`
- mount('#agents-table',h('div',{class:'ledger-wrap'},table),h('p',{class:'chart-foot',text:`${foot}${unknown?` ${number(unknown)} step${unknown===1?'':'s'} named no agent and are not listed.`:''}`}))
+ mount('#agents-table',h('div',{class:'ledger-wrap'},table),h('p',{class:'chart-foot',text:`${foot}${unknown?` ${number(unknown)} step${unknown===1?'':'s'} named no agent and are not listed.`:''} ${coverageNote()}`}))
 }
 function csvCell(value){
  if(value===null||value===undefined)return ''

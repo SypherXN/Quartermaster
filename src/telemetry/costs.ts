@@ -38,6 +38,73 @@ function hostReportedCost(records: readonly TokenTelemetryRecord[]): HostReporte
   return { currency: "USD", amount: reported > 0 ? amount : null, records: reported, missingRecords }
 }
 
+export interface ComponentCost {
+  currency: string
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
+  total: number
+  pricedRecords: number
+  unpricedRecords: number
+}
+
+// Costs per component for one provider/model, resolved exactly the way the total
+// estimate resolves them (config rate first, then the catalog), so a detail row
+// adds up to the same figure the totals report.
+export function estimateComponentCosts(
+  records: readonly TokenTelemetryRecord[],
+  rates: readonly TokenRateConfig[] = [],
+  prices?: PriceTable,
+) {
+  const byKey = new Map(rates.map((rate) => [
+    JSON.stringify([rate.providerID, rate.modelID, rate.variant ?? null]), rate,
+  ]))
+  const groups = new Map<string, ComponentCost>()
+  for (const record of records) {
+    if (!record.providerID || !record.modelID) continue
+    const key = `${record.providerID}/${record.modelID}`
+    const summary = groups.get(key) ?? {
+      currency: "USD", input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, pricedRecords: 0, unpricedRecords: 0,
+    }
+    groups.set(key, summary)
+    const counts = record.counts
+    if (!counts || !Number.isSafeInteger(counts.input) || counts.input < 0 ||
+      !Number.isSafeInteger(counts.output) || counts.output < 0) {
+      summary.unpricedRecords += 1
+      continue
+    }
+    const rate = byKey.get(JSON.stringify([record.providerID, record.modelID, record.variant ?? null]))
+    const catalog = rate ? undefined : selectPrice(prices?.get(key), counts.input + counts.cacheRead)
+    const terms = rate ?? catalog
+    if (!terms) {
+      summary.unpricedRecords += 1
+      continue
+    }
+    const inputRate = rate ? rate.inputPerMillion : catalog!.input
+    const outputRate = rate ? rate.outputPerMillion : catalog!.output
+    const cacheReadRate = rate ? 0 : catalog!.cacheRead
+    const cacheWriteRate = rate ? 0 : catalog!.cacheWrite
+    const input = counts.input * inputRate / 1_000_000
+    const output = counts.output * outputRate / 1_000_000
+    const cacheRead = counts.cacheRead * cacheReadRate / 1_000_000
+    const cacheWrite = counts.cacheWrite * cacheWriteRate / 1_000_000
+    const total = input + output + cacheRead + cacheWrite
+    if (![input, output, cacheRead, cacheWrite, summary.total + total].every((value) => Number.isFinite(value))) {
+      summary.unpricedRecords += 1
+      continue
+    }
+    summary.currency = rate?.currency ?? summary.currency
+    summary.input += input
+    summary.output += output
+    summary.cacheRead += cacheRead
+    summary.cacheWrite += cacheWrite
+    summary.total += total
+    summary.pricedRecords += 1
+  }
+  return groups
+}
+
 // Config rates are exact and win; otherwise the model catalog prices the record.
 // Reasoning is billed as output by providers but the catalog never states it, so
 // it stays out of the amount and is reported as a token count only.
