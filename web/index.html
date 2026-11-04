@@ -2205,6 +2205,7 @@ function autoRefresh(){
   void refreshWorkspace(activeRange,true)
 }
 setInterval(autoRefresh,AUTO_REFRESH_MS)
+void autoRefresh()
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')autoRefresh()})
 </script>
 </html>

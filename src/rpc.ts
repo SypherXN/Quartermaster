@@ -72,6 +72,7 @@ export const QUARTERMASTER_RPC = Rpc.define({
       output,
       errors: { invalid_input: errors.invalid_input },
     },
+    pruneUnattributed: { input: object({ confirm: string, projectID: string }, ["confirm"]), output, errors },
     readOptions: { input: object({}), output, errors },
     applyOptions: {
       input: object({ options: { type: "object", additionalProperties: true }, revision: { type: "number" } }, ["options", "revision"]),
@@ -586,6 +587,18 @@ export async function registerQuartermasterRpc(
         catch { console.warn("[quartermaster] report cache could not be saved") }
       }
       return report
+    },
+    async pruneUnattributed(input, call) {
+      if (!isRecord(input) || input.confirm !== "delete-unattributed") {
+        throw call.error("invalid_input", "Confirmation required.", { path: "confirm", message: "expected delete-unattributed" })
+      }
+      if (input.projectID !== undefined && (typeof input.projectID !== "string" || !input.projectID.trim())) {
+        throw call.error("invalid_input", "Invalid projectID.", { path: "projectID", message: "expected a non-empty project ID" })
+      }
+      if (!reporting) throw call.error("unavailable", "Quartermaster reporting is not configured.", { reason: "telemetry-unavailable" })
+      const removed = await reporting.tokenLedger.removeUnattributed(
+        typeof input.projectID === "string" ? { projectID: input.projectID } : {})
+      return { apiVersion: QUARTERMASTER_API_VERSION, status: "ok", ...removed }
     },
     async readOptions(_input, call) {
       if (!optionsDirectory) throw call.error("unavailable", "Project options are unavailable.", { reason: "no-project" })

@@ -58,6 +58,20 @@ function record(hostEventID: string, projectID: string | null, completedAt = 2_0
   }
 }
 
+test("removes unattributed rows and keeps attributed ones", async () => {
+  const storage = new MemoryStorage()
+  const ledger = new TokenLedger(storage)
+  await ledger.ingest(record("unattributed", "project-a"))
+  const attributed = record("attributed", "project-a")
+  attributed.providerID = "opencode"
+  attributed.modelID = "mimo"
+  await ledger.ingest(attributed)
+
+  const removed = await ledger.removeUnattributed({ projectID: "project-a" })
+  assert.equal(removed.records, 1)
+  assert.deepEqual((await ledger.list({ projectID: "project-a" })).map((row) => row.hostEventID), ["attributed"])
+})
+
 test("upserts replayed and revised host events across ledger instances", async () => {
   const storage = new MemoryStorage()
   const first = new TokenLedger(storage)

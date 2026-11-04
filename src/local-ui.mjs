@@ -62,7 +62,7 @@ export function createLocalUiServer({ openCodeURL, token, resolveEndpoint, proje
     const found = resolve(value)
     return found === directory || found.toLowerCase() === directory.toLowerCase()
   }
-  async function upstreamJSON(url, { method = "GET", body } = {}) {
+  async function upstreamJSON(url, { method = "GET", body, timeoutMs = 30_000 } = {}) {
     // Discover for each call: a restarted host can change both port and password.
     // Never retry writes, whose response may have been lost after application.
     const endpoint = resolveEndpoint ? await resolveEndpoint() : {
@@ -72,8 +72,8 @@ export function createLocalUiServer({ openCodeURL, token, resolveEndpoint, proje
     const origin = checkedOrigin(endpoint.url)
     const target = new URL(url.pathname + url.search, origin)
     const response = await fetch(target, {
-      method, body, redirect: "error", signal: AbortSignal.timeout(5_000),
-      headers: { ...Service.headers(endpoint), accept: "application/json", ...(body ? { "content-type": "application/json" } : {}) },
+      method, body, redirect: "error", signal: AbortSignal.timeout(timeoutMs),
+      headers: { ...Service.headers(endpoint), accept: "application/json", "x-opencode-directory": directory, ...(body ? { "content-type": "application/json" } : {}) },
     })
     if (!response.ok) throw new Error(`OpenCode ${target.pathname} returned HTTP ${response.status}${response.status === 401 ? (endpoint.auth ? " (host rejected the supplied credentials)" : " (no credentials supplied)") : ""}`)
     return JSON.parse(await readLimited(response))
@@ -142,7 +142,8 @@ export function createLocalUiServer({ openCodeURL, token, resolveEndpoint, proje
   async function rpc(method, input) {
     const endpoint = new URL(`/api/rpc/quartermaster/${method}`, upstream)
     endpoint.searchParams.set("location[directory]", directory)
-    const body = await upstreamJSON(endpoint, { method: "POST", body: JSON.stringify({ input }) })
+    // Reports scan the whole ledger; give the RPC calls more room than page reads.
+    const body = await upstreamJSON(endpoint, { method: "POST", body: JSON.stringify({ input }), timeoutMs: 60_000 })
     return body?.output
   }
   async function readConfiguration() {
@@ -155,6 +156,7 @@ export function createLocalUiServer({ openCodeURL, token, resolveEndpoint, proje
   }
 
   let server
+  let lastAvailability
   server = createServer(async (req, res) => {
     const address = req.socket.remoteAddress === "::ffff:127.0.0.1" ? "127.0.0.1" : req.socket.remoteAddress
     if (address !== "127.0.0.1" || isIP(address) !== 4) return send(res, 403, { error: "local requests only" })
@@ -266,13 +268,21 @@ export function createLocalUiServer({ openCodeURL, token, resolveEndpoint, proje
           ? plans.failureCooldowns.filter((item) => item && typeof item.providerID === "string" && Number.isFinite(item.until))
             .map(({ providerID, modelID, until }) => ({ providerID, ...(typeof modelID === "string" ? { modelID } : {}), until }))
           : undefined
+        const availability = { status: plans.availability?.quota ?? plans.status ?? "unknown",
+          ...(Number.isFinite(plans.availability?.quotaUpdatedAt) ? { updatedAt: plans.availability.quotaUpdatedAt } :
+            Number.isFinite(plans.updatedAt) ? { updatedAt: plans.updatedAt } : {}),
+          ...(typeof plans.reason === "string" ? { reason: plans.reason } : {}),
+          sources: Object.fromEntries(status.map(({ providerID, ...source }) => [providerID, source])) }
+        // The host reports an empty source list while it refreshes quota; keep the last
+        // good snapshot so a poll does not blank the page.
+        if (!status.length && lastAvailability?.sources && Object.keys(lastAvailability.sources).length) {
+          availability.sources = lastAvailability.sources
+          if (lastAvailability.updatedAt !== undefined) availability.updatedAt = lastAvailability.updatedAt
+          if (lastAvailability.status !== "unknown") availability.status = lastAvailability.status
+        } else if (status.length) lastAvailability = availability
         send(res, 200, { apiVersion: 1, projectID, generatedAt: new Date().toISOString(),
           plans: plans.plans, agents: plans.agents, workTypes: plans.workTypes,
-          availability: { status: plans.availability?.quota ?? plans.status ?? "unknown",
-            ...(Number.isFinite(plans.availability?.quotaUpdatedAt) ? { updatedAt: plans.availability.quotaUpdatedAt } :
-              Number.isFinite(plans.updatedAt) ? { updatedAt: plans.updatedAt } : {}),
-            ...(typeof plans.reason === "string" ? { reason: plans.reason } : {}),
-            sources: Object.fromEntries(status.map(({ providerID, ...source }) => [providerID, source])) },
+          availability,
           ...(cooldowns ? { cooldowns } : {}), report,
           ...(!report ? { reportError: "Quartermaster report unavailable" } : {}) })
       } catch {

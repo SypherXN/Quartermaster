@@ -345,6 +345,50 @@ export class TokenLedger {
         (a.variant ?? "").localeCompare(b.variant ?? ""))
   }
 
+  // Destructive maintenance: drop every row recorded without a provider. The
+  // step-model map is in memory only, so nothing can re-derive the model later;
+  // such rows can only ever render as "Unattributed".
+  async removeUnattributed(query: TokenLedgerQuery = {}) {
+    return this.serialize(async () => {
+      const inScope = (projectID: string | null) => query.projectID === undefined || projectID === (query.projectID ?? null)
+      const removed = { records: 0, lifetime: 0, rollups: 0, observedTokens: 0 }
+      const keys: string[] = []
+      for (const { key, value } of await scanAll(this.storage)) {
+        const record = asRecord(value)
+        if (!record || record.providerID !== null || !inScope(record.hostProjectID)) continue
+        keys.push(key)
+        removed.records += 1
+        removed.observedTokens += knownTokenTotal(record) ?? 0
+      }
+      for (const { key, value } of await scanAll(this.storage, LIFETIME_PREFIX)) {
+        const row = asLifetime(value)
+        if (!row || row.providerID !== null || !inScope(row.projectID)) continue
+        keys.push(key)
+        removed.lifetime += 1
+        removed.observedTokens += row.observedTokens
+      }
+      for (const { key, value } of await scanAll(this.storage, ROLLUP_PREFIX)) {
+        const rollup = asRollup(value)
+        if (!rollup || !inScope(rollup.projectID)) continue
+        const slices = rollup.slices.filter((slice) => slice.providerID !== null)
+        if (slices.length === rollup.slices.length) continue
+        removed.rollups += 1
+        for (const slice of rollup.slices) if (slice.providerID === null) removed.observedTokens += slice.observedTokens
+        if (!slices.length) { keys.push(key); continue }
+        // Keep the attributed slices; the row's counters are their sums.
+        await this.storage.set(key, {
+          ...rollup,
+          slices,
+          records: slices.reduce((sum, slice) => sum + slice.records, 0),
+          observedTokens: slices.reduce((sum, slice) => sum + slice.observedTokens, 0),
+          unknownTokenRecords: slices.reduce((sum, slice) => sum + slice.unknownTokenRecords, 0),
+        } as unknown as Parameters<StorageDomain["set"]>[1])
+      }
+      await Promise.all(keys.map((key) => this.storage.remove(key)))
+      return removed
+    })
+  }
+
   private serialize<T>(operation: () => Promise<T>): Promise<T> {
     const task = this.pending.catch(() => {}).then(operation)
     this.pending = task.then(() => {}, () => {})

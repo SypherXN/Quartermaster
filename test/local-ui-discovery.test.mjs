@@ -17,6 +17,8 @@ test("UI rediscovers host address and authentication without restarting", async 
       assert.equal(req.headers.authorization, `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}`)
       const path = new URL(req.url, "http://127.0.0.1").pathname
       assert.equal(new URL(req.url, "http://127.0.0.1").searchParams.get("location[directory]"), directory)
+      // OpenCode scopes RPC dispatch by this header; without it another project's host answers.
+      assert.equal(req.headers["x-opencode-directory"], directory)
       const body = path === "/api/location" ? { directory, project: { id: "project" } }
         : path.endsWith("/report") ? { output: { apiVersion: 1, status: "ok", projectID: "project", totals: { records }, costs: {} } }
         : { output: { apiVersion: 1, plans: {}, agents: {}, workTypes: {} } }
