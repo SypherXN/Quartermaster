@@ -160,6 +160,26 @@ export class CompactionLedger {
       .sort((a, b) => a.completedAt - b.completedAt || a.hostEventID.localeCompare(b.hostEventID))
   }
 
+  // Destructive maintenance: drop every compaction row recorded without a model.
+  // The summarizer model lives only on the compaction event, so nothing can
+  // re-derive it later and such rows can only ever render as "unknown".
+  async removeUnattributed(query: { projectID?: string } = {}) {
+    return this.serialize(async () => {
+      const inScope = (projectID: string | null) => query.projectID === undefined || projectID === query.projectID
+      const removed = { compactions: 0, compactionTokens: 0 }
+      const keys: string[] = []
+      for (const { key, value } of await this.scan()) {
+        const record = asRecord(value)
+        if (!record || record.providerID !== null || !inScope(record.projectID)) continue
+        keys.push(key)
+        removed.compactions += 1
+        if (record.counts) removed.compactionTokens += record.counts.input + record.counts.output
+      }
+      await Promise.all(keys.map((key) => this.storage.remove(key)))
+      return removed
+    })
+  }
+
   private serialize<T>(operation: () => Promise<T>): Promise<T> {
     const task = this.pending.catch(() => {}).then(operation)
     this.pending = task.then(() => {}, () => {})

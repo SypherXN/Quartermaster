@@ -95,6 +95,25 @@ test("collector keeps usage when session attribution lookup fails", async () => 
   assert.equal(record.counts?.input, 4)
 })
 
+test("collector falls back to the assistant message's own model when the step start was missed", async () => {
+  const storage = new MemoryStorage()
+  await consumeTokenEvents({
+    event: {} as never,
+    storage,
+    session: {
+      get: async () => ({ projectID: "project-a" }) as never,
+      context: async () => [
+        { type: "assistant", id: "message-a", agent: "reviewer", model: { providerID: "cursor", id: "grok-4.7", variant: "high" } },
+      ] as never,
+    },
+  }, new TokenLedger(storage), events(), new AbortController().signal)
+
+  const [record] = await new TokenLedger(storage).list({ projectID: "project-a" })
+  assert.equal(record.providerID, "cursor")
+  assert.equal(record.modelID, "grok-4.7")
+  assert.equal(record.variant, "high")
+})
+
 test("agent switches and child-session steps match only their exact message IDs", async () => {
   const storage = new MemoryStorage()
   const steps = [
@@ -200,4 +219,30 @@ test("compaction is stored beside its model and never becomes a step total", asy
   assert.doesNotMatch(JSON.stringify(stored), /must not be stored|summary|session-a/)
   const unknown = [...storage.values.values()].find((value) => (value as { hostEventID?: string }).hostEventID === "cmp-unknown") as { projectID: string | null }
   assert.equal(unknown.projectID, null)
+})
+
+test("removes unattributed compaction rows and keeps attributed ones", async () => {
+  const storage = new MemoryStorage()
+  const ledger = new CompactionLedger(storage, () => 3_000)
+  const recordFor = (hostEventID: string, providerID: string | null) => ({
+    hostEventID,
+    projectID: "project-a",
+    sessionKey: null,
+    sourceEvent: "session.compaction.ended" as const,
+    reason: null,
+    providerID,
+    modelID: providerID ? "summarizer" : null,
+    variant: null,
+    completedAt: 2_500,
+    counts: { input: 800, output: 40, reasoning: 0, cacheRead: 200, cacheWrite: 0 },
+    usageStatus: "reported" as const,
+    partial: false,
+  })
+  await ledger.ingest(recordFor("cmp-unknown-model", null))
+  await ledger.ingest(recordFor("cmp-known-model", "provider-b"))
+
+  const removed = await ledger.removeUnattributed({ projectID: "project-a" })
+
+  assert.deepEqual(removed, { compactions: 1, compactionTokens: 840 })
+  assert.deepEqual((await ledger.list("project-a")).map((row) => row.hostEventID), ["cmp-known-model"])
 })

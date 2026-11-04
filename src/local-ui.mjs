@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import { existsSync } from "node:fs"
 import { readFile } from "node:fs/promises"
 import { Service } from "@opencode/client/service"
@@ -11,6 +12,9 @@ import { fileURLToPath } from "node:url"
 const page = new URL("../web/index.html", import.meta.url)
 const loopback = new Set(["127.0.0.1"])
 const maxResponseBytes = 2_000_000
+// The report publishes sha256(sessionID).slice(0, 12) instead of raw ids; hash
+// host ids the same way so a title can be joined without exposing the id.
+const sessionKey = (sessionID) => createHash("sha256").update(sessionID).digest("hex").slice(0, 12)
 
 function optionsBody(loaded) {
   return {
@@ -264,6 +268,21 @@ export function createLocalUiServer({ openCodeURL, token, resolveEndpoint, proje
         })
         const report = reportResult?.apiVersion === 1 && reportResult.status === "ok" &&
           reportResult.projectID === projectID && reportResult.totals && reportResult.costs ? reportResult : null
+        // Titles live on the host, not in the ledger; attach them so the sessions
+        // table can name a row instead of showing only an id prefix.
+        if (report?.sessions?.items?.length) {
+          try {
+            const listed = await upstreamJSON(new URL("/api/session", upstream))
+            const rows = Array.isArray(listed) ? listed : Array.isArray(listed?.data) ? listed.data : []
+            const titles = new Map(rows
+              .filter((row) => typeof row?.id === "string" && typeof row.title === "string" && row.title.trim())
+              .map((row) => [sessionKey(row.id), row.title.trim()]))
+            for (const item of report.sessions.items) {
+              const title = titles.get(item.sessionKey)
+              if (title) item.sessionTitle = title
+            }
+          } catch { /* decoration only: never blank the page for a title */ }
+        }
         const cooldowns = Array.isArray(plans.failureCooldowns)
           ? plans.failureCooldowns.filter((item) => item && typeof item.providerID === "string" && Number.isFinite(item.until))
             .map(({ providerID, modelID, until }) => ({ providerID, ...(typeof modelID === "string" ? { modelID } : {}), until }))

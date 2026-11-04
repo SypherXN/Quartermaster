@@ -598,7 +598,13 @@ export async function registerQuartermasterRpc(
       if (!reporting) throw call.error("unavailable", "Quartermaster reporting is not configured.", { reason: "telemetry-unavailable" })
       const removed = await reporting.tokenLedger.removeUnattributed(
         typeof input.projectID === "string" ? { projectID: input.projectID } : {})
-      return { apiVersion: QUARTERMASTER_API_VERSION, status: "ok", ...removed }
+      // Compaction rows key their model on the event itself, so they carry their
+      // own unknown rows; prune them in the same confirmed call.
+      const compactions = reporting.compactionLedger
+        ? await reporting.compactionLedger.removeUnattributed(
+            typeof input.projectID === "string" ? { projectID: input.projectID } : {})
+        : { compactions: 0, compactionTokens: 0 }
+      return { apiVersion: QUARTERMASTER_API_VERSION, status: "ok", ...removed, ...compactions }
     },
     async readOptions(_input, call) {
       if (!optionsDirectory) throw call.error("unavailable", "Project options are unavailable.", { reason: "no-project" })

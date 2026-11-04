@@ -73,13 +73,24 @@ export async function consumeTokenEvents(
       }
 
       let agentID: string | undefined
+      let messageModel: { providerID: string; modelID: string; variant: string | null } | undefined
       let messages: readonly unknown[] | undefined
       try {
         const contextMessages = await ctx.session.context({ sessionID: candidate.hostSessionID })
         messages = contextMessages
         const message = contextMessages.find((item) => item.type === "assistant" && item.id === candidate.hostMessageID)
-        if (message?.type === "assistant" && typeof message.agent === "string" && message.agent.length > 0) {
-          agentID = message.agent
+        if (message?.type === "assistant") {
+          if (typeof message.agent === "string" && message.agent.length > 0) {
+            agentID = message.agent
+          }
+          // The assistant message names its own model, which is the fallback for a
+          // step whose session.step.started this instance never saw.
+          const providerID = message.model?.providerID
+          const modelID = message.model?.id
+          if (typeof providerID === "string" && providerID.length > 0 && typeof modelID === "string" && modelID.length > 0) {
+            const variant = message.model?.variant
+            messageModel = { providerID, modelID, variant: typeof variant === "string" && variant.length > 0 ? variant : null }
+          }
         }
       } catch {
         // Keep usage if the exact terminal assistant message is unavailable.
@@ -100,7 +111,9 @@ export async function consumeTokenEvents(
         }
       }
 
-      const model = claims.claim(candidate.hostEventID, candidate.hostMessageID)
+      // Pair the step with its own start event; when that was missed (the plugin
+      // subscribed mid-step) the host message still names the model.
+      const model = claims.claim(candidate.hostEventID, candidate.hostMessageID) ?? messageModel
       const record = projectTokenEvents([event], () => ({
         ...context,
         agentID,

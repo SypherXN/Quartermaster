@@ -376,9 +376,10 @@ details.plan[open]>summary{margin-bottom:18px}
    <div class="brand-note">MODEL SUPPLY OFFICE</div><div class="eyebrow">Workspace</div>
   <nav class="nav">
     <a href="#overview" aria-current="page"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z"/></svg>Overview<span class="nav-index" aria-hidden="true">01</span></a>
-    <a href="#plans"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16M8 3v4M16 10v4M10 17v4"/></svg>Plans<span class="nav-index" aria-hidden="true">02</span></a>
-    <a href="#providers"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5 9-5Zm-9 9 9 5 9-5M3 16l9 5 9-5"/></svg>Providers &amp; models<span class="nav-index" aria-hidden="true">03</span></a>
-    <a href="#quota"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 19a7 7 0 1 1 7-7M12 12l4-3"/></svg>Quota<span class="nav-index" aria-hidden="true">04</span></a>
+    <a href="#usage"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>Usage<span class="nav-index" aria-hidden="true">02</span></a>
+    <a href="#plans"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16M8 3v4M16 10v4M10 17v4"/></svg>Plans<span class="nav-index" aria-hidden="true">03</span></a>
+    <a href="#providers"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5 9-5Zm-9 9 9 5 9-5M3 16l9 5 9-5"/></svg>Providers &amp; models<span class="nav-index" aria-hidden="true">04</span></a>
+    <a href="#quota"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 19a7 7 0 1 1 7-7M12 12l4-3"/></svg>Quota<span class="nav-index" aria-hidden="true">05</span></a>
   </nav>
   <div class="sidebar-foot"><span class="badge neutral"><span class="local-dot"></span>Local workspace</span><p>Deliberate routing.<br>A little more headroom.</p></div>
 </aside>
@@ -388,21 +389,37 @@ details.plan[open]>summary{margin-bottom:18px}
 <section data-page="overview" class="fade-in" aria-labelledby="overview-heading">
    <div class="page-head"><div><div class="eyebrow"><span class="register-index" aria-hidden="true">01</span>Workspace ledger</div><h1 id="overview-heading">Workspace ledger.</h1><p>Your model inventory, routing plans, and available headroom.<br>A clear record of what keeps the work moving.</p></div><button id="refresh-dashboard" class="primary head-action" type="button">↻ &nbsp; Refresh workspace</button></div>
   <div id="overview-stats" class="stats"></div>
-  <section class="panel section-gap" aria-labelledby="sessions-heading"><div class="panel-head"><div><h2 id="sessions-heading">Sessions ledger</h2><p>Root sessions with their subagents rolled in</p></div><span class="badge neutral">Telemetry</span></div>
-   <div id="range-presets" class="range-bar" role="group" aria-label="Time range"><button type="button" data-range="24h" aria-pressed="false">24h</button><button type="button" data-range="7d" aria-pressed="false">7 days</button><button type="button" data-range="30d" aria-pressed="false">30 days</button><button type="button" data-range="all" aria-pressed="true">All</button><span id="range-active" class="range-active">Range: all history</span></div>
-   <div id="overview-sessions"></div>
-   <div class="ledger-actions"><button id="export-usage-csv" type="button">Export usage CSV</button><span class="hint no-margin">Exports the rows shown above. Nothing is sent anywhere.</span></div></section>
-    <section class="panel section-gap" aria-labelledby="compaction-heading"><div class="panel-head"><div><h2 id="compaction-heading">Compaction by model</h2><p>The summarizer's own tokens, beside the model that ran it</p></div><span class="badge neutral">Not in session total</span></div><div id="overview-compaction"></div></section>
-    <section class="panel section-gap" aria-labelledby="direct-usage-heading"><div class="panel-head"><div><h2 id="direct-usage-heading">Plugin-reported calls</h2><p>Counts a plugin submitted for a call that never became a host step. Pruned calls stay in the total.</p></div><span class="badge neutral">Self-reported</span></div><div id="overview-direct"></div></section>
-  <div class="grid-two section-gap"><section class="panel"><div class="panel-head"><div><h2>Where the work goes</h2><p>Observed tokens by provider</p></div><span class="badge neutral">Telemetry</span></div><div id="overview-chart"></div></section><section class="panel"><div class="panel-head"><div><h2>Routing at a glance</h2><p>Ordered fallbacks from the running host</p></div><a class="mono" href="#plans">Edit plans ↗</a></div><div id="overview-plans"></div></section></div>
+  <section class="panel section-gap" aria-labelledby="routing-heading"><div class="panel-head"><div><h2 id="routing-heading">Routing at a glance</h2><p>Ordered fallbacks from the running host</p></div><a class="mono" href="#plans">Edit plans ↗</a></div><div id="overview-plans"></div></section>
   <div id="overview-attention" class="note section-gap">Connect to your local gateway to see the state of this workspace. Nothing runs automatically.</div>
   <p id="dashboard-status" class="status-line" role="status" aria-live="polite">Waiting for your first refresh.</p>
   <details class="import"><summary>Working offline? Import a report</summary><div class="import-body"><label for="file">Report JSON</label><input id="file" type="file" accept="application/json,.json"><button id="live" type="button">Load live report</button></div><p class="hint">Read-only snapshot. The gateway keeps the OpenCode token server-side.</p></details>
   <p id="status" class="status-line" role="status" aria-live="polite">No report loaded.</p>
   <div id="report" hidden></div>
 </section>
+<section data-page="usage" hidden class="fade-in" aria-labelledby="usage-heading">
+   <div class="page-head"><div><div class="eyebrow"><span class="register-index" aria-hidden="true">02</span>Token usage</div><h1 id="usage-heading">Token usage.</h1><p>Every observed token, by model, session, provider and summarizer.<br>The ledger the routing decisions leave behind.</p></div><span class="badge neutral">Telemetry</span></div>
+  <div class="tab-strip" role="tablist" aria-label="Usage views"><button type="button" class="tab" role="tab" id="tab-models" aria-selected="true" aria-controls="panel-models" tabindex="0"><span class="register-index" aria-hidden="true">01</span>Models</button><button type="button" class="tab" role="tab" id="tab-sessions" aria-selected="false" aria-controls="panel-sessions" tabindex="-1"><span class="register-index" aria-hidden="true">02</span>Sessions</button><button type="button" class="tab" role="tab" id="tab-breakdown" aria-selected="false" aria-controls="panel-breakdown" tabindex="-1"><span class="register-index" aria-hidden="true">03</span>Breakdown</button></div>
+  <div class="tab-panel" id="panel-models" role="tabpanel" aria-labelledby="tab-models" tabindex="0">
+  <div id="models-stats" class="stats"></div>
+  <section class="panel section-gap" aria-labelledby="models-table-heading"><div class="panel-head"><div><h2 id="models-table-heading">By model</h2><p>Observed tokens across every session in this project</p></div><span class="badge neutral">Telemetry</span></div><div id="models-table"></div></section>
+  <section class="panel section-gap" aria-labelledby="models-compaction-heading"><div class="panel-head"><div><h2 id="models-compaction-heading">Compaction by model</h2><p>The summarizer's own tokens, beside the model that ran it</p></div><span class="badge neutral">Not in session total</span></div><div id="models-compaction"></div></section>
+  <div id="models-attention" class="note section-gap">Refresh the workspace to read the ledger.</div>
+  </div>
+  <div class="tab-panel" id="panel-sessions" role="tabpanel" aria-labelledby="tab-sessions" tabindex="-1" hidden>
+  <section class="panel section-gap" aria-labelledby="sessions-heading"><div class="panel-head"><div><h2 id="sessions-heading">Sessions ledger</h2><p>Root sessions with their subagents rolled in</p></div><span class="badge neutral">Telemetry</span></div>
+   <div id="range-presets" class="range-bar" role="group" aria-label="Time range"><button type="button" data-range="24h" aria-pressed="false">24h</button><button type="button" data-range="7d" aria-pressed="false">7 days</button><button type="button" data-range="30d" aria-pressed="false">30 days</button><button type="button" data-range="all" aria-pressed="true">All</button><span id="range-active" class="range-active">Range: all history</span></div>
+   <div id="overview-sessions"></div>
+   <div class="ledger-actions"><button id="export-usage-csv" type="button">Export usage CSV</button><span class="hint no-margin">Exports the rows shown above. Nothing is sent anywhere.</span></div></section>
+  </div>
+  <div class="tab-panel" id="panel-breakdown" role="tabpanel" aria-labelledby="tab-breakdown" tabindex="-1" hidden>
+  <section class="panel section-gap" aria-labelledby="compaction-heading"><div class="panel-head"><div><h2 id="compaction-heading">Compaction by model</h2><p>The summarizer's own tokens, beside the model that ran it</p></div><span class="badge neutral">Not in session total</span></div><div id="overview-compaction"></div></section>
+  <section class="panel section-gap" aria-labelledby="direct-usage-heading"><div class="panel-head"><div><h2 id="direct-usage-heading">Plugin-reported calls</h2><p>Counts a plugin submitted for a call that never became a host step. Pruned calls stay in the total.</p></div><span class="badge neutral">Self-reported</span></div><div id="overview-direct"></div></section>
+  <section class="panel section-gap" aria-labelledby="chart-heading"><div class="panel-head"><div><h2 id="chart-heading">Where the work goes</h2><p>Observed tokens by provider</p></div><span class="badge neutral">Telemetry</span></div><div id="overview-chart"></div></section>
+  </div>
+  <p id="usage-status" class="status-line" role="status" aria-live="polite">Waiting for your first refresh.</p>
+</section>
 <section id="editor" data-page="plans" hidden class="fade-in" aria-labelledby="plan-heading">
-   <div class="page-head"><div><div class="eyebrow"><span class="register-index" aria-hidden="true">02</span>Routing plans</div><h1 id="plan-heading">Routing plans.</h1><p>Set the first choice. Give it a fallback. Keep every agent on course.</p></div><span class="badge neutral">Winning settings</span></div>
+   <div class="page-head"><div><div class="eyebrow"><span class="register-index" aria-hidden="true">03</span>Routing plans</div><h1 id="plan-heading">Routing plans.</h1><p>Set the first choice. Give it a fallback. Keep every agent on course.</p></div><span class="badge neutral">Winning settings</span></div>
    <div class="note editor-intro"><strong id="options-heading">Your routing playbook.</strong> Earlier models are tried first; named variants stay separate. Apply saves the winning quartermaster.jsonc, including a settings file outside this project. A registration with no settings file stays read-only. The current session is unchanged; the next assignment reads the saved file. Cancel discards unsaved edits, not a submitted save.</div>
    <p id="options-status" class="status-line" role="status" aria-live="polite">Plans load from the local gateway when this page is open.</p>
   <div class="tab-strip" role="tablist" aria-label="Routing plan settings"><button type="button" class="tab" role="tab" id="tab-plans" aria-selected="true" aria-controls="panel-plans" tabindex="0"><span class="register-index" aria-hidden="true">01</span>Plans</button><button type="button" class="tab" role="tab" id="tab-agents" aria-selected="false" aria-controls="panel-agents" tabindex="-1"><span class="register-index" aria-hidden="true">02</span>Agent bindings</button><button type="button" class="tab" role="tab" id="tab-modules" aria-selected="false" aria-controls="panel-modules" tabindex="-1"><span class="register-index" aria-hidden="true">03</span>Modules</button><button type="button" class="tab" role="tab" id="tab-settings" aria-selected="false" aria-controls="panel-settings" tabindex="-1"><span class="register-index" aria-hidden="true">04</span>Settings</button></div>
@@ -432,7 +449,7 @@ details.plan[open]>summary{margin-bottom:18px}
   </fieldset>
 </section>
 <section data-page="providers" hidden class="fade-in" aria-labelledby="providers-heading">
-  <div class="page-head"><div><div class="eyebrow"><span class="register-index" aria-hidden="true">03</span>Provider inventory</div><h1 id="providers-heading">Providers &amp; models.</h1><p>Browse OpenCode’s provider catalog. Compare capabilities and exact named variants. Catalog metadata does not establish connectivity.</p></div><button id="refresh-providers" type="button" class="head-action">↻ &nbsp; Refresh catalog</button></div>
+  <div class="page-head"><div><div class="eyebrow"><span class="register-index" aria-hidden="true">04</span>Provider inventory</div><h1 id="providers-heading">Providers &amp; models.</h1><p>Browse OpenCode’s provider catalog. Compare capabilities and exact named variants. Catalog metadata does not establish connectivity.</p></div><button id="refresh-providers" type="button" class="head-action">↻ &nbsp; Refresh catalog</button></div>
   <p id="catalog-status" class="status-line" role="status" aria-live="polite">Refresh the catalog to see provider metadata. No inference calls are made.</p>
   <div class="shortlist-filter"><label class="check" for="preferred-filter"><input id="preferred-filter" type="checkbox" disabled>Preferred models only</label><button id="retry-preferences" type="button" class="shortlist-reload">Reload browser shortlist</button></div>
   <p id="preference-status" class="hint no-margin" role="status" aria-live="polite">Reading browser shortlist…</p>
@@ -451,7 +468,7 @@ details.plan[open]>summary{margin-bottom:18px}
   </fieldset>
 </section>
 <section data-page="quota" hidden class="fade-in" aria-labelledby="quota-heading">
-   <div class="page-head"><div><div class="eyebrow"><span class="register-index" aria-hidden="true">04</span>Provider quota</div><h1 id="quota-heading">Quota.</h1><p>Provider windows from the latest snapshot. A missing percent or reset stays unknown.</p></div><button id="refresh-quota" type="button" class="head-action">↻ &nbsp; Refresh quota</button></div>
+   <div class="page-head"><div><div class="eyebrow"><span class="register-index" aria-hidden="true">05</span>Provider quota</div><h1 id="quota-heading">Quota.</h1><p>Provider windows from the latest snapshot. A missing percent or reset stays unknown.</p></div><button id="refresh-quota" type="button" class="head-action">↻ &nbsp; Refresh quota</button></div>
   <div id="quota-providers" class="usage-grid"></div>
   <p id="quota-status" class="status-line" role="status" aria-live="polite">Quota loads with this page.</p>
 </section>
@@ -542,8 +559,67 @@ function paintOverview(){
    const quota=typeof snapshot?.availability?.status==='string'?` Quota source status: ${snapshot.availability.status}.` : ''
   attention.textContent=`${number(totals?.records)} telemetry records · ${number(totals?.unknownTokenRecords)} with unknown token counts · ${number(report.errors?.total)} recorded provider errors.${named?` Classifications: ${named}.`:''}${latest}${quota} These are observations, not complete account usage.`
  }else if(attention&&dashboardData)attention.textContent=`${telemetryIssue()} Routing plans and quota state are shown independently from telemetry.${typeof snapshot.availability?.status==='string'?` Quota source status: ${snapshot.availability.status}.`:''}`
-   paintSessions();paintCompaction();paintDirect();paintBudgets()
+   paintSessions();paintCompaction();paintDirect();paintBudgets();paintModels();paintModelsCompaction()
  }
+    // Model rows carry value "provider/model"; agents and plugins are already folded in.
+  function modelDimensions(){return (currentReport?.dimensions?.items||[]).filter(item=>item.dimension==='model')}
+  const modelLabel=item=>item.value||'Unknown model'
+  function paintModels(){
+    const report=currentReport
+    const rows=[...modelDimensions()].sort((a,b)=>(b.observedTokens||0)-(a.observedTokens||0))
+    const total=report?.totals?.observedTokens||0
+    const top=rows[0]
+    const share=item=>total>0&&item.observedTokens?Math.round(item.observedTokens/total*100):null
+    mount('#models-stats',
+      stat('Models in use',rows.length?number(rows.length):'—','Distinct provider/model combinations',true),
+      stat('Observed tokens',report?number(total):'—','Input + output · every session'),
+      stat('Top model',top?modelLabel(top):'—',top&&share(top)!==null?`${share(top)}% of observed tokens`:'Share unknown'))
+    if(!rows.length){mount('#models-table',empty('No model data yet.','Refresh the workspace to read the ledger.'));return}
+    const cols=[['Model',''],['Steps','num'],['Tokens','num'],['Share','num'],['Cache hit','num'],['Cost','num']]
+    const body=rows.map(item=>h('tr',{},
+      h('td',{class:'mono',title:modelLabel(item)},h('span',{text:modelLabel(item)})),
+      h('td',{class:'num',text:number(item.records)}),
+      h('td',{class:'num',text:number(item.observedTokens)}),
+      h('td',{class:'num',text:share(item)===null?'—':`${share(item)}%`}),
+      h('td',{class:'num',text:known(item.cacheHitRate)?`${Math.round(item.cacheHitRate*100)}%`:'—'}),
+      h('td',{class:'num',text:typeof item.hostCostUSD==='number'?`${item.hostCostUSD.toFixed(2)} USD`:'—'})))
+    mount('#models-table',h('table',{class:'ledger'},
+      h('caption',{class:'hint',text:'Observed tokens by provider and model, highest first. A share of observed tokens is not a share of provider quota.'}),
+      h('thead',{},h('tr',{},...cols.map(([label,cls])=>h('th',{scope:'col',class:cls,text:label})))),
+      h('tbody',{},...body)))
+    const attention=document.querySelector('#models-attention')
+    if(attention)attention.textContent=`Showing ${number(rows.length)} provider/model combinations across ${number(total)} observed tokens. Rows are recorded per step, so one session can appear under several models.`
+  }
+  // Same summarizer numbers as the breakdown view, rolled up without the effort
+  // variant: the compaction ledger keys rows by variant, the model table does not.
+  function paintModelsCompaction(){
+    const usage=currentReport?.compaction
+    const items=Array.isArray(usage?.dimensions?.items)?usage.dimensions.items.filter(item=>item&&typeof item==='object'):[]
+    if(!items.length){mount('#models-compaction',empty(currentReport?'No compaction in this range.':'No compaction yet.',currentReport?'A compaction call appears here once the host reports its own token counts.':'Refresh the workspace after a session is compacted.'));return}
+    const groups=new Map()
+    for(const item of items){
+      const key=[item.providerID,item.modelID].filter(value=>typeof value==='string'&&value).join('/')||'unknown'
+      const row=groups.get(key)??{key,records:0,observedTokens:0,input:0,cacheRead:0,cacheWrite:0,unknownCacheRecords:0,lastObservedAt:0}
+      row.records+=known(item.records)?item.records:0
+      row.observedTokens+=known(item.observedTokens)?item.observedTokens:0
+      row.input+=known(item.input)?item.input:0
+      row.cacheRead+=known(item.cacheRead)?item.cacheRead:0
+      row.cacheWrite+=known(item.cacheWrite)?item.cacheWrite:0
+      row.unknownCacheRecords+=known(item.unknownCacheRecords)?item.unknownCacheRecords:0
+      if(known(item.lastObservedAt))row.lastObservedAt=Math.max(row.lastObservedAt,item.lastObservedAt)
+      groups.set(key,row)
+    }
+    const rows=[...groups.values()].sort((a,b)=>b.observedTokens-a.observedTokens)
+    const cols=[['Model',''],['Calls','num'],['Tokens (observed)','num'],['Cached share','num'],['Last seen','']]
+    const body=rows.map(row=>{
+      // cachedShare() is cache read over input plus cache read; mirror it on the sums
+      // so rolled-up rows match the breakdown table.
+      const cacheTotal=row.input+row.cacheRead
+      const share=cacheTotal<=0?null:row.cacheRead/cacheTotal*100
+      return h('tr',{},h('td',{class:'mono',text:row.key}),h('td',{class:'num',text:number(row.records)}),h('td',{class:'num',text:number(row.observedTokens)}),h('td',{class:'num',text:share===null?'—':`${Math.round(share)}%`}),h('td',{text:row.lastObservedAt>0?new Date(row.lastObservedAt).toLocaleString():'—'}))
+    })
+    mount('#models-compaction',h('div',{class:'ledger-wrap'},h('table',{class:'ledger'},h('caption',{class:'hint',text:'Compaction calls by model, highest observed tokens first. Every effort variant is folded into one row. Not part of the session total.'}),h('thead',{},h('tr',{},...cols.map(([label,cls])=>h('th',{scope:'col',class:cls,text:label})))),h('tbody',{},...body))),h('p',{class:'chart-foot',text:`${number(usage?.records)} compaction call${usage?.records===1?'':'s'} · ${number(usage?.observedTokens)} observed tokens. Not added to observed session tokens, cost, or budgets.`}))
+  }
   function paintDirect(){
    const usage=currentReport?.directUsage
    const items=Array.isArray(usage?.dimensions?.items)?usage.dimensions.items.filter(item=>item&&typeof item==='object'):[]
@@ -643,7 +719,7 @@ function paintSessions(){
  const sessions=currentReport?.sessions, rows=sessionRows()
  shownSessions=rows
  if(!rows.length){mount('#overview-sessions',empty(currentReport?'No sessions in this range.':'No session data yet.',currentReport?'Pick a wider range, or refresh once the host has observed work.':'Refresh the workspace or import a report to see sessions.'));return}
-  const cols=[['Session key',''],['Messages','num'],['Host cost','num'],['Tokens (observed)','num'],['Cache hit','num'],['Child share',''],['Cached share','num'],['Context occupancy',''],['Window split (chars)','mono'],['Model',''],['Last seen','']]
+  const cols=[['Session',''],['Messages','num'],['Host cost','num'],['Tokens (observed)','num'],['Cache hit','num'],['Child share',''],['Cached share','num'],['Context occupancy',''],['Window split (chars)','mono'],['Model',''],['Last seen','']]
  const body=rows.map(item=>{
   const id=typeof item.sessionKey==='string'&&item.sessionKey?item.sessionKey:'unknown'
   const share=cachedShare(item), pct=known(item.contextPercent)?Math.min(100,Math.max(0,item.contextPercent)):null
@@ -655,7 +731,8 @@ function paintSessions(){
   const split=win&&typeof win==='object'
     ?`U ${compactCount(win.user)||0} · A ${compactCount(win.assistant)||0} · T ${compactCount(win.tool)||0} · O ${compactCount(win.other)||0}`
     :'—'
-   return h('tr',{},h('td',{class:'mono',title:id},h('span',{text:(id.length>8?`${id.slice(0,8)}…`:id)+extra})),h('td',{class:'num',text:number(item.messages)}),h('td',{class:'num',text:hostCostLabel(item)}),h('td',{class:'num',text:number(item.observedTokens)}),h('td',{class:'num',title:cacheHitTitle(item),text:cacheHitLabel(item)}),h('td',{text:childShareLabel(item)}),h('td',{class:'num',text:share===null?'—':`${Math.round(share)}%`}),h('td',{},ctx),h('td',{class:'mono',text:split}),h('td',{class:'mono',text:model||'—'}),h('td',{text:known(item.lastObservedAt)&&item.lastObservedAt>0?new Date(item.lastObservedAt).toLocaleString():'—'}))
+   const label=typeof item.sessionTitle==='string'&&item.sessionTitle?item.sessionTitle:(id.length>8?`${id.slice(0,8)}…`:id)
+   return h('tr',{},h('td',{class:item.sessionTitle?'':'mono',title:item.sessionTitle?`${item.sessionTitle} · ${id}`:id},h('span',{text:label+extra})),h('td',{class:'num',text:number(item.messages)}),h('td',{class:'num',text:hostCostLabel(item)}),h('td',{class:'num',text:number(item.observedTokens)}),h('td',{class:'num',title:cacheHitTitle(item),text:cacheHitLabel(item)}),h('td',{text:childShareLabel(item)}),h('td',{class:'num',text:share===null?'—':`${Math.round(share)}%`}),h('td',{},ctx),h('td',{class:'mono',text:split}),h('td',{class:'mono',text:model||'—'}),h('td',{text:known(item.lastObservedAt)&&item.lastObservedAt>0?new Date(item.lastObservedAt).toLocaleString():'—'}))
   })
   const table=h('table',{class:'ledger'},h('caption',{class:'hint',text:'Root sessions by host-reported USD, highest first. A missing step cost stays unknown and sorts last.'}),h('thead',{},h('tr',{},...cols.map(([label,cls])=>h('th',{scope:'col',class:cls,text:label})))),h('tbody',{},...body))
   const total=known(sessions?.total)?sessions.total:rows.length
@@ -670,7 +747,7 @@ function csvCell(value){
  return /[",\r\n]/.test(text)?`"${text.replaceAll('"','""')}"`:text
 }
 function exportUsageCsv(){
- if(!shownSessions.length){setMessage('#dashboard-status','No sessions to export.');return}
+ if(!shownSessions.length){setDashboardStatus('No sessions to export.');return}
   const head=['sessionKey','sessions','messages','records','observedTokens','unknownTokenRecords','input','output','cacheRead','cacheWrite','reasoning','cachedSharePercent','contextPercent','contextLimit','hostCostUSD','hostCostMissing','cacheHitRate','cacheWriteAfterCompaction','cacheWriteOther','cacheQualityComplete','childTokenShare','childHostCostShare','windowUserChars','windowAssistantChars','windowToolChars','windowOtherChars','providerID','modelID','lastObservedAt']
  const lines=[head.join(',')]
  for(const item of shownSessions){
@@ -682,15 +759,15 @@ function exportUsageCsv(){
  const link=h('a',{href:url,download:`quartermaster-usage-${stamp}.csv`,hidden:''})
  document.body.append(link);link.click();link.remove()
  setTimeout(()=>URL.revokeObjectURL(url),1000)
- setMessage('#dashboard-status',`Exported ${shownSessions.length} session row${shownSessions.length===1?'':'s'} (${RANGES[activeRange].label}) to a CSV file in this browser.`)
+ setDashboardStatus(`Exported ${shownSessions.length} session row${shownSessions.length===1?'':'s'} (${RANGES[activeRange].label}) to a CSV file in this browser.`)
 }
 function bar(label,value,max){
  const fill=h('div',{class:'bar-fill'});fill.setAttribute('style',`width:${max>0&&known(value)?Math.min(100,Math.max(0,value/max*100)):0}%`)
  return h('div',{class:'bar-row'},h('div',{class:'bar-label'},h('span',{text:label}),h('span',{class:'mono',text:number(value)})),h('div',{class:'bar-track','aria-hidden':'true'},fill))
 }
 function navigate(){
-  const names={overview:'Overview',plans:'Plans',providers:'Providers & models',quota:'Quota'}
-  const candidate=window.location.hash.slice(1), route=candidate==='usage'?'quota':Object.hasOwn(names,candidate)?candidate:'overview'
+  const names={overview:'Overview',usage:'Usage',plans:'Plans',providers:'Providers & models',quota:'Quota'}
+  const candidate=window.location.hash.slice(1), route=Object.hasOwn(names,candidate)?candidate:candidate==='models'?'usage':'overview'
  for(const page of document.querySelectorAll('[data-page]'))page.hidden=page.getAttribute('data-page')!==route
  for(const link of document.querySelectorAll('.nav a')){if(link.getAttribute('href')===`#${route}`)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current')}
   document.querySelector('#breadcrumb').textContent=names[route]
@@ -698,6 +775,7 @@ function navigate(){
   if(route==='plans'||route==='providers')void maybeLoadPlans()
   if(route==='providers')void maybeLoadCatalog()
   if(route==='quota')void maybeLoadWorkspace()
+  if(route==='usage')void maybeLoadWorkspace()
 }
 function maybeLoadPlans(){
   if(saved!==undefined)return
@@ -719,6 +797,8 @@ function maybeLoadWorkspace(){
   return refreshWorkspace()
 }
 function setMessage(selector,text){const node=document.querySelector(selector);if(node)node.textContent=text}
+// Workspace status appears on both the overview and the usage page.
+const setDashboardStatus=text=>{setMessage('#dashboard-status',text);setMessage('#usage-status',text)}
 let variantRefreshers=[]
 let catalogLimit=30, catalogHasSelection=false
 const modelExpansion=new Map()
@@ -1021,7 +1101,7 @@ function renderDashboard(data){
    const label=document.querySelector('#project-label'), projectID=typeof data.projectID==='string'?data.projectID:report?.projectID
   if(label)label.textContent=projectID?`PROJECT / ${projectID}`:'NOT CONNECTED'
   const when=epoch(data.generatedAt)??epoch(report?.generatedAt)
-    setMessage('#dashboard-status',`Workspace snapshot ${timeText(when)}. ${telemetryIssue()||'Telemetry shown from the report timestamp.'} No inference or recovery probes. Quota timestamps identify freshness; rereading does not guarantee new observations.`)
+    setDashboardStatus(`Workspace snapshot ${timeText(when)}. ${telemetryIssue()||'Telemetry shown from the report timestamp.'} No inference or recovery probes. Quota timestamps identify freshness; rereading does not guarantee new observations.`)
   const quotaStatus=data.availability?.status||report?.availability?.status
     setMessage('#quota-status',`${hasUsage?`Quota snapshot ${timeText(epoch(data.availability?.updatedAt)??epoch(data.updatedAt))}.${typeof quotaStatus==='string'?` Source status: ${quotaStatus}.`:''}`:'No quota payload in this workspace snapshot.'} No inference or recovery probes. Quota timestamps identify freshness; rereading does not guarantee new observations.`.trim())
 }
@@ -1029,16 +1109,16 @@ async function refreshWorkspace(range=activeRange,silent=false){
  if(!Object.hasOwn(RANGES,range))range=activeRange
  const buttons=['#refresh-dashboard','#refresh-quota','#export-usage-csv'];for(const selector of buttons){const node=document.querySelector(selector);if(node)node.disabled=true}
  const presets=[...(document.querySelectorAll?.('#range-presets button') ?? [])];for(const node of presets)node.disabled=true
- if(!silent){setMessage('#dashboard-status','Reading workspace…');setMessage('#quota-status','Reading quota…')}
+ if(!silent){setDashboardStatus('Reading workspace…');setMessage('#quota-status','Reading quota…')}
  try{
   const since=RANGES[range].ms?`?since=${Date.now()-RANGES[range].ms}`:''
   const response=await fetch(`/api/dashboard${since}`,{cache:'no-store',credentials:'same-origin'})
   if(!response.ok)throw Error('Gateway unavailable')
   const data=await response.json();activeRange=range;renderDashboard(data)
  }catch{
-  setMessage('#dashboard-status',`Could not refresh${range!==activeRange?` for ${RANGES[range].label}`:''}. Start the opted-in local gateway, then try again. Any previous snapshot stays visible.`)
+  setDashboardStatus(`Could not refresh${range!==activeRange?` for ${RANGES[range].label}`:''}. Start the opted-in local gateway, then try again. Any previous snapshot stays visible.`)
   setMessage('#quota-status','Could not refresh quota. Any previous snapshot stays visible; its timestamps have not changed.')
- }finally{for(const selector of buttons)document.querySelector(selector).disabled=false}
+ }finally{for(const selector of buttons)document.querySelector(selector).disabled=false;for(const node of presets)node.disabled=false}
 }
 async function refreshCatalog(){
  const button=document.querySelector('#refresh-providers');button.disabled=true;setMessage('#catalog-status','Reading the OpenCode catalog…')
@@ -2195,7 +2275,16 @@ planTabs.forEach((tab,index)=>{if(!tab||typeof tab.addEventListener!=='function'
     selectPlanTab(next)})})
 if(typeof document.querySelectorAll==='function'){{const saved=/[?&]range=([a-z0-9]+)/.exec(window.location.hash)?.[1];if(saved&&Object.hasOwn(RANGES,saved))activeRange=saved}
  addEventListener('hashchange',navigate);navigate();loadPreferences();paintOverview();paintCatalog();paintUsage()}
-const AUTO_REFRESH_MS=30000
+const usageViews=['models','sessions','breakdown']
+function selectUsageView(name){
+  for(const view of usageViews){
+    const panel=document.getElementById(`panel-${view}`),tab=document.getElementById(`tab-${view}`)
+    if(panel)panel.hidden=view!==name
+    if(tab){tab.setAttribute('aria-selected',String(view===name));tab.setAttribute('tabindex',view===name?'0':'-1')}
+  }
+}
+for(const view of usageViews){const tab=document.getElementById(`tab-${view}`);if(tab)tab.addEventListener('click',()=>selectUsageView(view))}
+ const AUTO_REFRESH_MS=30000
 function autoRefresh(){
   if(document.visibilityState!=='visible')return
   const route=window.location.hash.slice(1).split('?')[0]
