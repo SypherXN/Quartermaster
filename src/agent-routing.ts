@@ -508,6 +508,7 @@ export async function registerAgentRouting(
         quotaUpdatedAt: quotaConfigured && currentUsage?.status === "ok" ? currentUsage.snapshot.updatedAt : null,
         sources: !quotaConfigured || currentUsage?.status !== "ok" ? {} : Object.fromEntries(Object.entries(config.usageSources).map(([provider, sourceID]) => {
           const source = currentUsage.snapshot.sources[sourceID as UsageSourceID]
+          if (!source) return [provider, { sourceID, checkedAt: null, stale: true, availability: "unknown" }]
           return [provider, { sourceID, checkedAt: source.checkedAt, stale: source.stale || source.checkedAt === null || now < source.checkedAt || now - source.checkedAt > 300_000, availability: source.availability }]
         })),
       },
@@ -893,6 +894,7 @@ export async function registerAgentRouting(
       updatedAt: currentUsage.snapshot.updatedAt,
       sources: Object.fromEntries(Object.entries(config.usageSources).map(([providerID, sourceID]) => {
         const source = currentUsage.snapshot.sources[sourceID as UsageSourceID]
+        if (!source) return [providerID, { sourceID, authenticated: false, checkedAt: null, stale: true, availability: "unknown", nextAvailableAt: null, windows: [] }]
         return [providerID, { sourceID, authenticated: source.authenticated, checkedAt: source.checkedAt, stale: source.stale, availability: source.availability, nextAvailableAt: source.nextAvailableAt, windows: source.windows.map(({ name, usedPercent, state, resetsAt, resetEstimated }) => ({ name, usedPercent, state, resetsAt, ...(resetEstimated === undefined ? {} : { resetEstimated }) })) }]
       })),
     }

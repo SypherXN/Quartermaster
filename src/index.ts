@@ -1,6 +1,7 @@
 import { access } from "node:fs/promises"
 import { fileURLToPath } from "node:url"
 import { Plugin } from "@opencode/plugin"
+import { Service } from "@opencode/client/service"
 import { registerAgentRouting } from "./agent-routing.ts"
 import { parseConfig, type TokenRateConfig } from "./config.ts"
 import { ModuleCooldowns } from "./modules.ts"
@@ -33,12 +34,71 @@ type LocalUiStarter = {
   releaseLocalUi?: () => void
 }
 
+type HostEndpoint = { url: string; auth?: { type: "basic"; username: string; password: string } }
+
+// The receiving server's password only exists in the environment it was
+// launched with, so the value here is a guess until the server confirms it.
+// Verify before handing it to the UI: an unchecked guess fails later, in the
+// page, as an unexplained 401. Only variable names are reported, never values.
+async function verifiedHostEndpoint(
+  own: { url: string },
+  env: NodeJS.ProcessEnv,
+  discover: () => Promise<HostEndpoint | undefined>,
+): Promise<HostEndpoint> {
+  // OpenChamber injects its managed password under a version-dependent name, so
+  // match by name instead of trusting one spelling. Values are never reported.
+  const passwords = [...new Set([
+    env.OPENCODE_PASSWORD,
+    env.OPENCODE_SERVER_PASSWORD,
+    ...Object.entries(env)
+      .filter(([name]) => /PASSWORD$/i.test(name) && /OPENCODE|OPENCHAMBER/i.test(name))
+      .map(([, value]) => value),
+  ].filter((value): value is string => typeof value === "string" && value.trim() !== ""))]
+
+  for (const password of passwords) {
+    const endpoint: HostEndpoint = { ...own, auth: { type: "basic", username: "opencode", password } }
+    if (await hostAccepts(endpoint.url, endpoint.auth)) return endpoint
+  }
+
+  // No usable credential: the receiving process answers 401 to everything, so
+  // reading it would only produce a permanently disconnected page. The
+  // registered service carries its own credential, so prefer a working page.
+  try {
+    const discovered = await discover()
+    if (discovered && await hostAccepts(discovered.url, discovered.auth)) {
+      console.warn("[quartermaster] receiving host credentials unavailable; local UI reads the registered OpenCode service instead")
+      return { url: discovered.url, ...(discovered.auth ? { auth: discovered.auth } : {}) }
+    }
+  } catch {
+    // Discovery is best effort; the receiving endpoint below is the last resort.
+  }
+
+  console.warn(`[quartermaster] host credentials unverified (${passwords.length ? "environment values rejected" : "no environment values"}); the page may report 401`)
+  const fallback = passwords[0]
+  return { ...own, ...(fallback ? { auth: { type: "basic" as const, username: "opencode", password: fallback } } : {}) }
+}
+
+async function hostAccepts(url: string, auth: HostEndpoint["auth"]): Promise<boolean> {
+  try {
+    const response = await fetch(new URL("/api/info", url), {
+      headers: { ...Service.headers({ url, auth }), accept: "application/json" },
+      signal: AbortSignal.timeout(1_500),
+    })
+    if (!response.ok) return false
+    const info = await response.json() as { pid?: unknown }
+    return typeof info?.pid === "number"
+  } catch {
+    return false
+  }
+}
+
 export async function startCheckoutLocalUi(directory: string | undefined, options: {
   env?: NodeJS.ProcessEnv
   argv?: readonly string[]
   scriptUrl?: URL
   load?: (script: URL) => Promise<LocalUiStarter>
   retain?: (stop: () => void) => void
+  discover?: () => Promise<HostEndpoint | undefined>
 } = {}): Promise<string> {
   const env = options.env ?? process.env
   if (typeof directory !== "string" || directory.trim() === "") return "skipped"
@@ -57,10 +117,12 @@ export async function startCheckoutLocalUi(directory: string | undefined, option
     const loaded = await load(script)
     if (typeof loaded.ensureLocalUi !== "function") return "absent"
     const own = receivingProcessEndpoint({ argv: options.argv ?? process.argv, env })
-    const password = env.OPENCODE_SERVER_PASSWORD || env.OPENCODE_PASSWORD
+    const hostEndpoint = own
+      ? await verifiedHostEndpoint(own, env, options.discover ?? (() => Service.discover() as Promise<HostEndpoint | undefined>))
+      : undefined
     const status = await loaded.ensureLocalUi({
       projectDirectory: directory,
-      ...(own ? { hostEndpoint: { ...own, ...(password ? { auth: { type: "basic" as const, username: "opencode", password } } : {}) } } : {}),
+      ...(hostEndpoint ? { hostEndpoint } : {}),
       ...(typeof options.retain === "function" ? { retain: options.retain } : {}),
     })
     if (status === "started") {

@@ -7,6 +7,7 @@ export interface CatalogPrice {
   input: number
   output: number
   cacheRead: number
+  cacheReadKnown?: boolean
   cacheWrite: number
 }
 
@@ -44,6 +45,7 @@ export function pricesFromModels(models: readonly CatalogModelLike[]): Map<strin
         input,
         output,
         cacheRead,
+        cacheReadKnown: amount(row?.cache?.read) !== undefined,
         cacheWrite,
       })
     }

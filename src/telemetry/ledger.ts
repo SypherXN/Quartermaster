@@ -1,3 +1,4 @@
+import { setImmediate as yieldToHost } from "node:timers/promises"
 import type { StorageDomain } from "@opencode/plugin/promise/storage"
 import type { Schema } from "effect"
 import type { TokenTelemetryRecord } from "./types.ts"
@@ -275,6 +276,7 @@ async function scanAll(storage: StorageDomain, prefix: string = PREFIX) {
     entries.push(...page.entries)
     if (!page.next || page.next === after) return entries
     after = page.next
+    await yieldToHost()
   }
 }
 
@@ -306,7 +308,7 @@ export class TokenLedger {
   }
 
   async list(query: TokenLedgerQuery = {}): Promise<TokenTelemetryRecord[]> {
-    const limit = Math.max(1, Math.floor(query.limit ?? 10_000))
+    const limit = Math.max(1, Math.floor(query.limit ?? Infinity))
     await this.serialize(() => this.prune())
     const entries = await scanAll(this.storage)
     // Keep pending expiry visible until it is folded, so All never loses usage.

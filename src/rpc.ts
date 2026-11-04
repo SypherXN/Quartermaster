@@ -13,6 +13,7 @@ import type { CompactionLedger } from "./telemetry/compaction.ts"
 import type { WindowLedger } from "./telemetry/window.ts"
 import { type DirectUsageLedger } from "./telemetry/direct-usage.ts"
 import { buildQuartermasterReport, REPORT_MAX_OFFSET, REPORT_MAX_PAGE_SIZE, type QuartermasterReport, type ReportQuery } from "./telemetry/report.ts"
+import { writeReportCache } from "./telemetry/report-cache.ts"
 import { readCatalogSnapshot, type CatalogSnapshot } from "./telemetry/prices.ts"
 import { applyProjectQuartermasterOptions, readProjectQuartermasterOptions, readNativeConfiguration, type ConfigurationReader } from "./project-options.ts"
 
@@ -443,6 +444,7 @@ function statusFallback(config: QuartermasterConfig, usage?: UsageReadResult) {
     updatedAt: usage.snapshot.updatedAt,
     sources: Object.fromEntries(Object.entries(config.usageSources).map(([provider, sourceID]) => {
       const source = usage.snapshot.sources[sourceID as UsageSourceID]
+      if (!source) return [provider, { sourceID, authenticated: false, checkedAt: null, stale: true, availability: "unknown", nextAvailableAt: null, windows: [] }]
       return [provider, { sourceID, authenticated: source.authenticated, checkedAt: source.checkedAt,
         stale: source.stale, availability: source.availability, nextAvailableAt: source.nextAvailableAt,
         windows: source.windows.map(({ name, usedPercent, state, resetsAt, resetEstimated }) => ({
@@ -573,11 +575,17 @@ export async function registerQuartermasterRpc(
         limit,
         offset,
       }
-      return buildQuartermasterReport({
+      const report = await buildQuartermasterReport({
         ...reporting,
         plans: reporting.plans ?? config.plans,
         catalog: reporting.catalog ?? (() => readCatalogSnapshot(() => ctx.model.list())),
       }, query, input.refresh === true)
+      // Opt-in only; ranged/paged requests must not replace the all-time snapshot.
+      if (process.env.QUARTERMASTER_REPORT_CACHE && query.since === undefined && query.until === undefined && offset === 0) {
+        try { await writeReportCache(process.env.QUARTERMASTER_REPORT_CACHE, report) }
+        catch { console.warn("[quartermaster] report cache could not be saved") }
+      }
+      return report
     },
     async readOptions(_input, call) {
       if (!optionsDirectory) throw call.error("unavailable", "Project options are unavailable.", { reason: "no-project" })

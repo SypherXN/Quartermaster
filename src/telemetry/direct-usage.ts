@@ -1,3 +1,4 @@
+import { setImmediate as yieldToHost } from "node:timers/promises"
 import type { StorageDomain } from "@opencode/plugin/promise/storage"
 import type { Schema } from "effect"
 
@@ -355,6 +356,7 @@ export class DirectUsageLedger {
       entries.push(...page.entries)
       if (!page.next || page.next === after) return entries
       after = page.next
+      await yieldToHost()
     }
   }
 

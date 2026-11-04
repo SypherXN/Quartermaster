@@ -5,6 +5,8 @@ import type { TokenTelemetryRecord } from "./types.ts"
 export interface TokenCostCurrencySummary {
   currency: string
   estimatedAmount: number
+  estimatedCacheReadSavings: number
+  cacheSavingsRecords: number
   pricedRecords: number
   pricedTokens: number
   source: "config" | "catalog" | "config+catalog"
@@ -95,6 +97,8 @@ export function estimateTokenCosts(
     const summary = byCurrency.get(currency) ?? {
       currency,
       estimatedAmount: 0,
+      estimatedCacheReadSavings: 0,
+      cacheSavingsRecords: 0,
       pricedRecords: 0,
       pricedTokens: 0,
       source: rate ? ("config" as const) : ("catalog" as const),
@@ -109,6 +113,14 @@ export function estimateTokenCosts(
     pricedRecords += 1
     pricedTokens += tokens
     summary.estimatedAmount += amountUSD
+    // A counterfactual read discount, not an invoice or a change to token totals.
+    // Config rates omit cache pricing, and partial rows cannot establish savings.
+    const savings = counts.cacheRead * (inputRate - cacheReadRate) / 1_000_000
+    if (!rate && catalog?.cacheReadKnown !== false && !record.partial && Number.isSafeInteger(counts.cacheRead) && counts.cacheRead >= 0 &&
+      Number.isFinite(savings) && Number.isFinite(summary.estimatedCacheReadSavings + savings)) {
+      summary.estimatedCacheReadSavings += savings
+      summary.cacheSavingsRecords += 1
+    }
     summary.pricedRecords += 1
     summary.pricedTokens += tokens
     const seenSources = sources.get(currency) ?? new Set<"config" | "catalog">()
@@ -133,6 +145,9 @@ export function estimateTokenCosts(
     pricedTokens,
     unpricedRecords,
     unpricedTokens,
+    // Percentage of known input+output tokens only; unknown counts stay separate.
+    unpricedTokenPercentage: pricedTokens + unpricedTokens > 0
+      ? 100 * (unpricedTokens / (pricedTokens + unpricedTokens)) : null,
     unknownTokenRecords,
     // Records priced from a config rate: that rate prices no cache tokens.
     cacheUnpricedRecords,

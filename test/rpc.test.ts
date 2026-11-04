@@ -423,6 +423,22 @@ test("status omits upstream error text and RPC registration is disposable", asyn
   assert.equal(testContext.disposed(), true)
 })
 
+test("status reports an absent additive Claude source as unknown", async () => {
+  const testContext = context()
+  const claudeConfig = parseConfig({ usageSources: { "claude-agent": "claude-agent" } })
+  const usage = { status: "ok", snapshot: { updatedAt: Date.now(), sources: {} } }
+  const registration = await registerQuartermasterRpc(testContext.ctx as never, claudeConfig, undefined, usage as never)
+  try {
+    const status = await testContext.client().status({}) as { sources: Record<string, unknown> }
+    assert.deepEqual(status.sources["claude-agent"], {
+      sourceID: "claude-agent", authenticated: false, checkedAt: null, stale: true,
+      availability: "unknown", nextAvailableAt: null, windows: [],
+    })
+  } finally {
+    await registration.dispose()
+  }
+})
+
 test("plan selection returns a recommendation the caller applies itself", async () => {
   const calls: string[] = []
   const skip = { model, code: "limited", reason: "provider-a/primary skipped: provider quota is confirmed limited." }

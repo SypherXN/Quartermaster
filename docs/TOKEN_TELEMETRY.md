@@ -202,6 +202,54 @@ provider polling. Rates are current user-configured values, so the report's
 
 ### Totals, retention and archived usage
 
+Reports now read every retained host row, not only the newest 10,000. Explicit
+ledger `limit` requests still return the newest requested rows. Host and direct
+ledger scans use 1,000-row cursor pages and yield to the event loop between
+pages; headline accumulation also yields every 1,000 steps. Session joins and
+sorting still retain O(n) rows in memory: this is cooperative paging, not a
+constant-memory streaming report. Existing output pagination and the 500-row
+combination breakdown ceiling are unchanged.
+
+### Offline aggregate snapshot (opt-in)
+
+Set `QUARTERMASTER_REPORT_CACHE` to an absolute JSON filename in the host's
+environment to save a snapshot after a successful unfiltered report at offset
+zero. Nothing is written by default. The last successful snapshot is replaced
+atomically; a failed write warns without failing the report. Ranged reports and
+later pages do not replace it. Use a local, gitignored path outside shared or
+synced directories. The file represents the most recently reported project
+(identified by `projectID`), not every project combined.
+
+After `npm run build`, read it without starting OpenCode or polling providers:
+
+```text
+npm run report:cached -- <cache-file>
+```
+
+Schema version 1 includes generation time, range, aggregate token/cost counts,
+agent and direct-plugin summaries, and next-page offsets. Dimension items are
+the saved report page, not a promise of exhaustive dimensions. The snapshot
+always says `partial`, `complete: false`, and `source: cached-event-ledger`;
+check its timestamp before using it. No prompts, raw events, session/message
+IDs, config rate cards, authentication or provider responses are exported.
+Missing/invalid files produce a nonzero CLI exit; no live fallback is attempted.
+
+### Additional cost coverage
+
+`costs.unpricedTokenPercentage` is 100 times unpriced known input+output tokens
+divided by all known priced+unpriced input+output tokens (null for no known
+tokens). Unknown-count records remain separately reported, not counted as zero.
+Each currency reports `estimatedCacheReadSavings`: cache-read tokens times the
+difference between the selected catalog input and cache-read per-million rates.
+It is a counterfactual read discount, not billed savings; it neither changes
+token accounting nor subtracts from cost/budgets. `cacheSavingsRecords` reports
+coverage. Partial rows, config-only rates, and absent catalog cache-read prices
+do not establish savings. Zero records means no estimate, not proven zero
+savings. A higher cache price can yield a negative discount. Existing cost
+formulas and direct-usage exclusion are unchanged.
+
+### Token total semantics
+
 `observedTokens` remains `input + output`. Reasoning is part of output and cache
 counts are part of input, so totals also report `input`, `output`, `cacheRead`,
 `cacheWrite` and `reasoning` beside it instead of adding them again.

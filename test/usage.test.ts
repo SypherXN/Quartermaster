@@ -2,6 +2,8 @@ import assert from "node:assert/strict"
 import test from "node:test"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import { normalizeUsageSnapshot, readUsageStatus, USAGE_RPC } from "../src/usage.ts"
+import { buildQuotaEligibility } from "../src/eligibility.ts"
+import { parseConfig } from "../src/config.ts"
 
 const time = new Date().toISOString()
 const resetAt = new Date(Date.parse(time) + 86_400_000).toISOString()
@@ -44,6 +46,30 @@ test("normalizes available, limited and unknown sources with reset data", () => 
   assert.equal(result.snapshot.sources.codex.windows[0].resetEstimated, true)
   assert.equal(result.snapshot.sources.codex.nextAvailableAt, Date.parse(resetAt))
   assert.equal(result.snapshot.sources.cursor.availability, "unknown")
+})
+
+test("Claude quota is additive, validated, and blocks only on fresh limits", () => {
+  const config = parseConfig({ usageSources: { "claude-agent": "claude-agent" } })
+  const data = snapshot()
+  const claude = source("limited")
+  const normalize = () => normalizeUsageSnapshot({ ...data, sources: { ...data.sources, "claude-agent": claude } }, Date.parse(time))
+  const result = normalize()
+  assert.equal(result.status, "ok")
+  if (result.status !== "ok") return
+  assert.equal(result.snapshot.sources["claude-agent"]?.availability, "limited")
+  const model = { providerID: "claude-agent", modelID: "test-model" }
+  assert.equal([...buildQuotaEligibility([model], config.usageSources, [], result).values()][0].status, "limited")
+  claude.stale = true
+  const stale = normalize()
+  assert.equal(stale.status, "ok")
+  if (stale.status !== "ok") return
+  assert.equal(stale.snapshot.sources["claude-agent"]?.availability, "unknown")
+  assert.equal([...buildQuotaEligibility([model], config.usageSources, [], stale).values()][0].status, "available")
+  const legacy = normalizeUsageSnapshot(data, Date.parse(time))
+  assert.equal(legacy.status, "ok")
+  if (legacy.status === "ok") assert.equal(legacy.snapshot.sources["claude-agent"], undefined)
+  claude.checkedAt = "invalid"
+  assert.equal(normalize().status, "unavailable")
 })
 
 test("stale, unauthenticated, and errored sources cannot remain limited", () => {

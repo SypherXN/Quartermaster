@@ -128,7 +128,7 @@ All settings belong in `quartermaster.jsonc` next to the OpenCode config that re
 - **Work types:** `workTypes` maps a work-type name to an existing plan. The
   `select` RPC checks the work-type binding before the agent binding; an
   unknown alias falls back to the agent binding.
-- **Quota:** `usageSources` maps provider IDs to `go`, `codex`, or `cursor`.
+- **Quota:** `usageSources` maps provider IDs to `go`, `codex`, `cursor`, or `claude-agent`. Claude Agent windows come from the quota plugin's observed rate-limit metadata; until it observes a Claude call, quota stays unknown. Older snapshots without Claude remain supported.
   Limits skip all mapped models except explicit `quotaExemptModels` (fully
   qualified IDs, all variants). Only fresh, confirmed `limited` usage skips a
   model; absent, stale, or unusable usage reads as available and stays a

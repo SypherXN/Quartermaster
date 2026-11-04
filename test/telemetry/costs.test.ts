@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import { estimateTokenCosts } from "../../src/telemetry/costs.ts"
+import type { CatalogPrice } from "../../src/telemetry/prices.ts"
 import type { TokenTelemetryRecord } from "../../src/telemetry/types.ts"
 
 const row = (id: string, modelID: string | null, variant: string | null, counts: TokenTelemetryRecord["counts"]): TokenTelemetryRecord => ({
@@ -12,6 +13,20 @@ const row = (id: string, modelID: string | null, variant: string | null, counts:
 })
 
 const counts = (input: number) => ({ input, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 })
+
+test("cache savings use known catalog read prices and coverage excludes unknown counts", () => {
+  const record = row("cached", "model-a", null, { ...counts(100), cacheRead: 1_000_000 })
+  const prices = new Map<string, CatalogPrice[]>([["provider-a/model-a", [{ tierSize: null, input: 2, output: 4, cacheRead: 0.5, cacheWrite: 2 }]]])
+  const result = estimateTokenCosts([record, row("unpriced", null, null, counts(100)), row("unknown", null, null, null)], [], prices)
+  assert.equal(result.currencies[0].estimatedCacheReadSavings, 1.5)
+  assert.equal(result.currencies[0].cacheSavingsRecords, 1)
+  assert.equal(result.unpricedTokenPercentage, 50)
+  assert.equal(result.unknownTokenRecords, 1)
+  assert.equal(estimateTokenCosts([]).unpricedTokenPercentage, null)
+  assert.equal(estimateTokenCosts([{ ...record, partial: true }], [], prices).currencies[0].cacheSavingsRecords, 0)
+  prices.get("provider-a/model-a")![0].cacheReadKnown = false
+  assert.equal(estimateTokenCosts([record], [], prices).currencies[0].cacheSavingsRecords, 0)
+})
 
 for (const overflowAmount of [false, true]) {
   test(`unpriced token accumulation stays safe with ${overflowAmount ? "overflowing amounts" : "missing rates"}`, () => {

@@ -20,7 +20,7 @@ export const USAGE_RPC_TIMEOUT_MS = 2_000
 const USAGE_STALE_AFTER_MS = 5 * 60_000
 const SOURCE_IDS = ["go", "codex", "cursor"] as const
 
-export type UsageSourceID = (typeof SOURCE_IDS)[number]
+export type UsageSourceID = (typeof SOURCE_IDS)[number] | "claude-agent"
 export type UsageAvailability = "available" | "limited" | "unknown"
 export type UsageWindowState = "ok" | "rate-limited" | "unknown"
 
@@ -45,7 +45,7 @@ export interface UsageSource {
 
 export interface UsageSnapshot {
   updatedAt: number
-  sources: Record<UsageSourceID, UsageSource>
+  sources: Record<(typeof SOURCE_IDS)[number], UsageSource> & { "claude-agent"?: UsageSource }
 }
 
 export type UsageReadResult =
@@ -151,7 +151,11 @@ export function normalizeUsageSnapshot(value: unknown, now = Date.now()): UsageR
     if (!isRecord(sourceValues) || !isRecord(models) || !isRecord(models.go)) invalid("snapshot")
     const sources = Object.fromEntries(
       SOURCE_IDS.map((id) => [id, parseSource(sourceValues[id], `sources.${id}`, now)]),
-    ) as Record<UsageSourceID, UsageSource>
+    ) as UsageSnapshot["sources"]
+    // Additive source: old quota-plugin snapshots remain valid.
+    if (sourceValues["claude-agent"] !== undefined) {
+      sources["claude-agent"] = parseSource(sourceValues["claude-agent"], "sources.claude-agent", now)
+    }
     return { status: "ok", snapshot: { updatedAt, sources } }
   } catch (error) {
     return {

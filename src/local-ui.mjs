@@ -75,7 +75,7 @@ export function createLocalUiServer({ openCodeURL, token, resolveEndpoint, proje
       method, body, redirect: "error", signal: AbortSignal.timeout(5_000),
       headers: { ...Service.headers(endpoint), accept: "application/json", ...(body ? { "content-type": "application/json" } : {}) },
     })
-    if (!response.ok) throw new Error("upstream")
+    if (!response.ok) throw new Error(`OpenCode ${target.pathname} returned HTTP ${response.status}${response.status === 401 ? (endpoint.auth ? " (host rejected the supplied credentials)" : " (no credentials supplied)") : ""}`)
     return JSON.parse(await readLimited(response))
   }
   async function projectIDForDirectory() {
@@ -240,7 +240,7 @@ export function createLocalUiServer({ openCodeURL, token, resolveEndpoint, proje
         if (!sources || typeof sources !== "object" || Array.isArray(sources)) throw new Error("status")
         const status = Object.entries(sources).map(([providerID, source]) => {
           if (!source || typeof source !== "object" ||
-            (source.sourceID !== undefined && !["go", "codex", "cursor"].includes(source.sourceID)) ||
+            (source.sourceID !== undefined && !["go", "codex", "cursor", "claude-agent"].includes(source.sourceID)) ||
             (source.authenticated !== undefined && typeof source.authenticated !== "boolean") || typeof source.stale !== "boolean" ||
             !["available", "limited", "unknown"].includes(source.availability) ||
             !(source.checkedAt === undefined || source.checkedAt === null || Number.isFinite(source.checkedAt)) ||

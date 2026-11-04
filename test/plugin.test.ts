@@ -1,4 +1,6 @@
 import assert from "node:assert/strict"
+import { createServer } from "node:http"
+import { once } from "node:events"
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -257,18 +259,59 @@ test("checkout local UI startup skips, disables, and reports the loopback URL", 
   assert.equal(notes.length, 1)
 })
 
-test("checkout UI uses the receiving OpenChamber server, not a separate managed service", async () => {
+test("checkout UI keeps the receiving host when its credential verifies", async (t) => {
+  const host = createServer((req, res) => {
+    const expected = `Basic ${Buffer.from("opencode:fake-host-password").toString("base64")}`
+    if (req.headers.authorization !== expected) return void res.writeHead(401).end()
+    res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ pid: 1 }))
+  })
+  host.listen(0, "127.0.0.1")
+  await once(host, "listening")
+  t.after(() => new Promise((done) => host.close(done)))
   let endpoint: unknown
   await startCheckoutLocalUi("C:\\work", {
-    argv: ["opencode", "serve", "--port", "49194", "--hostname", "127.0.0.1"],
-    env: { OPENCODE_SERVER_PASSWORD: "fake-host-password" },
+    argv: ["opencode", "serve", "--port", String(host.address().port), "--hostname", "127.0.0.1"],
+    env: { OPENCODE_PASSWORD: "fake-host-password", OPENCODE_SERVER_PASSWORD: "fake-stale-password" },
+    discover: async () => undefined,
     load: async () => ({ ensureLocalUi: async (options) => {
       endpoint = options.hostEndpoint
       return "running"
     } }),
   })
   assert.deepEqual(endpoint, {
-    url: "http://127.0.0.1:49194",
+    url: `http://127.0.0.1:${host.address().port}`,
     auth: { type: "basic", username: "opencode", password: "fake-host-password" },
+  })
+})
+
+test("checkout UI uses the registered service when the receiving host rejects the credential", async (t) => {
+  const host = createServer((_req, res) => void res.writeHead(401).end())
+  host.listen(0, "127.0.0.1")
+  await once(host, "listening")
+  t.after(() => new Promise((done) => host.close(done)))
+  const service = createServer((req, res) => {
+    if (req.headers.authorization !== `Basic ${Buffer.from("opencode:service-password").toString("base64")}`)
+      return void res.writeHead(401).end()
+    res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ pid: 2 }))
+  })
+  service.listen(0, "127.0.0.1")
+  await once(service, "listening")
+  t.after(() => new Promise((done) => service.close(done)))
+  let endpoint: unknown
+  await startCheckoutLocalUi("C:\\work", {
+    argv: ["opencode", "serve", "--port", String(host.address().port), "--hostname", "127.0.0.1"],
+    env: { OPENCODE_PASSWORD: "wrong-password" },
+    discover: async () => ({
+      url: `http://127.0.0.1:${service.address().port}`,
+      auth: { type: "basic", username: "opencode", password: "service-password" },
+    }) as never,
+    load: async () => ({ ensureLocalUi: async (options) => {
+      endpoint = options.hostEndpoint
+      return "running"
+    } }),
+  })
+  assert.deepEqual(endpoint, {
+    url: `http://127.0.0.1:${service.address().port}`,
+    auth: { type: "basic", username: "opencode", password: "service-password" },
   })
 })

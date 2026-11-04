@@ -24,6 +24,7 @@
     "prepack": "npm run build",
     "verify-package": "node scripts/verify-package.mjs",
     "local-ui": "node src/local-ui.mjs",
+    "report:cached": "node dist/telemetry/report-cache.js",
     "test": "node --test test/*.test.ts test/*.test.mjs test/integration/*.test.ts test/telemetry/*.test.ts",
     "typecheck": "tsc --noEmit"
   },

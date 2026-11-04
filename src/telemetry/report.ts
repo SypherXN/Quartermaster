@@ -1,3 +1,4 @@
+import { setImmediate as yieldToHost } from "node:timers/promises"
 import type { ModelRef, TokenBudgetConfig, TokenRateConfig } from "../config.ts"
 import { evaluateTokenBudgets, type TokenBudgetReading } from "./budgets.ts"
 import { estimateTokenCosts } from "./costs.ts"
@@ -1411,7 +1412,11 @@ export async function buildQuartermasterReport(
     dimensions.set(key, item)
     return item
   }
+  let processed = 0
+  // ponytail: retained rows still occupy O(n) memory for session joins/sorting;
+  // use streaming accumulators if the 90-day working set becomes too large.
   for (const record of tokens) {
+    if (++processed % 1_000 === 0) await yieldToHost()
     const value = tokenValue(record)
     if (value === undefined || !Number.isSafeInteger(observedTokens + value)) unknownTokenRecords += 1
     else observedTokens += value

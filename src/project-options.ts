@@ -88,7 +88,7 @@ const authCandidates = (listen: ProcessListen, discovered?: ServerEndpoint) => {
     if (auths.some((item) => sameAuth(item, auth))) return
     auths.push(auth)
   }
-  for (const password of [listen.env.OPENCODE_SERVER_PASSWORD, listen.env.OPENCODE_PASSWORD]) {
+  for (const password of [listen.env.OPENCODE_PASSWORD, listen.env.OPENCODE_SERVER_PASSWORD]) {
     if (password) push(basicAuth("opencode", password))
   }
   if (discovered?.auth) push(discovered.auth)

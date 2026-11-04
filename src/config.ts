@@ -412,8 +412,8 @@ export function parseConfig(input: unknown = {}): QuartermasterConfig {
   const providerCooldownMs = duration(options.providerCooldownMs, "providerCooldownMs", DEFAULTS.providerCooldownMs)
   const modules = options.modules === undefined ? undefined : modulesFrom(options.modules, providerCooldownMs)
   for (const [provider, source] of Object.entries(usageSources)) {
-    if (!["go", "codex", "cursor"].includes(source)) {
-      throw new Error(`usageSources.${provider}: expected one of go, codex, cursor`)
+    if (!["go", "codex", "cursor", "claude-agent"].includes(source)) {
+      throw new Error(`usageSources.${provider}: expected one of go, codex, cursor, claude-agent`)
     }
   }
   const exemptModels = options.quotaExemptModels === undefined ? [] : quotaExemptModels(options.quotaExemptModels)

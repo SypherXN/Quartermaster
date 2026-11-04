@@ -45,3 +45,18 @@ test("UI rediscovers host address and authentication without restarting", async 
   current = { ...second, url: "https://example.com" }
   assert.equal((await report()).status, 502)
 })
+
+test("UI exposes upstream HTTP status without response bodies or credentials", async (t) => {
+  const host = createServer((_req, res) => {
+    res.writeHead(401).end("private response must not escape")
+  })
+  const url = await listen(host)
+  t.after(() => new Promise((done) => host.close(done)))
+  const ui = createLocalUiServer({ projectDirectory: process.cwd(), port: 0,
+    resolveEndpoint: async () => ({ url }) })
+  const origin = await listen(ui)
+  t.after(() => new Promise((done) => ui.close(done)))
+  const response = await fetch(`${origin}/api/options`, { headers: { origin, "sec-fetch-site": "same-origin" } })
+  assert.equal(response.status, 409)
+  assert.deepEqual(await response.json(), { error: "OpenCode /api/location returned HTTP 401 (no credentials supplied)" })
+})

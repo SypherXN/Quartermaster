@@ -10,6 +10,10 @@ import { TokenLedger } from "../../src/telemetry/ledger.ts"
 import { buildQuartermasterReport } from "../../src/telemetry/report.ts"
 import { sessionKey } from "../../src/telemetry/session-key.ts"
 import type { TokenTelemetryRecord } from "../../src/telemetry/types.ts"
+import { cachedReport, writeReportCache } from "../../src/telemetry/report-cache.ts"
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises"
+import { join } from "node:path"
+import { spawnSync } from "node:child_process"
 
 class MemoryStorage implements StorageDomain {
   values = new Map<string, Schema.Json>()
@@ -36,6 +40,39 @@ function token(id: string, projectID: string, providerID: string | null, modelID
 }
 
 const retry = (status: number) => ({ sessionID: "session", model: { providerID: "provider-a", id: "model-a" }, error: { status }, attempt: 1 })
+
+test("reports include over 10000 retained rows, yield between pages, and export only safe aggregates", async () => {
+  const storage = new MemoryStorage()
+  for (let i = 0; i < 10_005; i++) {
+    const row = token(`bulk-${i}`, "project-a", "p", "m", 1, 900)
+    storage.values.set(`quartermaster:telemetry:v1:${row.hostEventID}`, row as unknown as Schema.Json)
+  }
+  let yielded = false
+  setImmediate(() => { yielded = true })
+  const ledger = new TokenLedger(storage, { now: () => 1000 })
+  assert.equal((await ledger.list({ projectID: "project-a", limit: 2 })).length, 2)
+  const page = await buildQuartermasterReport({ projectID: "project-a", tokenLedger: ledger,
+    errorLedger: { list: async () => [] }, attributionLedger: { list: async () => [] },
+    budgets: undefined, tokenRates: undefined, now: () => 1000 }, { limit: 100, offset: 0 }, false)
+  assert.equal(yielded, true)
+  assert.equal(page.totals.records, 10_005)
+  assert.equal(page.totals.observedTokens, 60_030)
+  assert.equal(page.costs.unpricedTokenPercentage, 100)
+  const safe = cachedReport(page)
+  assert.equal(JSON.stringify(safe).includes("session-bulk"), false)
+  assert.equal(JSON.stringify(safe).includes("hostMessageID"), false)
+  await mkdir("artifacts", { recursive: true })
+  const directory = await mkdtemp(join("artifacts", "report-cache-test-"))
+  try {
+    const file = join(directory, "report.json")
+    await writeReportCache(file, page)
+    assert.deepEqual(JSON.parse(await readFile(file, "utf8")), safe)
+    await writeReportCache(file, page) // atomic replacement works on Windows too
+    const offline = spawnSync(process.execPath, ["src/telemetry/report-cache.ts", file], { encoding: "utf8" })
+    assert.equal(offline.status, 0, offline.stderr)
+    assert.deepEqual(JSON.parse(offline.stdout), safe)
+  } finally { await rm(directory, { recursive: true, force: true }) }
+})
 
 test("report is project-scoped, bounded, unknown-aware, and rereads ledgers", async () => {
   const storage = new MemoryStorage()
@@ -74,9 +111,11 @@ test("report is project-scoped, bounded, unknown-aware, and rereads ledgers", as
   assert.deepEqual(page.costs, {
     status: "estimated-not-billed", basis: "input-output-cache-per-million", complete: false,
     pricedRecords: 2, pricedTokens: 24, unpricedRecords: 1, unpricedTokens: 0, unknownTokenRecords: 1,
+    unpricedTokenPercentage: 0,
     cacheUnpricedRecords: 0, hostReported: { currency: "USD", amount: null, records: 0, missingRecords: 3 },
     currencies: [{
       currency: "USD", estimatedAmount: 0.000022, pricedRecords: 2, pricedTokens: 24, source: "config",
+      estimatedCacheReadSavings: 0, cacheSavingsRecords: 0,
       rates: [{ providerID: "provider-a", modelID: "model-a", inputPerMillion: 0.5, outputPerMillion: 1.5, currency: "USD", source: "test fixture", asOf: 800 }],
     }],
   })
