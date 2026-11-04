@@ -47,8 +47,11 @@ export interface TokenRollup {
 
 // One all-time combination for a project. Same counters as a daily slice, no
 // day: a step past the raw window has no time identity left to filter on.
+// The session ids survive the fold so a retired session can still be listed.
 export interface TokenLifetime extends TokenRollupSlice {
   projectID: string | null
+  hostSessionID: string | null
+  parentSessionID: string | null
 }
 
 const sliceIdentity = (item: Pick<TokenRollupSlice, "agentID" | "providerID" | "modelID" | "variant">) =>
@@ -56,8 +59,14 @@ const sliceIdentity = (item: Pick<TokenRollupSlice, "agentID" | "providerID" | "
 
 const lifetimeKey = (
   projectID: string | null,
-  item: Pick<TokenRollupSlice, "agentID" | "providerID" | "modelID" | "variant">,
-) => `${LIFETIME_PREFIX}${encodeURIComponent(JSON.stringify([projectID, ...sliceIdentity(item)]))}`
+  item: Pick<TokenRollupSlice, "agentID" | "providerID" | "modelID" | "variant"> &
+    Partial<Pick<TokenLifetime, "hostSessionID" | "parentSessionID">>,
+) => `${LIFETIME_PREFIX}${encodeURIComponent(JSON.stringify([
+  projectID,
+  ...sliceIdentity(item),
+  item.hostSessionID ?? null,
+  item.parentSessionID ?? null,
+]))}`
 
 // A raw step names its agent hostAgentID; a stored slice names it agentID.
 const identityOf = (record: TokenTelemetryRecord) => ({
@@ -131,9 +140,16 @@ function asLifetime(value: unknown): TokenLifetime | undefined {
   if (typeof value !== "object" || value === null) return undefined
   const projectID = (value as { projectID?: unknown }).projectID
   if (projectID !== null && (typeof projectID !== "string" || !projectID)) return undefined
+  const session = value as { hostSessionID?: unknown; parentSessionID?: unknown }
+  if (!nullableName(session.hostSessionID) || !nullableName(session.parentSessionID)) return undefined
   const slice = asSlice(value)
   if (!slice) return undefined
-  return { projectID: projectID as string | null, ...slice }
+  return {
+    projectID: projectID as string | null,
+    hostSessionID: (session.hostSessionID as string | null | undefined) ?? null,
+    parentSessionID: (session.parentSessionID as string | null | undefined) ?? null,
+    ...slice,
+  }
 }
 
 function emptySlice(record: TokenTelemetryRecord): TokenRollupSlice {
@@ -389,14 +405,78 @@ export class TokenLedger {
     })
   }
 
+  // Destructive maintenance: drop every row for one project. Used when a host
+  // directory is not real usage at all (the reviewer's isolation sandbox).
+  async removeProject(projectID: string) {
+    return this.serialize(async () => {
+      const removed = { records: 0, lifetime: 0, rollups: 0, observedTokens: 0 }
+      for (const { key, value } of await scanAll(this.storage)) {
+        const record = asRecord(value)
+        if (!record || record.hostProjectID !== projectID) continue
+        removed.records += 1
+        removed.observedTokens += knownTokenTotal(record) ?? 0
+        await this.storage.remove(key)
+      }
+      for (const { key, value } of await scanAll(this.storage, LIFETIME_PREFIX)) {
+        const row = asLifetime(value)
+        if (!row || row.projectID !== projectID) continue
+        removed.lifetime += 1
+        removed.observedTokens += row.observedTokens
+        await this.storage.remove(key)
+      }
+      for (const { key, value } of await scanAll(this.storage, ROLLUP_PREFIX)) {
+        const rollup = asRollup(value)
+        if (!rollup || rollup.projectID !== projectID) continue
+        removed.rollups += 1
+        removed.observedTokens += rollup.observedTokens
+        await this.storage.remove(key)
+      }
+      return removed
+    })
+  }
+
+  // Destructive maintenance: drop every row whose project the host no longer
+  // registers, plus rows that never got one. Nothing can name those projects, so
+  // they can only ever render as hash ids or Unattributed.
+  async removeUnlisted(known: readonly string[]) {
+    return this.serialize(async () => {
+      const keep = new Set(known)
+      const unbound = (projectID: string | null) => projectID === null || !keep.has(projectID)
+      const removed = { records: 0, lifetime: 0, rollups: 0, observedTokens: 0 }
+      for (const { key, value } of await scanAll(this.storage)) {
+        const record = asRecord(value)
+        if (!record || !unbound(record.hostProjectID)) continue
+        removed.records += 1
+        removed.observedTokens += knownTokenTotal(record) ?? 0
+        await this.storage.remove(key)
+      }
+      for (const { key, value } of await scanAll(this.storage, LIFETIME_PREFIX)) {
+        const row = asLifetime(value)
+        if (!row || !unbound(row.projectID)) continue
+        removed.lifetime += 1
+        removed.observedTokens += row.observedTokens
+        await this.storage.remove(key)
+      }
+      for (const { key, value } of await scanAll(this.storage, ROLLUP_PREFIX)) {
+        const rollup = asRollup(value)
+        if (!rollup || !unbound(rollup.projectID)) continue
+        removed.rollups += 1
+        removed.observedTokens += rollup.observedTokens
+        await this.storage.remove(key)
+      }
+      return removed
+    })
+  }
+
   private serialize<T>(operation: () => Promise<T>): Promise<T> {
     const task = this.pending.catch(() => {}).then(operation)
     this.pending = task.then(() => {}, () => {})
     return task
   }
 
-  // One row per agent, provider, model, and variant, all-time. A step that
-  // leaves the raw window lands here; it is never written twice.
+  // One row per session, agent, provider, model, and variant, all-time. A step
+  // that leaves the raw window lands here; it is never written twice, and the
+  // session id is kept so the sessions ledger can still name it.
   private async foldLifetime(records: readonly TokenTelemetryRecord[]): Promise<void> {
     if (!records.length) return
     const existing = new Map((await scanAll(this.storage, LIFETIME_PREFIX))
@@ -404,8 +484,12 @@ export class TokenLedger {
       .filter((row): row is TokenLifetime => row !== undefined)
       .map((row) => [lifetimeKey(row.projectID, row), row] as const))
     for (const record of records) {
-      const key = lifetimeKey(record.hostProjectID, identityOf(record))
-      const row = existing.get(key) ?? { projectID: record.hostProjectID, ...emptySlice(record) }
+      const session = {
+        hostSessionID: record.hostSessionID.length > 0 ? record.hostSessionID : null,
+        parentSessionID: record.parentSessionID,
+      }
+      const key = lifetimeKey(record.hostProjectID, { ...identityOf(record), ...session })
+      const row = existing.get(key) ?? { projectID: record.hostProjectID, ...session, ...emptySlice(record) }
       addToSlice(row, record)
       existing.set(key, row)
     }

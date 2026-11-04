@@ -58,6 +58,30 @@ function record(hostEventID: string, projectID: string | null, completedAt = 2_0
   }
 }
 
+test("removes every row for one project", async () => {
+  const storage = new MemoryStorage()
+  const ledger = new TokenLedger(storage)
+  await ledger.ingest(record("a", "project-a"))
+  await ledger.ingest(record("b", "project-b"))
+
+  const removed = await ledger.removeProject("project-a")
+  assert.equal(removed.records, 1)
+  assert.deepEqual((await ledger.list({ projectID: "project-b" })).map((row) => row.hostEventID), ["b"])
+  assert.deepEqual(await ledger.list({ projectID: "project-a" }), [])
+})
+
+test("removes rows whose project the host no longer lists", async () => {
+  const storage = new MemoryStorage()
+  const ledger = new TokenLedger(storage)
+  await ledger.ingest(record("kept", "project-a"))
+  await ledger.ingest(record("gone", "project-gone"))
+  await ledger.ingest(record("none", null))
+
+  const removed = await ledger.removeUnlisted(["project-a"])
+  assert.equal(removed.records, 2)
+  assert.deepEqual((await ledger.list({})).map((row) => row.hostEventID), ["kept"])
+})
+
 test("removes unattributed rows and keeps attributed ones", async () => {
   const storage = new MemoryStorage()
   const ledger = new TokenLedger(storage)
@@ -152,6 +176,25 @@ test("an expired row and a fresh row with the same combination share one lifetim
   // Re-pruning the same rows does not add them twice.
   await ledger.list({ projectID: "project-a" })
   assert.equal((await ledger.listLifetime({ projectID: "project-a" }))[0].records, 2)
+})
+
+test("folds expired rows per session and keeps the session ids", async () => {
+  const storage = new MemoryStorage()
+  let now = 2_000_000_000_000
+  const ledger = new TokenLedger(storage, { now: () => now, retentionMs: 100 })
+  await ledger.ingest({ ...record("old-root", "project-a", now - 300), hostSessionID: "session-root" })
+  now += 86_400_000
+  await ledger.ingest({
+    ...record("old-child", "project-a", now - 200),
+    hostSessionID: "session-child",
+    parentSessionID: "session-root",
+  })
+  await ledger.ingest(record("held", "project-a", now - 1))
+
+  const lifetime = await ledger.listLifetime({ projectID: "project-a" })
+  assert.equal(lifetime.length, 2)
+  assert.equal(lifetime.find((row) => row.hostSessionID === "session-root")?.records, 1)
+  assert.equal(lifetime.find((row) => row.hostSessionID === "session-child")?.parentSessionID, "session-root")
 })
 
 test("host pruning scans once per day and keeps pending expiry in totals", async () => {

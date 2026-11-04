@@ -68,11 +68,17 @@ export const QUARTERMASTER_RPC = Rpc.define({
         limit: { type: "integer", minimum: 1, maximum: REPORT_MAX_PAGE_SIZE },
         offset: { type: "integer", minimum: 0, maximum: REPORT_MAX_OFFSET },
         refresh: { type: "boolean" },
+        projects: {
+          type: "array",
+          items: object({ id: string, name: string, bucket: string, fallback: { type: "boolean" }, exclude: { type: "boolean" } }, ["id"]),
+        },
       }),
       output,
       errors: { invalid_input: errors.invalid_input },
     },
     pruneUnattributed: { input: object({ confirm: string, projectID: string }, ["confirm"]), output, errors },
+    pruneProject: { input: object({ confirm: string, projectID: string }, ["confirm", "projectID"]), output, errors },
+    pruneUnlisted: { input: object({ confirm: string, projects: { type: "array", items: string } }, ["confirm", "projects"]), output, errors },
     readOptions: { input: object({}), output, errors },
     applyOptions: {
       input: object({ options: { type: "object", additionalProperties: true }, revision: { type: "number" } }, ["options", "revision"]),
@@ -532,7 +538,7 @@ export async function registerQuartermasterRpc(
     async report(input, call) {
       if (!isRecord(input)) throw call.error("invalid_input", "Invalid report request.", { path: "request", message: "expected an object" })
       for (const key of Object.keys(input)) {
-        if (!["projectID", "since", "until", "limit", "offset", "refresh"].includes(key)) {
+        if (!["projectID", "since", "until", "limit", "offset", "refresh", "projects"].includes(key)) {
           throw call.error("invalid_input", "Unknown report field.", { path: key, message: "unknown field" })
         }
       }
@@ -570,6 +576,29 @@ export async function registerQuartermasterRpc(
         reasonCode: "cross-project-authorization-unavailable",
         reason: "Reports are limited to the active project; cross-project authorization is not available.",
       }
+      // The host's project list lives outside the plugin, so the caller hands over
+      // the names, merged buckets and exclusions it read from /api/project.
+      const names = new Map<string, string>()
+      const merge = new Map<string, string>()
+      const exclude = new Set<string>()
+      const known = new Set<string>()
+      let fallback: { id: string; name: string } | null = null
+      if (input.projects !== undefined) {
+        if (!Array.isArray(input.projects) || input.projects.length > 50_000) {
+          throw call.error("invalid_input", "Invalid project list.", { path: "projects", message: "expected an array of at most 50000 entries" })
+        }
+        for (const entry of input.projects) {
+          if (!isRecord(entry) || typeof entry.id !== "string" || !entry.id.trim()) {
+            throw call.error("invalid_input", "Invalid project entry.", { path: "projects", message: "expected {id, name, bucket, fallback, exclude}" })
+          }
+          known.add(entry.id)
+          if (typeof entry.name === "string" && entry.name.trim()) names.set(entry.id, entry.name.trim())
+          if (typeof entry.bucket === "string" && entry.bucket.trim()) merge.set(entry.id, entry.bucket.trim())
+          if (entry.exclude === true) exclude.add(entry.id)
+          // The caller marks one entry as the row for ids the host no longer lists.
+          if (entry.fallback === true) fallback = { id: entry.id, name: typeof entry.name === "string" && entry.name.trim() ? entry.name.trim() : "Unlisted projects" }
+        }
+      }
       const query: ReportQuery = {
         ...(input.since === undefined ? {} : { since: input.since as number }),
         ...(input.until === undefined ? {} : { until: input.until as number }),
@@ -580,7 +609,7 @@ export async function registerQuartermasterRpc(
         ...reporting,
         plans: reporting.plans ?? config.plans,
         catalog: reporting.catalog ?? (() => readCatalogSnapshot(() => ctx.model.list())),
-      }, query, input.refresh === true)
+      }, query, input.refresh === true, { names, merge, exclude, known, fallback })
       // Opt-in only; ranged/paged requests must not replace the all-time snapshot.
       if (process.env.QUARTERMASTER_REPORT_CACHE && query.since === undefined && query.until === undefined && offset === 0) {
         try { await writeReportCache(process.env.QUARTERMASTER_REPORT_CACHE, report) }
@@ -604,6 +633,31 @@ export async function registerQuartermasterRpc(
         ? await reporting.compactionLedger.removeUnattributed(
             typeof input.projectID === "string" ? { projectID: input.projectID } : {})
         : { compactions: 0, compactionTokens: 0 }
+      return { apiVersion: QUARTERMASTER_API_VERSION, status: "ok", ...removed, ...compactions }
+    },
+    async pruneProject(input, call) {
+      if (!isRecord(input) || input.confirm !== "delete-project") {
+        throw call.error("invalid_input", "Confirmation required.", { path: "confirm", message: "expected delete-project" })
+      }
+      if (typeof input.projectID !== "string" || !input.projectID.trim()) {
+        throw call.error("invalid_input", "Invalid projectID.", { path: "projectID", message: "expected a non-empty project ID" })
+      }
+      if (!reporting) throw call.error("unavailable", "Quartermaster reporting is not configured.", { reason: "telemetry-unavailable" })
+      const removed = await reporting.tokenLedger.removeProject(input.projectID)
+      return { apiVersion: QUARTERMASTER_API_VERSION, status: "ok", ...removed }
+    },
+    async pruneUnlisted(input, call) {
+      if (!isRecord(input) || input.confirm !== "delete-unlisted") {
+        throw call.error("invalid_input", "Confirmation required.", { path: "confirm", message: "expected delete-unlisted" })
+      }
+      if (!Array.isArray(input.projects) || input.projects.length > 50_000 ||
+        input.projects.some((id) => typeof id !== "string" || !id.trim())) {
+        throw call.error("invalid_input", "Invalid project list.", { path: "projects", message: "expected an array of project ids" })
+      }
+      if (!reporting) throw call.error("unavailable", "Quartermaster reporting is not configured.", { reason: "telemetry-unavailable" })
+      const known = input.projects as string[]
+      const removed = await reporting.tokenLedger.removeUnlisted(known)
+      const compactions = reporting.compactionLedger ? await reporting.compactionLedger.removeUnlisted(known) : {}
       return { apiVersion: QUARTERMASTER_API_VERSION, status: "ok", ...removed, ...compactions }
     },
     async readOptions(_input, call) {

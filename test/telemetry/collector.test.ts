@@ -114,6 +114,23 @@ test("collector falls back to the assistant message's own model when the step st
   assert.equal(record.variant, "high")
 })
 
+test("collector binds a step to this instance's project when the host has none", async () => {
+  const storage = new MemoryStorage()
+  await consumeTokenEvents({
+    event: {} as never,
+    storage,
+    session: {
+      get: async () => { throw new Error("session not found") },
+      context: async () => [] as never,
+    },
+  }, new TokenLedger(storage), events(), new AbortController().signal,
+    undefined, undefined, undefined, undefined, "project-instance")
+
+  const [record] = await new TokenLedger(storage).list({ projectID: "project-instance" })
+  assert.equal(record.hostProjectID, "project-instance")
+  assert.deepEqual(await new TokenLedger(storage).list({ projectID: null }), [])
+})
+
 test("agent switches and child-session steps match only their exact message IDs", async () => {
   const storage = new MemoryStorage()
   const steps = [

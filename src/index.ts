@@ -237,7 +237,7 @@ export default Plugin.define({
             await readBudgetPricing(config.tokenRates ?? [], ctx),
           )
           if (changed) await routing?.refreshBudgets()
-        }, compactionLedger, windowLedger)
+        }, compactionLedger, windowLedger, projectID)
         let errorCollector
         try {
           errorCollector = typeof ctx.session?.hook === "function"

@@ -6,6 +6,7 @@ import { applyDiscoveredQuartermasterOptions, readProjectQuartermasterOptions } 
 import { spawn, spawnSync } from "node:child_process"
 import { createServer } from "node:http"
 import { connect as connectPort, isIP } from "node:net"
+import { tmpdir } from "node:os"
 import { basename, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -15,6 +16,40 @@ const maxResponseBytes = 2_000_000
 // The report publishes sha256(sessionID).slice(0, 12) instead of raw ids; hash
 // host ids the same way so a title can be joined without exposing the id.
 const sessionKey = (sessionID) => createHash("sha256").update(sessionID).digest("hex").slice(0, 12)
+// Chat directories are registered as projects of their own, and the permission
+// reviewer's sandboxes (qm-managed-*, qm-isolation-*, opencode-reviewer-*) are not
+// real usage. Both are recognised by directory, which only the host's project list
+// exposes.
+const chatBucket = "openchamber-chats"
+const slash = (value) => value.replace(/[\\/]+/g, "/").replace(/\/+$/, "").toLowerCase()
+async function projectView(upstream, upstreamJSON) {
+  const listed = await upstreamJSON(new URL("/api/project", upstream))
+  const rows = Array.isArray(listed) ? listed : Array.isArray(listed?.data) ? listed.data : []
+  const tempRoot = slash(tmpdir())
+  const entries = []
+  for (const row of rows) {
+    if (!row || typeof row.id !== "string" || !row.id) continue
+    const canonical = typeof row.canonical === "string" ? row.canonical : ""
+    const path = slash(canonical)
+    if (/(^|\/)permission-reviewer-isolation(\/|$)/i.test(path)) { entries.push({ id: row.id, exclude: true }); continue }
+    // A directory under the OS temp root is a disposable sandbox, not a project.
+    if (path === tempRoot || path.startsWith(`${tempRoot}/`)) { entries.push({ id: row.id, exclude: true }); continue }
+    if (/\/openchamber\/chats\//i.test(path)) { entries.push({ id: row.id, bucket: chatBucket }); continue }
+    const name = canonical.split(/[\\/]/).filter(Boolean).pop()
+    entries.push(name ? { id: row.id, name } : { id: row.id })
+  }
+  entries.push({ id: chatBucket, name: "OpenChamber chats" })
+  // Every project the host no longer lists keeps its history under an id nothing
+  // can name (deleted checkouts, retired chat directories); one row beats thousands.
+  entries.push({ id: "unlisted-projects", name: "Unlisted projects", fallback: true })
+  return entries
+}
+
+// The ids that survive the view: everything the host registers that is not a
+// sandbox, plus the buckets the page shows.
+function retainedProjects(entries) {
+  return entries.filter((entry) => entry.exclude !== true && entry.fallback !== true).map((entry) => entry.id)
+}
 
 function optionsBody(loaded) {
   return {
@@ -231,14 +266,29 @@ export function createLocalUiServer({ openCodeURL, token, resolveEndpoint, proje
       }
       return
     }
+    // Destructive tidy-up: drop ledger rows for disposable sandboxes and for
+    // projects the host no longer lists. The page already hides them; this is the
+    // storage half, and it is only run when asked.
+    if (req.method === "POST" && req.url === "/api/prune-unlisted") {
+      try {
+        const entries = await projectView(upstream, upstreamJSON)
+        const result = await rpc("pruneUnlisted", { confirm: "delete-unlisted", projects: retainedProjects(entries) })
+        return send(res, 200, { ok: true, ...result })
+      } catch (error) {
+        return send(res, 502, { error: error instanceof Error ? error.message : "prune failed" })
+      }
+    }
     if (req.method === "GET" && (req.url === "/api/dashboard" || req.url?.startsWith("/api/dashboard?"))) {
       const since = Number(new URL(req.url ?? "/", "http://127.0.0.1").searchParams.get("since"))
       const range = Number.isSafeInteger(since) && since > 0 ? { since } : {}
       try {
         const projectID = await projectIDForDirectory()
+        // The plugin cannot see the host's project list, so the view is built here:
+        // chat directories fold into one row, the reviewer's isolation sandbox is left out.
+        const projects = await projectView(upstream, upstreamJSON).catch(() => [])
         const [plans, reportResult] = await Promise.all([
           rpc("status", {}).catch(() => null),
-          rpc("report", { limit: 50, offset: 0, ...range }).catch(() => null),
+          rpc("report", { limit: 50, offset: 0, ...range, projects }).catch(() => null),
         ])
         if (plans?.apiVersion !== 1 || !plans.plans || !plans.agents || !plans.workTypes)
           return send(res, 502, { error: "Quartermaster status unavailable" })
@@ -267,7 +317,7 @@ export function createLocalUiServer({ openCodeURL, token, resolveEndpoint, proje
             ...(source.nextAvailableAt === undefined ? {} : { nextAvailableAt: source.nextAvailableAt }), windows }
         })
         const report = reportResult?.apiVersion === 1 && reportResult.status === "ok" &&
-          reportResult.projectID === projectID && reportResult.totals && reportResult.costs ? reportResult : null
+          reportResult.totals && reportResult.costs ? reportResult : null
         // Titles live on the host, not in the ledger; attach them so the sessions
         // table can name a row instead of showing only an id prefix.
         if (report?.sessions?.items?.length) {

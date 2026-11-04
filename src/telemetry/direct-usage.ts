@@ -317,7 +317,7 @@ export class DirectUsageLedger {
     return write
   }
 
-  async list(projectID: string): Promise<DirectUsageRecord[]> {
+  async list(projectID?: string): Promise<DirectUsageRecord[]> {
     await this.serialize(() => this.prune())
     const entries = await this.scan()
     // Keep pending expiry visible until it is folded, so All never loses usage.
@@ -325,18 +325,18 @@ export class DirectUsageLedger {
       .map((entry) => ({ entry, record: asRecord(entry.value) }))
       .filter(({ entry, record }) => record !== undefined && entry.key === keyFor(record))
       .map(({ record }) => record!)
-      .filter((record) => record.projectID === projectID)
+      .filter((record) => projectID === undefined || record.projectID === projectID)
       .sort((a, b) => a.reportedAt - b.reportedAt || a.usageID.localeCompare(b.usageID))
   }
 
   // Legacy daily rollups, written before lifetime rows existed. Never written now.
-  async listRollups(projectID: string): Promise<DirectUsageRollup[]> {
+  async listRollups(projectID?: string): Promise<DirectUsageRollup[]> {
     return this.serialize(() => this.readRollups(projectID))
   }
 
-  async listLifetime(projectID: string): Promise<DirectUsageLifetime[]> {
+  async listLifetime(projectID?: string): Promise<DirectUsageLifetime[]> {
     return this.serialize(async () => (await this.readLifetime())
-      .filter((row) => row.projectID === projectID)
+      .filter((row) => projectID === undefined || row.projectID === projectID)
       .sort((a, b) => a.pluginID.localeCompare(b.pluginID) || a.pluginName.localeCompare(b.pluginName) ||
         a.providerID.localeCompare(b.providerID) || a.modelID.localeCompare(b.modelID) ||
         (a.variant ?? "").localeCompare(b.variant ?? "")))

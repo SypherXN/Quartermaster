@@ -15,11 +15,12 @@ export function startTokenCollector(
   onRecord?: () => Promise<void>,
   compactionLedger = new CompactionLedger(ctx.storage),
   windowLedger = new WindowLedger(ctx.storage),
+  fallbackProjectID?: string,
 ) {
   const controller = new AbortController()
   const task = (async () => {
     try {
-      await consumeTokenEvents(ctx, ledger, ctx.event.subscribe({ signal: controller.signal }), controller.signal, onRecord, compactionLedger, windowLedger)
+      await consumeTokenEvents(ctx, ledger, ctx.event.subscribe({ signal: controller.signal }), controller.signal, onRecord, compactionLedger, windowLedger, new StepModelClaims(), fallbackProjectID)
     } catch {
       if (!controller.signal.aborted) console.warn("[quartermaster] token event subscription failed")
     }
@@ -41,6 +42,7 @@ export async function consumeTokenEvents(
   compactionLedger?: CompactionLedger,
   windowLedger?: WindowLedger,
   claims = new StepModelClaims(),
+  fallbackProjectID?: string,
 ): Promise<void> {
   try {
     for await (const event of events) {
@@ -48,15 +50,15 @@ export async function consumeTokenEvents(
       claims.observe(event)
       const compaction = projectCompactionEvent(event)
       if (compaction && compactionLedger) {
-        let projectID: string | null = null
+        let compactionProject: string | null = fallbackProjectID ?? null
         try {
-          projectID = (await ctx.session.get({ sessionID: compaction.sessionID })).projectID ?? null
+          compactionProject = (await ctx.session.get({ sessionID: compaction.sessionID })).projectID ?? compactionProject
         } catch {
-          // Keep the compaction call, but leave the project unknown.
+          // Keep the compaction call, but fall back to this instance's project.
         }
         const { sessionID: _sessionID, ...stored } = compaction
         try {
-          await compactionLedger.ingest({ ...stored, projectID })
+          await compactionLedger.ingest({ ...stored, projectID: compactionProject })
         } catch {
           console.warn("[quartermaster] compaction ledger write failed")
         }
@@ -64,12 +66,15 @@ export async function consumeTokenEvents(
       const candidate = projectTokenEvents([event])[0]
       if (!candidate) continue
 
-      let context: { projectID?: string; parentSessionID?: string } | undefined
+      // Every row is bound to a project: when the host has not resolved one for the
+      // session yet, this instance's own project is the correct owner.
+      let context: { projectID?: string; parentSessionID?: string } | undefined =
+        fallbackProjectID === undefined ? undefined : { projectID: fallbackProjectID }
       try {
         const session = await ctx.session.get({ sessionID: candidate.hostSessionID })
-        context = { projectID: session.projectID, parentSessionID: session.parentID }
+        context = { projectID: session.projectID ?? fallbackProjectID, parentSessionID: session.parentID }
       } catch {
-        // Keep the terminal usage record, but leave project attribution unknown.
+        // Keep the terminal usage record under this instance's project.
       }
 
       let agentID: string | undefined

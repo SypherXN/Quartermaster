@@ -150,6 +150,26 @@ export interface WindowUsageSnapshot {
 
 // One root session, with any child sessions rolled in. The id is a short hash so
 // the report never carries a raw session identifier.
+export interface ProjectModelUsage {
+  providerID: string
+  modelID: string
+  records: number
+  observedTokens: number
+}
+
+export interface ProjectUsageDimension {
+  projectID: string | null
+  projectName: string | null
+  records: number
+  observedTokens: number
+  unknownTokenRecords: number
+  sessions: number
+  lastObservedAt: number | null
+  // Top models by observed tokens, so a project row can name what did the work.
+  models: ProjectModelUsage[]
+  modelCount: number
+}
+
 export interface SessionUsageDimension {
   sessionKey: string
   sessions: number
@@ -245,6 +265,11 @@ export interface QuartermasterReport {
     limit: number
     nextOffset: number | null
     items: SessionUsageDimension[]
+  }
+  projects: {
+    complete: false
+    total: number
+    items: ProjectUsageDimension[]
   }
   dimensions: { total: number; offset: number; limit: number; nextOffset: number | null; items: UsageDimension[] }
   pluginAttribution: {
@@ -923,6 +948,7 @@ function summarizeSessions(
   catalog: CatalogSnapshot | undefined,
   windows: readonly WindowRecord[] = [],
   compactions: readonly CompactionRecord[] = [],
+  archived: readonly TokenLifetime[] = [],
 ): QuartermasterReport["sessions"] {
   const windowOf = latestWindows(windows, query)
   const ranged = records.filter((record) => inRange(record.completedAt, query))
@@ -932,6 +958,12 @@ function summarizeSessions(
   const writeSplits = cacheWritesAfterCompaction(records, compactions, included)
   const parentOf = new Map<string, string | null>()
   for (const record of ranged) parentOf.set(record.hostSessionID, record.parentSessionID)
+  // Folded rows keep their session ids, so a retired session resolves to the
+  // same root as its children.
+  for (const row of archived) {
+    if (row.hostSessionID === null || parentOf.has(row.hostSessionID)) continue
+    parentOf.set(row.hostSessionID, row.parentSessionID)
+  }
   const rootOf = (sessionID: string): string => {
     let current = sessionID
     const seen = new Set<string>([current])
@@ -942,6 +974,35 @@ function summarizeSessions(
       current = parent
     }
   }
+
+  const blankUsage = (key: string): SessionUsageDimension => ({
+    sessionKey: key,
+    sessions: 0,
+    messages: 0,
+    records: 0,
+    observedTokens: 0,
+    unknownTokenRecords: 0,
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    reasoning: 0,
+    lastObservedAt: null,
+    lastInputTokens: null,
+    contextLimit: null,
+    contextPercent: null,
+    providerID: null,
+    modelID: null,
+    hostCostUSD: null,
+    hostCostMissing: 0,
+    cacheHitRate: null,
+    cacheWriteAfterCompaction: 0,
+    cacheWriteOther: 0,
+    cacheQualityComplete: false,
+    childTokenShare: null,
+    childHostCostShare: null,
+    window: null,
+  })
 
   const sessions = new Map<string, Set<string>>()
   const messages = new Map<string, Set<string>>()
@@ -962,34 +1023,7 @@ function summarizeSessions(
     ids.add(record.hostMessageID)
     messages.set(root, ids)
 
-    const item = usage.get(root) ?? {
-      sessionKey: sessionKey(root),
-      sessions: 0,
-      messages: 0,
-      records: 0,
-      observedTokens: 0,
-      unknownTokenRecords: 0,
-      input: 0,
-      output: 0,
-      cacheRead: 0,
-      cacheWrite: 0,
-      reasoning: 0,
-      lastObservedAt: null,
-      lastInputTokens: null,
-      contextLimit: null,
-      contextPercent: null,
-      providerID: null,
-      modelID: null,
-      hostCostUSD: null,
-      hostCostMissing: 0,
-      cacheHitRate: null,
-      cacheWriteAfterCompaction: 0,
-      cacheWriteOther: 0,
-      cacheQualityComplete: false,
-      childTokenShare: null,
-      childHostCostShare: null,
-      window: null,
-    }
+    const item = usage.get(root) ?? blankUsage(sessionKey(root))
     item.records += 1
     const value = tokenValue(record)
     if (value === undefined || !Number.isSafeInteger(item.observedTokens + value)) item.unknownTokenRecords += 1
@@ -1036,6 +1070,44 @@ function summarizeSessions(
         ? counts.input + counts.cacheRead
         : null
     }
+    usage.set(root, item)
+  }
+
+  // Folded history keeps no message ids, so one synthetic id per row keeps a
+  // retired session from reading as zero messages.
+  for (const row of archived) {
+    if (row.hostSessionID === null) continue
+    const root = rootOf(row.hostSessionID)
+    const members = sessions.get(root) ?? new Set<string>()
+    members.add(row.hostSessionID)
+    sessions.set(root, members)
+    const item = usage.get(root) ?? blankUsage(sessionKey(root))
+    item.records += row.records
+    item.observedTokens += row.observedTokens
+    item.unknownTokenRecords += row.unknownTokenRecords
+    item.input += row.input
+    item.output += row.output
+    item.cacheRead += row.cacheRead
+    item.cacheWrite += row.cacheWrite
+    item.reasoning += row.reasoning
+    item.hostCostUSD = (item.hostCostUSD ?? 0) + row.hostCostUSD
+    item.hostCostMissing += row.hostCostMissing
+    if (row.unknownCacheRecords > 0) cacheBroken.add(root)
+    else {
+      cacheReadKnown.set(root, (cacheReadKnown.get(root) ?? 0) + row.cacheRead)
+      cacheWriteKnown.set(root, (cacheWriteKnown.get(root) ?? 0) + row.cacheWrite)
+    }
+    if (row.hostSessionID !== root) {
+      childTokens.set(root, (childTokens.get(root) ?? 0) + row.observedTokens)
+      childHost.set(root, (childHost.get(root) ?? 0) + row.hostCostUSD)
+    }
+    if (item.providerID === null && row.providerID !== null) {
+      item.providerID = row.providerID
+      item.modelID = row.modelID
+    }
+    const ids = messages.get(root) ?? new Set<string>()
+    ids.add(`archived:${row.hostSessionID}:${row.providerID ?? ""}:${row.modelID ?? ""}:${row.variant ?? ""}`)
+    messages.set(root, ids)
     usage.set(root, item)
   }
 
@@ -1310,6 +1382,20 @@ function summarizeDirectUsage(
   }
 }
 
+// The host lists projects with their directories, which is how chat sandboxes and
+// retired directories are recognised; the plugin itself cannot see that list, so
+// the caller supplies the view it built from /api/project.
+export interface ProjectView {
+  names: ReadonlyMap<string, string>
+  /** Project ids folded into another row, e.g. every chat directory into one bucket. */
+  merge: ReadonlyMap<string, string>
+  exclude: ReadonlySet<string>
+  /** Every id the caller accounted for: named, merged or excluded. */
+  known: ReadonlySet<string>
+  /** Row for ids the host no longer lists; null leaves them as separate rows. */
+  fallback: { id: string; name: string } | null
+}
+
 export async function buildQuartermasterReport(
   deps: {
     projectID: string
@@ -1330,38 +1416,53 @@ export async function buildQuartermasterReport(
   },
   query: ReportQuery,
   refreshed: boolean,
+  view?: ProjectView,
 ): Promise<QuartermasterReport> {
   const now = (deps.now ?? Date.now)()
+  const excluded = (projectID: string | null) => projectID !== null && (view?.exclude.has(projectID) ?? false)
+  const bucketOf = (projectID: string | null) => {
+    if (projectID === null) return null
+    const merged = view?.merge.get(projectID)
+    if (merged !== undefined) return merged
+    // A directory the host no longer registers keeps its history under an id that
+    // nothing can name; group those instead of printing thousands of hash rows.
+    return view?.fallback && !view.known.has(projectID) ? view.fallback.id : projectID
+  }
+  const nameOf = (projectID: string | null) => projectID === null
+    ? null
+    : view?.names.get(projectID) ?? (projectID === view?.fallback?.id ? view.fallback.name : null)
   // History is older than the raw window, so a since/until view leaves it out.
   // Only an unfiltered view is all-time.
   const allTime = query.since === undefined && query.until === undefined
   const [allTokens, allErrors, allClaims, catalog, legacyRollups, legacyLifetime, directUsageRows, allCompaction, allWindows] = await Promise.all([
-    deps.tokenLedger.list({ projectID: deps.projectID }),
+    // Every project: the page reads one ledger across all checkouts, so a fresh
+    // host project id cannot hide the history recorded under an older one.
+    deps.tokenLedger.list({}),
     deps.errorLedger.list({ projectID: deps.projectID, limit: 10_000 }),
     deps.attributionLedger.list(deps.projectID),
     deps.catalog ? deps.catalog() : Promise.resolve(undefined),
-    deps.tokenLedger.listRollups ? deps.tokenLedger.listRollups({ projectID: deps.projectID }) : Promise.resolve([]),
-    deps.tokenLedger.listLifetime ? deps.tokenLedger.listLifetime({ projectID: deps.projectID }) : Promise.resolve([]),
+    deps.tokenLedger.listRollups ? deps.tokenLedger.listRollups({}) : Promise.resolve([]),
+    deps.tokenLedger.listLifetime ? deps.tokenLedger.listLifetime({}) : Promise.resolve([]),
     // list prunes before it returns. History is read after that so a call
     // folded during this build is still in the direct-usage total.
     deps.directUsageLedger
-      ? deps.directUsageLedger.list(deps.projectID).then(async (records) => ({
+      ? deps.directUsageLedger.list().then(async (records) => ({
           records,
-          rollups: await (deps.directUsageLedger?.listRollups?.(deps.projectID) ?? []),
-          lifetime: await (deps.directUsageLedger?.listLifetime?.(deps.projectID) ?? []),
+          rollups: await (deps.directUsageLedger?.listRollups?.() ?? []),
+          lifetime: await (deps.directUsageLedger?.listLifetime?.() ?? []),
         }))
       : Promise.resolve({
           records: [] as DirectUsageRecord[],
           rollups: [] as DirectUsageRollup[],
           lifetime: [] as DirectUsageLifetime[],
         }),
-    deps.compactionLedger ? deps.compactionLedger.list(deps.projectID) : Promise.resolve([]),
+    deps.compactionLedger ? deps.compactionLedger.list() : Promise.resolve([]),
     deps.windowLedger ? deps.windowLedger.list(deps.projectID) : Promise.resolve([]),
   ])
   const prices = catalog?.prices
   // A lifetime row is one combination. Presenting it as a day rollup with a
   // single slice lets every existing fold treat both history shapes alike.
-  const rollups: TokenRollup[] = allTime ? [
+  const rollups: TokenRollup[] = (allTime ? [
     ...legacyRollups,
     ...legacyLifetime.map((row: TokenLifetime) => ({
       projectID: row.projectID,
@@ -1371,7 +1472,7 @@ export async function buildQuartermasterReport(
       unknownTokenRecords: row.unknownTokenRecords,
       slices: [row],
     })),
-  ] : []
+  ] : []).filter((rollup) => !excluded(rollup.projectID))
   const directRollups: DirectUsageRollup[] = allTime ? [
     ...directUsageRows.rollups,
     ...directUsageRows.lifetime.map((row: DirectUsageLifetime) => ({
@@ -1392,10 +1493,10 @@ export async function buildQuartermasterReport(
   const archivedRecords = rollups.reduce((sum, rollup) => sum + rollup.records, 0)
   const archivedTokens = rollups.reduce((sum, rollup) => sum + rollup.observedTokens, 0)
   const archivedUnknown = rollups.reduce((sum, rollup) => sum + rollup.unknownTokenRecords, 0)
-  const tokens = allTokens.filter((record) => inRange(record.completedAt, query))
+  const tokens = allTokens.filter((record) => inRange(record.completedAt, query) && !excluded(record.hostProjectID))
   const errors = allErrors.filter((record) => inRange(record.observedAt, query))
   const direct = directUsageRows.records.filter((record) => inRange(record.reportedAt, query))
-  const compaction = allCompaction.filter((record) => inRange(record.completedAt, query))
+  const compaction = allCompaction.filter((record) => inRange(record.completedAt, query) && !excluded(record.projectID))
   const dimensions = new Map<string, UsageDimension>()
   let observedTokens = 0
   let unknownTokenRecords = 0
@@ -1413,6 +1514,35 @@ export async function buildQuartermasterReport(
     return item
   }
   let processed = 0
+  // Project ids change when the host re-registers a directory, so usage is
+  // grouped per project instead of behind the id that happens to be active.
+  const projectGroups = new Map<string, {
+    projectID: string | null
+    projectName: string | null
+    records: number
+    observedTokens: number
+    unknownTokenRecords: number
+    sessions: Set<string>
+    lastObservedAt: number | null
+    models: Map<string, ProjectModelUsage>
+  }>()
+  const projectOf = (projectID: string | null) => {
+    const id = bucketOf(projectID)
+    const key = id ?? ""
+    const item = projectGroups.get(key) ?? {
+      projectID: id, projectName: nameOf(id), records: 0, observedTokens: 0, unknownTokenRecords: 0, sessions: new Set<string>(), lastObservedAt: null, models: new Map<string, ProjectModelUsage>(),
+    }
+    projectGroups.set(key, item)
+    return item
+  }
+  const projectModel = (item: ReturnType<typeof projectOf>, providerID: string | null, modelID: string | null, records: number, observedTokens: number) => {
+    if (!providerID || !modelID) return
+    const key = `${providerID}/${modelID}`
+    const model = item.models.get(key) ?? { providerID, modelID, records: 0, observedTokens: 0 }
+    model.records += records
+    model.observedTokens += observedTokens
+    item.models.set(key, model)
+  }
   // ponytail: retained rows still occupy O(n) memory for session joins/sorting;
   // use streaming accumulators if the 90-day working set becomes too large.
   for (const record of tokens) {
@@ -1428,6 +1558,13 @@ export async function buildQuartermasterReport(
     if (Number.isSafeInteger(cacheWriteTokens + sub.cacheWrite)) cacheWriteTokens += sub.cacheWrite
     if (Number.isSafeInteger(reasoningTokens + sub.reasoning)) reasoningTokens += sub.reasoning
     if (!knownCache(record)) unknownCacheRecords += 1
+    const projectItem = projectOf(record.hostProjectID)
+    projectItem.records += 1
+    if (value === undefined) projectItem.unknownTokenRecords += 1
+    else projectItem.observedTokens += value
+    projectItem.sessions.add(record.hostSessionID)
+    projectItem.lastObservedAt = Math.max(projectItem.lastObservedAt ?? record.completedAt, record.completedAt)
+    projectModel(projectItem, record.providerID, record.modelID, 1, value ?? 0)
     const targets: Array<[UsageDimension["dimension"], string | null]> = [
       ["provider", record.providerID],
       ["model", record.providerID && record.modelID ? `${record.providerID}/${record.modelID}` : null],
@@ -1462,6 +1599,21 @@ export async function buildQuartermasterReport(
     (latest, record) => Math.max(latest ?? record.completedAt, record.completedAt),
     null,
   )
+  for (const rollup of rollups) {
+    const item = projectOf(rollup.projectID)
+    item.records += rollup.records
+    item.observedTokens += rollup.observedTokens
+    item.unknownTokenRecords += rollup.unknownTokenRecords
+    for (const slice of rollup.slices) projectModel(item, slice.providerID, slice.modelID, slice.records, slice.observedTokens)
+  }
+  const projects = [...projectGroups.values()]
+    .map(({ sessions: seen, models, ...item }) => ({
+      ...item,
+      sessions: seen.size,
+      models: [...models.values()].sort((a, b) => b.observedTokens - a.observedTokens).slice(0, 50),
+      modelCount: models.size,
+    }))
+    .sort((a, b) => b.observedTokens - a.observedTokens)
   return {
     apiVersion: 1,
     status: "ok",
@@ -1487,7 +1639,8 @@ export async function buildQuartermasterReport(
     // Full history, not the page range: an earlier compaction or write still
     // decides which later write is the cache rebuild. The summary counts only
     // steps inside the range.
-    sessions: summarizeSessions(allTokens, query, catalog, allWindows, allCompaction),
+    sessions: summarizeSessions(allTokens, query, catalog, allWindows, allCompaction, allTime ? legacyLifetime : []),
+    projects: { complete: false, total: projects.length, items: projects },
     dimensions: {
       total: items.length,
       offset: query.offset,

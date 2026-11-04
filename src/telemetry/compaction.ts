@@ -151,12 +151,12 @@ export class CompactionLedger {
     return write
   }
 
-  async list(projectID: string): Promise<CompactionRecord[]> {
-    await this.serialize(() => this.prune(projectID))
+  async list(projectID?: string): Promise<CompactionRecord[]> {
+    await this.serialize(() => this.prune(projectID ?? null))
     const cutoff = this.now() - this.retentionMs
     return (await this.scan())
       .map((entry) => asRecord(entry.value))
-      .filter((record): record is CompactionRecord => record !== undefined && record.projectID === projectID && record.completedAt >= cutoff)
+      .filter((record): record is CompactionRecord => record !== undefined && (projectID === undefined || record.projectID === projectID) && record.completedAt >= cutoff)
       .sort((a, b) => a.completedAt - b.completedAt || a.hostEventID.localeCompare(b.hostEventID))
   }
 
@@ -171,6 +171,28 @@ export class CompactionLedger {
       for (const { key, value } of await this.scan()) {
         const record = asRecord(value)
         if (!record || record.providerID !== null || !inScope(record.projectID)) continue
+        keys.push(key)
+        removed.compactions += 1
+        if (record.counts) removed.compactionTokens += record.counts.input + record.counts.output
+      }
+      await Promise.all(keys.map((key) => this.storage.remove(key)))
+      return removed
+    })
+  }
+
+  // Destructive maintenance: drop every compaction row whose project the host no
+  // longer registers, including rows that never got one, and rows with no model to
+  // name the summarizer by.
+  async removeUnlisted(known: readonly string[]) {
+    return this.serialize(async () => {
+      const keep = new Set(known)
+      const unbound = (record: { projectID: string | null; providerID: string | null }) =>
+        record.projectID === null || !keep.has(record.projectID) || record.providerID === null
+      const removed = { compactions: 0, compactionTokens: 0 }
+      const keys: string[] = []
+      for (const { key, value } of await this.scan()) {
+        const record = asRecord(value)
+        if (!record || !unbound(record)) continue
         keys.push(key)
         removed.compactions += 1
         if (record.counts) removed.compactionTokens += record.counts.input + record.counts.output
