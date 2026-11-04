@@ -408,7 +408,7 @@ details.plan[open]>summary{margin-bottom:18px}
 </section>
 <section data-page="usage" hidden class="fade-in" aria-labelledby="usage-heading">
    <div class="page-head"><div><div class="eyebrow"><span class="register-index" aria-hidden="true">02</span>Token usage</div><h1 id="usage-heading">Token usage.</h1><p>Every observed token, by model, session, provider and summarizer.<br>The ledger the routing decisions leave behind.</p></div><span class="badge neutral">Telemetry</span></div>
-  <div class="tab-strip" role="tablist" aria-label="Usage views"><button type="button" class="tab" role="tab" id="tab-models" aria-selected="true" aria-controls="panel-models" tabindex="0"><span class="register-index" aria-hidden="true">01</span>Models</button><button type="button" class="tab" role="tab" id="tab-projects" aria-selected="false" aria-controls="panel-projects" tabindex="-1"><span class="register-index" aria-hidden="true">02</span>Projects</button><button type="button" class="tab" role="tab" id="tab-providers" aria-selected="false" aria-controls="panel-providers" tabindex="-1"><span class="register-index" aria-hidden="true">03</span>Providers</button><button type="button" class="tab" role="tab" id="tab-plugins" aria-selected="false" aria-controls="panel-plugins" tabindex="-1"><span class="register-index" aria-hidden="true">04</span>Plugins</button></div>
+  <div class="tab-strip" role="tablist" aria-label="Usage views"><button type="button" class="tab" role="tab" id="tab-models" aria-selected="true" aria-controls="panel-models" tabindex="0"><span class="register-index" aria-hidden="true">01</span>Models</button><button type="button" class="tab" role="tab" id="tab-projects" aria-selected="false" aria-controls="panel-projects" tabindex="-1"><span class="register-index" aria-hidden="true">02</span>Projects</button><button type="button" class="tab" role="tab" id="tab-agents" aria-selected="false" aria-controls="panel-agents" tabindex="-1"><span class="register-index" aria-hidden="true">03</span>Agents</button><button type="button" class="tab" role="tab" id="tab-providers" aria-selected="false" aria-controls="panel-providers" tabindex="-1"><span class="register-index" aria-hidden="true">04</span>Providers</button><button type="button" class="tab" role="tab" id="tab-plugins" aria-selected="false" aria-controls="panel-plugins" tabindex="-1"><span class="register-index" aria-hidden="true">05</span>Plugins</button></div>
   <div id="range-presets" class="range-bar" role="group" aria-label="Time range"><button type="button" data-range="24h" aria-pressed="false">24h</button><button type="button" data-range="7d" aria-pressed="false">7 days</button><button type="button" data-range="30d" aria-pressed="false">30 days</button><button type="button" data-range="all" aria-pressed="true">All</button><span id="range-active" class="range-active">Range: all history</span></div>
   <div class="tab-panel" id="panel-models" role="tabpanel" aria-labelledby="tab-models" tabindex="0">
   <div id="models-stats" class="stats"></div>
@@ -421,6 +421,12 @@ details.plan[open]>summary{margin-bottom:18px}
   <section class="panel section-gap" aria-labelledby="projects-heading"><div class="panel-head"><div><h2 id="projects-heading">Projects ledger</h2><p>Every host project the ledger has written to</p></div><span class="badge neutral">Telemetry</span></div>
    <div id="projects-table"></div>
    <div class="ledger-actions"><button id="export-usage-csv" type="button">Export usage CSV</button><span class="hint no-margin">Exports the rows shown above. Nothing is sent anywhere.</span></div></section>
+  </div>
+  <div class="tab-panel" id="panel-agents" role="tabpanel" aria-labelledby="tab-agents" tabindex="-1" hidden>
+  <div id="agents-stats" class="stats"></div>
+  <section class="panel section-gap" aria-labelledby="agents-heading"><div class="panel-head"><div><h2 id="agents-heading">Agents ledger</h2><p>Work attributed to each agent by its own assistant messages</p></div><span class="badge neutral">Telemetry</span></div>
+   <div id="agents-table"></div>
+  </section>
   </div>
   <div class="tab-panel" id="panel-providers" role="tabpanel" aria-labelledby="tab-providers" tabindex="-1" hidden>
   <div id="providers-stats" class="stats"></div>
@@ -574,7 +580,7 @@ function paintOverview(){
    const quota=typeof snapshot?.availability?.status==='string'?` Quota source status: ${snapshot.availability.status}.` : ''
   attention.textContent=`${number(totals?.records)} telemetry records · ${number(totals?.unknownTokenRecords)} with unknown token counts · ${number(report.errors?.total)} recorded provider errors.${named?` Classifications: ${named}.`:''}${latest}${quota} These are observations, not complete account usage.`
  }else if(attention&&dashboardData)attention.textContent=`${telemetryIssue()} Routing plans and quota state are shown independently from telemetry.${typeof snapshot.availability?.status==='string'?` Quota source status: ${snapshot.availability.status}.`:''}`
-   paintProjects();paintProviders();paintDirect();paintBudgets();paintModels();paintModelsCompaction();paintPlugins()
+   paintProjects();paintAgents();paintProviders();paintDirect();paintBudgets();paintModels();paintModelsCompaction();paintPlugins()
  }
     // Model rows carry value "provider/model"; agents and plugins are already folded in.
   function modelDimensions(){return (currentReport?.dimensions?.items||[]).filter(item=>item.dimension==='model')}
@@ -803,6 +809,46 @@ function paintProjects(){
  const partial=(Number(currentReport?.archived?.observedTokens)>0?` ${number(currentReport.archived.observedTokens)} archived tokens predate per-project attribution.`:'')
  const foot=all.length>rows.length?`Showing the top ${rows.length} of ${number(all.length)} projects by observed tokens.`:`Showing all ${rows.length} project${rows.length===1?'':'s'}.`
  mount('#projects-table',h('div',{class:'ledger-wrap'},table),h('p',{class:'chart-foot',text:`${foot} Steps the host never named a project for stay under Unattributed; ids it no longer lists are grouped under Unlisted projects.${partial}`}))
+}
+const expandedAgents=new Set()
+function paintAgents(){
+ paintRange()
+ const usage=currentReport?.agentAttribution, all=[...(usage?.dimensions?.items||[])], rows=all.slice(0,50)
+ if(!rows.length){mount('#agents-table',empty(currentReport?'No agents in this range.':'No agent data yet.',currentReport?'Pick a wider range, or refresh once the host has observed work.':'Refresh the workspace or import a report to see agents.'));return}
+ const total=all.reduce((sum,item)=>sum+(known(item.observedTokens)?item.observedTokens:0),0)
+ const label=item=>typeof item.agentID==='string'&&item.agentID?item.agentID:'Unnamed agent'
+ const top=rows[0], topShare=top&&total>0?Math.round((top.observedTokens||0)/total*100):null
+ mount('#agents-stats',
+  stat('Agents',number(all.length),'Distinct agents in the ledger',true),
+  stat('Observed tokens',number(total),`Input + output · ${RANGES[activeRange].label}`),
+  stat('Top agent',top?label(top):'—',topShare===null?'Share unknown':`${topShare}% of observed tokens`))
+ const cols=[['Agent',''],['Sessions','num'],['Steps','num'],['Tokens (observed)','num'],['Models',''],['Last seen','']]
+ const body=rows.flatMap(item=>{
+  const id=typeof item.agentID==='string'&&item.agentID?item.agentID:'unknown'
+  const name=label(item)
+  const models=Array.isArray(item.models)?item.models:[]
+  const open=expandedAgents.has(id)
+  const shareOf=model=>known(item.observedTokens)&&item.observedTokens>0?Math.round((model.observedTokens||0)/item.observedTokens*100):null
+  const first=models[0], firstShare=first?shareOf(first):null
+  const chips=first?`${first.providerID}/${first.modelID}${firstShare===null?'':` ${firstShare}%`}${models.length>1?` +${models.length-1}`:''}`:'—'
+  const toggle=()=>{if(expandedAgents.has(id))expandedAgents.delete(id);else expandedAgents.add(id);paintAgents()}
+  const line=h('tr',{class:'project-row'+(open?' row-open':''),tabindex:'0',role:'button','aria-expanded':String(open),onclick:toggle,onkeydown:event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();toggle()}}},
+   h('td',{class:'mono',title:id},h('span',{class:'caret','aria-hidden':'true',text:open?'▾':'▸'}),h('span',{text:name})),
+   h('td',{class:'num',text:number(item.sessions)}),h('td',{class:'num',text:number(item.records)}),h('td',{class:'num',text:number(item.observedTokens)}),
+   h('td',{class:'mono models-cell',text:chips}),h('td',{text:known(item.lastObservedAt)&&item.lastObservedAt>0?new Date(item.lastObservedAt).toLocaleString():'—'}))
+  if(!open)return [line]
+  const full=models.map(model=>h('tr',{},h('td',{class:'mono',text:`${model.providerID}/${model.modelID}`}),h('td',{class:'num',text:number(model.records)}),h('td',{class:'num',text:number(model.observedTokens)}),h('td',{class:'num',text:shareOf(model)===null?'—':`${shareOf(model)}%`})))
+  const agentShare=total>0&&known(item.observedTokens)?Math.round(item.observedTokens/total*100):null
+  const share=known(item.cacheHitRate)?`${Math.round(item.cacheHitRate*100)}% cached`:null
+  const summary=[`${number(item.sessions)} session${item.sessions===1?'':'s'}`,`${number(item.records)} steps`,`${number(item.observedTokens)} tokens${agentShare===null?'':` · ${agentShare}% of all agents`}`,share,item.unknownTokenRecords?`${number(item.unknownTokenRecords)} steps with unknown tokens`:null,known(item.lastObservedAt)&&item.lastObservedAt>0?`last seen ${new Date(item.lastObservedAt).toLocaleString()}`:null].filter(Boolean).join(' · ')
+  const panel=h('div',{class:'project-detail'},h('p',{class:'hint',text:summary}),
+   models.length?h('table',{class:'ledger'},h('thead',{},h('tr',{},h('th',{scope:'col',text:'Model'}),h('th',{scope:'col',class:'num',text:'Steps'}),h('th',{scope:'col',class:'num',text:'Tokens'}),h('th',{scope:'col',class:'num',text:'Share of agent'}))),h('tbody',{},...full)):empty('No model detail for this agent.','Its tokens predate per-model attribution, so there is nothing truthful to list.'))
+  return [line,h('tr',{class:'project-detail-row'},h('td',{colspan:String(cols.length)},panel))]
+ })
+ const table=h('table',{class:'ledger'},h('caption',{class:'hint',text:'Observed tokens by agent, highest first. An agent is named by the assistant message that spent the tokens, so a session can span several agents. Expand a row for its models.'}),h('thead',{},h('tr',{},...cols.map(([label,cls])=>h('th',{scope:'col',class:cls,text:label})))),h('tbody',{},...body))
+ const unknown=Number(usage?.unknownRecords)||0
+ const foot=all.length>rows.length?`Showing the top ${rows.length} of ${number(all.length)} agents by observed tokens.`:`Showing all ${rows.length} agent${rows.length===1?'':'s'}.`
+ mount('#agents-table',h('div',{class:'ledger-wrap'},table),h('p',{class:'chart-foot',text:`${foot}${unknown?` ${number(unknown)} step${unknown===1?'':'s'} named no agent and are not listed.`:''}`}))
 }
 function csvCell(value){
  if(value===null||value===undefined)return ''
@@ -2339,7 +2385,7 @@ planTabs.forEach((tab,index)=>{if(!tab||typeof tab.addEventListener!=='function'
     selectPlanTab(next)})})
 if(typeof document.querySelectorAll==='function'){{const saved=/[?&]range=([a-z0-9]+)/.exec(window.location.hash)?.[1];if(saved&&Object.hasOwn(RANGES,saved))activeRange=saved}
  addEventListener('hashchange',navigate);navigate();loadPreferences();paintOverview();paintCatalog();paintUsage()}
-const usageViews=['models','projects','providers','plugins']
+const usageViews=['models','projects','agents','providers','plugins']
 function selectUsageView(name){
   for(const view of usageViews){
     const panel=document.getElementById(`panel-${view}`),tab=document.getElementById(`tab-${view}`)

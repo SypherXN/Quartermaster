@@ -117,6 +117,9 @@ export interface AgentUsageDimension {
   hostCostUSD: number | null
   hostCostMissing: number
   cacheHitRate: number | null
+  sessions: number
+  lastObservedAt: number | null
+  models: ProjectModelUsage[]
 }
 
 export interface PlanUsageDimension {
@@ -578,6 +581,21 @@ function summarizePluginUsage(
 
 function summarizeAgentUsage(records: readonly TokenTelemetryRecord[], query: ReportQuery, rollups: readonly TokenRollup[]) {
   const usageByAgent = new Map<string, AgentUsageDimension>()
+  type AgentDetail = { models: Map<string, ProjectModelUsage>; sessions: Set<string>; lastObservedAt: number | null }
+  const details = new Map<string, AgentDetail>()
+  const detailOf = (agentID: string) => {
+    const item = details.get(agentID) ?? { models: new Map<string, ProjectModelUsage>(), sessions: new Set<string>(), lastObservedAt: null }
+    details.set(agentID, item)
+    return item
+  }
+  const addModel = (detail: AgentDetail, providerID: string | null, modelID: string | null, records: number, observedTokens: number) => {
+    if (!providerID || !modelID) return
+    const key = `${providerID}/${modelID}`
+    const model = detail.models.get(key) ?? { providerID, modelID, records: 0, observedTokens: 0 }
+    model.records += records
+    model.observedTokens += observedTokens
+    detail.models.set(key, model)
+  }
   let unknownRecords = 0
   const addAgent = (agentID: string | null, apply: (total: RunningTotal) => void) => {
     if (!agentID) {
@@ -589,11 +607,22 @@ function summarizeAgentUsage(records: readonly TokenTelemetryRecord[], query: Re
       evidence: "exact-assistant-message" as const,
       ...blankTotal(),
       cacheHitRate: null,
+      sessions: 0,
+      lastObservedAt: null,
+      models: [],
     }
     apply(item)
     usageByAgent.set(agentID, item)
   }
-  for (const record of records) addAgent(record.hostAgentID, (total) => absorbRecord(total, record))
+  for (const record of records) {
+    addAgent(record.hostAgentID, (total) => absorbRecord(total, record))
+    if (!record.hostAgentID) continue
+    // Per-agent detail, so an agent row can be expanded the way a project row is.
+    const detail = detailOf(record.hostAgentID)
+    detail.sessions.add(record.hostSessionID)
+    addModel(detail, record.providerID, record.modelID, 1, tokenValue(record) ?? 0)
+    detail.lastObservedAt = detail.lastObservedAt === null ? record.completedAt : Math.max(detail.lastObservedAt, record.completedAt)
+  }
   let prunedRecords = 0
   for (const slice of hostSlices(rollups)) {
     prunedRecords = addNumbers(prunedRecords, slice.records)
@@ -606,11 +635,24 @@ function summarizeAgentUsage(records: readonly TokenTelemetryRecord[], query: Re
       evidence: "exact-assistant-message" as const,
       ...blankTotal(),
       cacheHitRate: null,
+      sessions: 0,
+      lastObservedAt: null,
+      models: [],
     }
     absorbSlice(item, slice)
+    addModel(detailOf(slice.agentID), slice.providerID, slice.modelID, slice.records, slice.observedTokens)
     usageByAgent.set(slice.agentID, item)
   }
-  const all = [...usageByAgent.values()].map((item) => ({ ...item, cacheHitRate: hitRate(item) })).sort((a, b) => a.agentID.localeCompare(b.agentID))
+  const all = [...usageByAgent.values()].map((item) => {
+    const detail = details.get(item.agentID)
+    return {
+      ...item,
+      cacheHitRate: hitRate(item),
+      sessions: detail?.sessions.size ?? 0,
+      lastObservedAt: detail?.lastObservedAt ?? null,
+      models: detail ? [...detail.models.values()].sort((a, b) => b.observedTokens - a.observedTokens).slice(0, 50) : [],
+    }
+  }).sort((a, b) => b.observedTokens - a.observedTokens)
   const page = all.slice(query.offset, query.offset + query.limit)
   return {
     evidence: "exact-assistant-message" as const,
