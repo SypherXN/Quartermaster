@@ -44,11 +44,13 @@ export interface TokenRateConfig {
 
 export interface CategoryPick {
   /**
-   * How the category orders its members at request time. Absent keeps the file's
-   * order. `reset-soonest` drains the window about to expire; `pace` spreads
-   * work so every window lasts until its own reset.
+   * How the category orders its members at request time. `in-order`, and absent,
+   * keep the file's order: with no reordering by quota, models on the same
+   * provider stay in the sequence you wrote. `reset-soonest` drains the window
+   * about to expire; `pace` spreads work so every window lasts until its own
+   * reset.
    */
-  by?: "reset-soonest" | "pace"
+  by?: "in-order" | "reset-soonest" | "pace"
   /** Provider IDs, most preferred first, used to break a tie the clock cannot. */
   path?: string[]
 }
@@ -165,8 +167,8 @@ function categoryFrom(value: unknown, path: string): CategoryDef {
   for (const key of Object.keys(pick)) {
     if (key !== "by" && key !== "path") throw new Error(`${path}.pick.${key}: unknown field`)
   }
-  if (pick.by !== undefined && pick.by !== "reset-soonest" && pick.by !== "pace") {
-    throw new Error(`${path}.pick.by: expected reset-soonest or pace`)
+  if (pick.by !== undefined && pick.by !== "in-order" && pick.by !== "reset-soonest" && pick.by !== "pace") {
+    throw new Error(`${path}.pick.by: expected in-order, reset-soonest or pace`)
   }
   const path2 = pick.path === undefined ? undefined : providerPath(pick.path, `${path}.pick.path`)
   // A path without a strategy changes nothing, so it is kept inert rather than

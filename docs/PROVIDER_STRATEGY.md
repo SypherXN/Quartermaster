@@ -107,6 +107,20 @@ Two behaviours to know:
 - A provider with no fresh window, or with windows that carry no usage figure,
   has no pace and sorts after every provider that has one.
 
+## The third option: in order
+
+`pick.by: "in-order"`, or no `pick` at all, leaves the chain exactly as written.
+Nothing is re-ranked by quota, so the first model stays the first try.
+
+**Where it is right.** Models that share one provider bucket — a free tier, a
+family with one per-account cap — where reordering by reset or pace would
+reshuffle siblings that will be limited together anyway. Also wherever the order
+encodes quality rather than availability: flagship first, cheap backstop after.
+
+**Where it is weak.** It ignores quota completely, so it keeps aiming at a
+provider whose window is nearly spent until the eligibility gate or a real 429
+takes that model out.
+
 ## Laying out categories and plans
 
 Categories describe **what a model is for**, not who sells it. A good set:
@@ -115,15 +129,15 @@ Categories describe **what a model is for**, not who sells it. A good set:
 | --- | --- | --- |
 | `cheap` | the small/free models you are happy to run anything on | `pace` |
 | `standard` | your everyday mid-tier models | `pace` |
-| `deep` | the expensive reasoning models, few requests | `as listed` |
-| `long-context` | models with a large window, used rarely | `as listed` |
+| `deep` | the expensive reasoning models, few requests | `in-order` |
+| `long-context` | models with a large window, used rarely | `in-order` |
 | `free` | OpenCode Zen free tier, shared bucket | `reset-soonest` |
 
 Use `pace` wherever the models are interchangeable and the provider is the only
 variable: it spreads work so no window runs dry before its reset. Use
 `reset-soonest` when you deliberately want to drain a bucket that is about to
-expire — burst jobs, a free tier — and `as listed` where the order encodes
-quality rather than availability.
+expire — burst jobs, a free tier — and `in-order` where the order encodes
+quality, or where the members share a provider bucket.
 
 Then compose plans from the categories, cheapest first and escalating on
 capability, with `free` as the last resort so a capped paid provider never

@@ -17,6 +17,9 @@ export type QuotaLookup = (model: Pick<ModelRef, "providerID" | "modelID">) => Q
  * expires; using it now is the only way to spend it. Equal resets prefer the
  * window with more used, so a nearly-spent bucket empties before a fresh one.
  * `pick.path` then breaks provider ties, and the file's order breaks the rest.
+ *
+ * `pick.by: "in-order"` (or no pick at all) returns the file's order untouched,
+ * which is what keeps two models on one provider in the sequence you wrote.
  */
 export function orderCategory(category: CategoryDef, clock: QuotaLookup): readonly ModelRef[] {
   if (category.pick?.by !== "reset-soonest") return category.models

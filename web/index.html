@@ -489,12 +489,12 @@ details.plan[open]>summary{margin-bottom:18px}
    <p id="routing-status" class="status-line" role="status" aria-live="polite">Routing reads the latest quota snapshot. Nothing here changes a plan.</p>
    <div class="tab-strip" role="tablist" aria-label="Routing views"><button type="button" class="tab" role="tab" id="routing-tab-strategies" aria-selected="true" aria-controls="routing-panel-strategies" tabindex="0"><span class="register-index" aria-hidden="true">01</span>Strategies</button><button type="button" class="tab" role="tab" id="routing-tab-categories" aria-selected="false" aria-controls="routing-panel-categories" tabindex="-1"><span class="register-index" aria-hidden="true">02</span>Categories</button></div>
    <div class="tab-panel" id="routing-panel-strategies" role="tabpanel" aria-labelledby="routing-tab-strategies" tabindex="0">
-    <div class="note">Each strategy ranks providers from the live quota snapshot — the same evidence the plugin uses on the next request. A provider with no fresh window sorts last.</div>
+    <div class="note">Reset soonest and balanced pace rank providers from the live quota snapshot — the same evidence the plugin uses on the next request. A provider with no fresh window sorts last. In order ranks nothing: it keeps each category exactly as written.</div>
     <div id="routing-strategies" class="usage-grid"></div>
    </div>
    <div class="tab-panel" id="routing-panel-categories" role="tabpanel" aria-labelledby="routing-tab-categories" tabindex="-1" hidden>
     <div class="note">Each category orders its own models with the strategy it names. Row one is the next pick.</div>
-    <div class="editor-section"><label for="categories">Categories</label><p class="hint">@name in a plan refers to a category, so editing that category updates every plan that references it. Reset soonest orders a category at request time by the provider window that resets first, breaking ties by used quota and then by the provider path. Balanced pace orders by remaining room per minute of the tightest window.</p><div id="categories"></div></div>
+    <div class="editor-section"><label for="categories">Categories</label><p class="hint">@name in a plan refers to a category, so editing that category updates every plan that references it. Reset soonest orders a category at request time by the provider window that resets first, breaking ties by used quota and then by the provider path. Balanced pace orders by remaining room per minute of the tightest window. In order leaves the chain exactly as written — the right pick when several models share one provider bucket and you want them tried in your own sequence.</p><div id="categories"></div></div>
     <div id="routing-groups" class="usage-grid"></div>
    </div>
 </section>
@@ -1270,11 +1270,11 @@ function slotStrategyControl(label,getName,refresh){
     const name=getName();if(!name)return
     writeCategoryPick(name,select.value,categoryPick(draft.categories[name]).path||[]);refresh()
   }},
-    h('option',{value:'',text:'As listed'}),
+    h('option',{value:'in-order',text:'In order'}),
     h('option',{value:'reset-soonest',text:'Reset soonest'}),
     h('option',{value:'pace',text:'Balanced pace'}))
   select.hidden=true
-  return {node:select,sync(){const name=getName();select.hidden=!name;select.value=name?(categoryPick(draft.categories[name]).by||''):''}}
+  return {node:select,sync(){const name=getName();select.hidden=!name;select.value=name?(categoryPick(draft.categories[name]).by||'in-order'):''}}
 }
 function attachModelCombo(input,commit){
   const id=`combo-menu-${++comboSeq}`
@@ -1306,7 +1306,7 @@ function attachModelCombo(input,commit){
       if(!hit(label,label))continue
       const pick=categoryPick(draft.categories[name])
       const members=categoryModelsOf(draft.categories[name]).length
-      groups[0][1].push({label,value:label,desc:`${members} model${members===1?'':'s'} · ${pick.by==='pace'?'balanced pace':pick.by==='reset-soonest'?'reset soonest':'as listed'}`})
+      groups[0][1].push({label,value:label,desc:`${members} model${members===1?'':'s'} · ${pick.by==='pace'?'balanced pace':pick.by==='reset-soonest'?'reset soonest':'in order'}`})
     }
     for(const model of models){
       const value=`${model.providerID}/${model.id}`
@@ -1480,9 +1480,18 @@ function routingStrategyCard(title,description,badge,rows,weighted){
  card.append(h('div',{class:'ledger-wrap'},h('table',{class:'ledger'},h('thead',{},h('tr',{},h('th',{scope:'col',class:'num',text:'#'}),h('th',{scope:'col',text:'Provider'}),h('th',{scope:'col',class:'num',text:'Resets in'}),h('th',{scope:'col',class:'num',text:'Pace %/min'}),h('th',{scope:'col',class:'num',text:'Share'}))),h('tbody',{},...body))))
  return card
 }
+function routingInOrderCard(){
+ const categories=saved?.categories&&typeof saved.categories==='object'?saved.categories:{}
+ const rows=Object.entries(categories).filter(([,category])=>{const by=categoryPickOf(category).by;return by!=='pace'&&by!=='reset-soonest'})
+ const card=h('section',{class:'panel'},h('div',{class:'panel-head'},h('div',{},h('h2',{text:'In order'}),h('p',{text:'Every model is tried top to bottom in the order the category lists it. Nothing is reordered by quota, so two models on one provider stay in the sequence you wrote.'})),h('span',{class:'badge neutral',text:'in order'})))
+ if(!rows.length){card.append(empty('No category uses in order.','Pick In order on a category below.'));return card}
+ const body=rows.map(([name,category])=>h('tr',{},h('td',{class:'mono',text:`@${name}`}),h('td',{class:'mono',text:chainLabel(categoryModelsOf(category))})))
+ card.append(h('div',{class:'ledger-wrap'},h('table',{class:'ledger'},h('thead',{},h('tr',{},h('th',{scope:'col',text:'Category'}),h('th',{scope:'col',text:'Declared order'}))),h('tbody',{},...body))))
+ return card
+}
 function routingCategoryCard(name,category){
  const pick=categoryPickOf(category), rows=routingOrder(category)
- const policy=pick.by==='pace'?'balanced pace':pick.by==='reset-soonest'?'reset soonest':'as listed'
+ const policy=pick.by==='pace'?'balanced pace':pick.by==='reset-soonest'?'reset soonest':'in order'
  const head=h('div',{class:'panel-head'},h('div',{},h('h2',{text:`@${name}`}),h('p',{class:'mono',text:Array.isArray(pick.path)&&pick.path.length?`path · ${pick.path.join(' → ')}`:'no provider path'})),h('span',{class:'badge neutral',text:policy}))
  const card=h('section',{class:'panel'},head)
  if(!rows.length){card.append(empty('No models in this category.','Add one on the Plans page.'));return card}
@@ -1497,7 +1506,7 @@ function routingCategoryCard(name,category){
   const label=row.variant?`${row.id} · ${row.variant}`:row.id
   return h('tr',{},h('td',{class:'num',text:String(position+1)}),h('td',{},h('div',{},h('span',{class:'mono',text:label})),h('div',{class:'hint',text:line||'no window'})),h('td',{class:'num',text:row.clock.soonest?routingTime(row.clock.soonest.resetsAt):'—',title:row.clock.soonest?timeText(row.clock.soonest.resetsAt):''}),h('td',{class:'num mono',text:known(row.clock.pace?.value)?`${row.clock.pace.value.toFixed(3)}`:'—'}))
  })
- card.append(h('div',{class:'ledger-wrap'},h('table',{class:'ledger'},h('caption',{class:'hint',text:pick.by==='pace'?'Ordered by remaining room per minute of the tightest window, most first. Pace is percent of a window per minute.':'Ordered by the window that resets first. Ties fall to used quota, then the provider path, then file order.'}),h('thead',{},h('tr',{},h('th',{scope:'col',class:'num',text:'#'}),h('th',{scope:'col',text:'Model'}),h('th',{scope:'col',class:'num',text:'Resets in'}),h('th',{scope:'col',class:'num',text:'Pace %/min'}))),h('tbody',{},...body))))
+ card.append(h('div',{class:'ledger-wrap'},h('table',{class:'ledger'},h('caption',{class:'hint',text:pick.by==='pace'?'Ordered by remaining room per minute of the tightest window, most first. Pace is percent of a window per minute.':pick.by==='reset-soonest'?'Ordered by the window that resets first. Ties fall to used quota, then the provider path, then file order.':'Ordered as listed. Nothing is reordered by quota, so models on one provider stay in the order you wrote.'}),h('thead',{},h('tr',{},h('th',{scope:'col',class:'num',text:'#'}),h('th',{scope:'col',text:'Model'}),h('th',{scope:'col',class:'num',text:'Resets in'}),h('th',{scope:'col',class:'num',text:'Pace %/min'}))),h('tbody',{},...body))))
  return card
 }
 function paintRouting(){
@@ -1506,7 +1515,8 @@ function paintRouting(){
  const rows=routingStrategyRows()
  mount('#routing-strategies',
   routingStrategyCard('Reset soonest','Whichever provider window resets first goes first, then the one with more quota used.','reset soonest',rows.reset,false),
-  routingStrategyCard('Balanced pace','Whichever provider has the most room left per minute of its tightest window goes first. Share is how the traffic splits.','balanced pace',rows.pace,true))
+  routingStrategyCard('Balanced pace','Whichever provider has the most room left per minute of its tightest window goes first. Share is how the traffic splits.','balanced pace',rows.pace,true),
+  routingInOrderCard())
  const cards=Object.entries(categories).map(([name,category])=>routingCategoryCard(name,category))
  mount('#routing-groups',...(cards.length?cards:[empty('No categories yet.','Add one above to see how it orders its models.')]))
 }
@@ -1519,7 +1529,7 @@ function loadRouting(){
   paintRouting()
   if(button)button.disabled=false
   const categories=Object.keys(saved?.categories||{}).length
-  setMessage('#routing-status',`Two strategies · ${categories} categor${categories===1?'y':'ies'} in the saved plans. Order is what the next request would try.`)
+  setMessage('#routing-status',`Three strategies · ${categories} categor${categories===1?'y':'ies'} in the saved plans. Order is what the next request would try.`)
  })
 }
 function finite(value){return typeof value==='number'&&Number.isFinite(value)?value:undefined}
@@ -1657,7 +1667,7 @@ function normalizeCategoryPick(name,pick){
   const out={}
   for(const key of Object.keys(pick)){
     if(key==='by'){
-      if(pick.by!=='reset-soonest'&&pick.by!=='pace')throw Error(`Category ${name} pick by must be reset-soonest or pace`)
+      if(pick.by!=='in-order'&&pick.by!=='reset-soonest'&&pick.by!=='pace')throw Error(`Category ${name} pick by must be in-order, reset-soonest or pace`)
       out.by=pick.by
     }else if(key==='path'){
       if(!Array.isArray(pick.path))throw Error(`Category ${name} pick path must be a list of provider IDs`)
@@ -2164,7 +2174,7 @@ function renderCategories(){
     if(categoryChainExpansion.has(name)?categoryChainExpansion.get(name):names.length<=6||name===names[0])card.setAttribute('open','')
     const chain=h('span',{class:'chain',text:chainLabel(models)})
     const refresh=()=>{chain.textContent=chainLabel(categoryModels(draft.categories[name]))}
-    card.append(h('summary',{},h('strong',{text:name}),h('span',{text:` · ${models.length} model${models.length===1?'':'s'}`}),pick.by?h('span',{text:pick.by==='pace'?' · balanced pace':' · reset soonest'}):null,chain))
+    card.append(h('summary',{},h('strong',{text:name}),h('span',{text:` · ${models.length} model${models.length===1?'':'s'}`}),h('span',{text:pick.by==='pace'?' · balanced pace':pick.by==='reset-soonest'?' · reset soonest':' · in order'}),chain))
     models.forEach((model,index)=>{
       const bits=modelBits(model)
       const idInput=h('input',{type:'text','aria-label':`${name} model ${index+1}`,value:bits.id})
@@ -2187,10 +2197,10 @@ function renderCategories(){
       )))
     })
     const pickSelect=h('select',{'aria-label':`${name} pick`,onChange:()=>{writeCategoryPick(name,pickSelect.value,categoryPick(draft.categories[name]).path||[]);renderBoard()}},
-      h('option',{value:'',text:'As listed'}),
+      h('option',{value:'in-order',text:'In order'}),
       h('option',{value:'reset-soonest',text:'Reset soonest'}),
       h('option',{value:'pace',text:'Balanced pace'}))
-    pickSelect.value=pick.by||''
+    pickSelect.value=pick.by||'in-order'
     const pathInput=h('input',{type:'text','aria-label':`${name} provider path`,placeholder:'Provider tie-break, comma separated',value:(pick.path||[]).join(', '),onInput:()=>{
       writeCategoryPick(name,categoryPick(draft.categories[name]).by||'',pathInput.value.split(',').map(item=>item.trim()).filter(Boolean))
     }})

@@ -81,4 +81,8 @@ test("pace sorts a provider without a clock last and ties by path then file orde
   const models = [model("a", "x")]
   assert.deepEqual(orderCategoryByPace(category(models), pace({})), models)
   assert.deepEqual(orderCategoryByPace(category(models, { by: "reset-soonest" }), pace({ a: 1 })), models)
+  // In order is the strategy for models sharing one bucket: the declared sequence survives.
+  const shared = [model("a", "x"), model("a", "y")]
+  assert.deepEqual(orderCategory(category(shared, { by: "in-order" }), clock({ known: { resetsAt: 1, usedPercent: 99 } })), shared)
+  assert.deepEqual(orderCategoryByPace(category(shared, { by: "in-order" }), pace({ a: 9 })), shared)
 })

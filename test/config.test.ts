@@ -61,9 +61,14 @@ test("parses a category pick policy and rejects an unknown strategy", () => {
     plans: { review: ["@fast"] },
   })
   assert.deepEqual(paced.categories.fast.pick, { by: "pace" })
+  const ordered = parseConfig({
+    categories: { fast: { models: ["provider-a/quick"], pick: { by: "in-order" } } },
+    plans: { review: ["@fast"] },
+  })
+  assert.deepEqual(ordered.categories.fast.pick, { by: "in-order" })
   assert.throws(
     () => parseConfig({ categories: { fast: { models: ["provider-a/quick"], pick: { by: "cheapest" } } } }),
-    /expected reset-soonest or pace/,
+    /expected in-order, reset-soonest or pace/,
   )
   assert.throws(
     () => parseConfig({ categories: { fast: { models: ["provider-a/quick"], pick: { by: "reset-soonest", other: 1 } } } }),
