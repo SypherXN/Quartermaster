@@ -168,7 +168,7 @@ Rules worth keeping:
 | `sharedRateLimits` | several models share one bucket. One 429 cools the group, so never treat the members as independent options in a category. |
 | `quotaExemptModels` | listed IDs are never skipped for quota. Use for a model you must always be able to reach, not to paper over a capped account. |
 | `exclusiveModels` | one seat at a time. A busy model is skipped and the next candidate wins, so put it inside a category rather than in a plan of its own. |
-| `providerCooldownMs` | the floor for a cooldown after a rate limit. A provider-stated reset can extend it, never shorten it. |
+| `providerCooldownMs` | the floor for a cooldown after a rate limit. A provider-stated reset can extend it, never shorten it. A `*-free` model is different: Zen's free allowance is a daily budget, so its rate limit is held until the next 00:00 UTC instead. A probe or a real successful turn still clears it earlier. |
 | `probeRateLimits` | only for accounts where one request is cheap, such as a free tier. A probe spends a slot of the very bucket it is asking about. |
 | `budgets` | advisory visibility today. They do not gate selection, so they cannot enforce a pace. |
 

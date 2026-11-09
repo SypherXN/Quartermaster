@@ -85,6 +85,21 @@ function key({ providerID, modelID }: Scope): string {
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
 
+const DAY_MS = 86_400_000
+
+/**
+ * Zen's free models draw on one daily allowance that resets at 00:00 UTC, while a paid model's
+ * 429 is a burst limit that clears in seconds. Cooling a free model for `providerCooldownMs`
+ * therefore just burns a request per minute against a bucket that is gone for the day, so a free
+ * rate limit is held until the daily reset. A successful probe or a real successful turn still
+ * clears it earlier.
+ */
+const nextFreeReset = (now: number) => Math.floor(now / DAY_MS) * DAY_MS + DAY_MS
+
+const isFreeTierLimit = (report: FailureReport) =>
+  (report.modelID?.endsWith("-free") ?? false) &&
+  (report.classification === "temporary-rate-limit" || report.classification === "quota-exhausted")
+
 export class FailureCooldowns {
   private readonly until = new Map<string, number>()
   private readonly evidence = new Map<string, { occurredAt: number; classification: FailureClassification }>()
@@ -119,9 +134,10 @@ export class FailureCooldowns {
     if (["auth", "cancelled", "other"].includes(report.classification)) return false
     if (report.classification === "quota-exhausted" && !report.modelID) return false
 
-    const until = deadline === undefined || !Number.isFinite(deadline)
+    const base = deadline === undefined || !Number.isFinite(deadline)
       ? now + this.durationMs
       : Math.max(now + this.durationMs, deadline)
+    const until = isFreeTierLimit(report) ? Math.max(base, nextFreeReset(now)) : base
     let changed = false
     for (const scope of this.cooldownScopes(report)) {
       const id = key(scope)

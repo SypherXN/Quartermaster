@@ -215,3 +215,25 @@ test("success clears its exact scope, and persisted cooldowns restore only while
   expired.restore([{ providerID: "a", until: 10 }], 10)
   assert.equal(expired.apply(eligible, registry, 10).get(modelKey(primary))?.cooldownUntil, undefined)
 })
+
+test("a free model's rate limit is held until the daily reset, a paid one only for the cooldown", () => {
+  const now = 1_794_248_168_921 // 2026-11-09T12:16Z, mid-day
+  const nextUtcMidnight = 1_794_268_800_000
+
+  const free = new FailureCooldowns(60_000)
+  free.reportFailure({ providerID: "a", modelID: "primary-free", classification: "temporary-rate-limit" }, now)
+  assert.equal(free.knownLimitedModels()[0]?.until, nextUtcMidnight)
+
+  const freeQuota = new FailureCooldowns(60_000)
+  freeQuota.reportFailure({ providerID: "a", modelID: "primary-free", classification: "quota-exhausted" }, now)
+  assert.equal(freeQuota.knownLimitedModels()[0]?.until, nextUtcMidnight)
+
+  const paid = new FailureCooldowns(60_000)
+  paid.reportFailure({ providerID: "a", modelID: "primary", classification: "temporary-rate-limit" }, now)
+  assert.equal(paid.knownLimitedModels()[0]?.until, now + 60_000)
+
+  // An outage of a free model is not the free allowance: it keeps the plain cooldown.
+  const outage = new FailureCooldowns(60_000)
+  outage.reportFailure({ providerID: "a", modelID: "primary-free", classification: "model-outage" }, now)
+  assert.equal(outage.knownLimitedModels()[0]?.until, now + 60_000)
+})

@@ -7,9 +7,11 @@ import {
 } from "../src/rate-limit-probe.ts"
 import type { ModelRef } from "../src/config.ts"
 
-const primary: ModelRef = { providerID: "opencode", modelID: "primary-free" }
-const sibling: ModelRef = { providerID: "opencode", modelID: "sibling-free" }
-const outsider: ModelRef = { providerID: "opencode", modelID: "outsider-free" }
+// Paid-style ids on purpose: a `-free` model is held until the free tier's daily reset, which is
+// a different rule with its own test in failures.test.ts.
+const primary: ModelRef = { providerID: "opencode", modelID: "primary-model" }
+const sibling: ModelRef = { providerID: "opencode", modelID: "sibling-model" }
+const outsider: ModelRef = { providerID: "opencode", modelID: "outsider-model" }
 const groups = [[primary, sibling]]
 
 /** An explicit cap for the math below; the shipped default is 30 minutes. */
@@ -27,7 +29,7 @@ test("a bucket is only probed after its own cooldown floor expired", () => {
   assert.deepEqual(selectProbeTargets({ now: 999, models, groups, cooldowns: limited, intervalMs, maxBackoffMs }), [])
   assert.deepEqual(
     selectProbeTargets({ now: 1_000, models, groups, cooldowns: limited, intervalMs, maxBackoffMs }).map((model) => model.modelID),
-    ["primary-free"],
+    ["primary-model"],
   )
 })
 
@@ -57,7 +59,7 @@ test("a stated reset hours away does not park the bucket: it is probed on the ba
   assert.deepEqual(
     selectProbeTargets({ now: 20_000, models, groups, cooldowns: limited, deadlines, intervalMs, maxBackoffMs })
       .map((model) => model.modelID),
-    ["primary-free"],
+    ["primary-model"],
   )
 })
 
@@ -69,7 +71,7 @@ test("only one probe per shared bucket is selected", () => {
     { model: outsider, until: 1_000 },
   ])
   const targets = selectProbeTargets({ now: 2_000, models, groups, cooldowns: limited, intervalMs, maxBackoffMs })
-  assert.deepEqual(targets.map((model) => model.modelID), ["primary-free", "outsider-free"])
+  assert.deepEqual(targets.map((model) => model.modelID), ["primary-model", "outsider-model"])
   assert.deepEqual(bucketMembers(primary, groups), [primary, sibling])
   assert.deepEqual(bucketMembers(outsider, groups), [outsider])
   assert.notEqual(bucketId(primary, groups), bucketId(outsider, groups))
@@ -152,17 +154,17 @@ test("a successful probe resets the backoff of its bucket", () => {
 
 test("a successful probe clears the model and its shared group, a limited probe keeps them out", () => {
   const failures = new FailureCooldowns(300_000, groups)
-  failures.reportFailure({ providerID: "opencode", modelID: "primary-free", classification: "quota-exhausted" }, 0)
+  failures.reportFailure({ providerID: "opencode", modelID: "primary-model", classification: "quota-exhausted" }, 0)
   assert.equal(failures.apply(eligible, [primary, sibling], 1).get(modelKey(sibling))?.cooldownUntil, 300_000)
 
-  assert.equal(failures.clear("opencode", "primary-free"), true)
+  assert.equal(failures.clear("opencode", "primary-model"), true)
   const recovered = failures.apply(eligible, [primary, sibling], 1)
   assert.equal(recovered.get(modelKey(primary))?.cooldownUntil, undefined)
   assert.equal(recovered.get(modelKey(sibling))?.cooldownUntil, undefined)
 
   // A still-limited probe is fresh evidence: the provider cooldown stays the floor.
   const limited = new FailureCooldowns(300_000, groups)
-  const failure = classifyRetryFailure({ type: "provider.rate-limit", status: 429 }, "opencode", "primary-free")
+  const failure = classifyRetryFailure({ type: "provider.rate-limit", status: 429 }, "opencode", "primary-model")
   assert.equal(failure.report?.classification, "temporary-rate-limit")
   assert.equal(limited.reportFailure(failure.report!, 1_000), true)
   const cooling = limited.apply(eligible, [primary, sibling], 1_001)
@@ -172,7 +174,7 @@ test("a successful probe clears the model and its shared group, a limited probe 
 
 test("a probe never shortens the skip window below the configured provider cooldown", () => {
   const failures = new FailureCooldowns(300_000, groups)
-  const failure = classifyRetryFailure({ type: "provider.rate-limit", status: 429 }, "opencode", "primary-free")
+  const failure = classifyRetryFailure({ type: "provider.rate-limit", status: 429 }, "opencode", "primary-model")
   // The probe reports the failure with the provider floor, not with the shorter probe interval.
   assert.equal(failures.reportFailure(failure.report!, 1_000), true)
   const cooling = failures.apply(eligible, [primary, sibling], 1_001)
@@ -182,9 +184,9 @@ test("a probe never shortens the skip window below the configured provider coold
 
 test("a successful probe keeps an outage cooldown of a group member", () => {
   const failures = new FailureCooldowns(300_000, groups)
-  failures.reportFailure({ providerID: "opencode", modelID: "primary-free", classification: "quota-exhausted" }, 0)
-  failures.reportFailure({ providerID: "opencode", modelID: "sibling-free", classification: "model-outage" }, 0)
-  assert.equal(failures.clear("opencode", "primary-free"), true)
+  failures.reportFailure({ providerID: "opencode", modelID: "primary-model", classification: "quota-exhausted" }, 0)
+  failures.reportFailure({ providerID: "opencode", modelID: "sibling-model", classification: "model-outage" }, 0)
+  assert.equal(failures.clear("opencode", "primary-model"), true)
   const state = failures.apply(eligible, [primary, sibling], 1)
   assert.equal(state.get(modelKey(primary))?.cooldownUntil, undefined, "the bucket limit is gone")
   assert.equal(state.get(modelKey(sibling))?.cooldownUntil, 300_000, "the outage of that model stays")
@@ -196,13 +198,13 @@ test("a quota-shaped probe failure behaves like a rate-limit-shaped one", () => 
     { type: "unknown", message: "OpenCode Zen: Rate limit exceeded. Please try again later." },
   ]) {
     const failures = new FailureCooldowns(300_000, groups)
-    const failure = classifyRetryFailure(error, "opencode", "primary-free")
+    const failure = classifyRetryFailure(error, "opencode", "primary-model")
     assert.ok(failure.report, JSON.stringify(error))
     assert.equal(failures.reportFailure(failure.report!, 1_000), true)
     const cooling = failures.apply(eligible, [primary, sibling], 1_001)
     assert.equal(cooling.get(modelKey(primary))?.cooldownUntil, 301_000, JSON.stringify(error))
     assert.equal(cooling.get(modelKey(sibling))?.cooldownUntil, 301_000, JSON.stringify(error))
-    assert.equal(failures.clear("opencode", "primary-free"), true)
+    assert.equal(failures.clear("opencode", "primary-model"), true)
     const recovered = failures.apply(eligible, [primary, sibling], 1_001)
     assert.equal(recovered.get(modelKey(primary))?.cooldownUntil, undefined, JSON.stringify(error))
     assert.equal(recovered.get(modelKey(sibling))?.cooldownUntil, undefined, JSON.stringify(error))
@@ -212,8 +214,8 @@ test("a quota-shaped probe failure behaves like a rate-limit-shaped one", () => 
 test("an auth or unknown probe failure changes nothing", () => {
   for (const error of [{ type: "provider.auth", status: 401 }, { type: "provider.unknown" }]) {
     const failures = new FailureCooldowns(300_000, groups)
-    failures.reportFailure({ providerID: "opencode", modelID: "primary-free", classification: "temporary-rate-limit" }, 0)
-    const failure = classifyRetryFailure(error, "opencode", "primary-free")
+    failures.reportFailure({ providerID: "opencode", modelID: "primary-model", classification: "temporary-rate-limit" }, 0)
+    const failure = classifyRetryFailure(error, "opencode", "primary-model")
     assert.notEqual(failure.report?.classification, "temporary-rate-limit")
     assert.notEqual(failure.report?.classification, "quota-exhausted")
     const cooling = failures.apply(eligible, [primary, sibling], 1)

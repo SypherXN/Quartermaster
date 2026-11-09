@@ -359,9 +359,10 @@ export async function registerAgentRouting(
         if (running.size > 0) return
         const result = await probeModel(target)
         probes.record(target, result.outcome, Date.now(), config.sharedRateLimits, result.detail)
-        if (result.outcome === "success" || result.outcome === "inconclusive") {
-          // The bucket recovered, or the probe could not tell: either way it is no evidence
-          // for keeping the model and its shared group cooled.
+        if (result.outcome === "success") {
+          // The bucket recovered: drop the cooldown of the model and of its shared group.
+          // An inconclusive probe changes nothing: a bare generation is not a chat turn, so its
+          // refusal proves neither that the bucket recovered nor that it is still cooling.
           if (failures.clear(target.providerID, target.modelID)) {
             await persistCooldowns()
             await applyCurrent()
