@@ -972,10 +972,20 @@ function paintAgents(){
    sessionBlock('agent',item.agentID))
   return [line,h('tr',{class:'project-detail-row'},h('td',{colspan:String(cols.length)},panel))]
  })
+ // Steps that named no agent still spent tokens, so they get a row of their own
+ // instead of only a footnote. There is no session to expand, so it never opens.
+ const unattributed=usage?.unattributed
+ if(unattributed&&Number(unattributed.records)>0){
+  const models=Array.isArray(unattributed.models)?unattributed.models:[]
+  const first=models[0], firstShare=first&&unattributed.observedTokens>0?Math.round((first.observedTokens||0)/unattributed.observedTokens*100):null
+  const chips=first?`${first.providerID}/${first.modelID}${firstShare===null?'':` ${firstShare}%`}${models.length>1?` +${models.length-1}`:''}`:'—'
+  body.push(h('tr',{class:'project-row'},h('td',{class:'mono',title:'The assistant message named no agent'},h('span',{text:'unattributed'})),
+   h('td',{class:'num',text:number(unattributed.sessions)}),h('td',{class:'num',text:number(unattributed.records)}),h('td',{class:'num',text:number(unattributed.observedTokens)}),
+   h('td',{class:'mono models-cell',text:chips}),h('td',{text:known(unattributed.lastObservedAt)&&unattributed.lastObservedAt>0?new Date(unattributed.lastObservedAt).toLocaleString():'—'})))
+ }
  const table=h('table',{class:'ledger'},h('caption',{class:'hint',text:'Observed tokens by agent, highest first. A dispatched subagent is named by its own session; a root session is named by the assistant message that spent the tokens, so it can span several agents. Expand a row for its models.'}),h('thead',{},h('tr',{},...cols.map(([label,cls])=>h('th',{scope:'col',class:cls,text:label})))),h('tbody',{},...body))
- const unknown=Number(usage?.unknownRecords)||0
  const foot=all.length>rows.length?`Showing the top ${rows.length} of ${number(all.length)} agents by observed tokens.`:`Showing all ${rows.length} agent${rows.length===1?'':'s'}.`
- mount('#agents-table',h('div',{class:'ledger-wrap'},table),h('p',{class:'chart-foot',text:`${foot}${unknown?` ${number(unknown)} step${unknown===1?'':'s'} named no agent and are not listed.`:''} ${coverageNote()}`}))
+ mount('#agents-table',h('div',{class:'ledger-wrap'},table),h('p',{class:'chart-foot',text:`${foot} ${coverageNote()}`}))
 }
 function csvCell(value){
  if(value===null||value===undefined)return ''

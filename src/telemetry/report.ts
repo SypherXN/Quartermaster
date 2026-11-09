@@ -626,11 +626,11 @@ function summarizeAgentUsage(records: readonly TokenTelemetryRecord[], query: Re
     detail.models.set(key, model)
   }
   let unknownRecords = 0
-  const addAgent = (agentID: string | null, apply: (total: RunningTotal) => void) => {
-    if (!agentID) {
-      unknownRecords += 1
-      return
-    }
+  // Steps that name no agent are counted with the rest of the ledger, so they
+  // keep their own totals instead of only a step count in the footer.
+  const unattributed = { ...blankTotal() }
+  const unattributedDetail: AgentDetail = { models: new Map<string, ProjectModelUsage>(), sessions: new Set<string>(), lastObservedAt: null }
+  const addAgent = (agentID: string, apply: (total: RunningTotal) => void) => {
     const item = usageByAgent.get(agentID) ?? {
       agentID,
       evidence: "exact-assistant-message" as const,
@@ -644,8 +644,17 @@ function summarizeAgentUsage(records: readonly TokenTelemetryRecord[], query: Re
     usageByAgent.set(agentID, item)
   }
   for (const record of records) {
+    if (!record.hostAgentID) {
+      unknownRecords += 1
+      absorbRecord(unattributed, record)
+      unattributedDetail.sessions.add(record.hostSessionID)
+      addModel(unattributedDetail, record.providerID, record.modelID, 1, tokenValue(record) ?? 0)
+      unattributedDetail.lastObservedAt = unattributedDetail.lastObservedAt === null
+        ? record.completedAt
+        : Math.max(unattributedDetail.lastObservedAt, record.completedAt)
+      continue
+    }
     addAgent(record.hostAgentID, (total) => absorbRecord(total, record))
-    if (!record.hostAgentID) continue
     // Per-agent detail, so an agent row can be expanded the way a project row is.
     const detail = detailOf(record.hostAgentID)
     detail.sessions.add(record.hostSessionID)
@@ -657,6 +666,8 @@ function summarizeAgentUsage(records: readonly TokenTelemetryRecord[], query: Re
     prunedRecords = addNumbers(prunedRecords, slice.records)
     if (!slice.agentID) {
       unknownRecords += slice.records
+      absorbSlice(unattributed, slice)
+      addModel(unattributedDetail, slice.providerID, slice.modelID, slice.records, slice.observedTokens)
       continue
     }
     const item = usageByAgent.get(slice.agentID) ?? {
@@ -688,6 +699,14 @@ function summarizeAgentUsage(records: readonly TokenTelemetryRecord[], query: Re
     complete: false as const,
     totalRecords: records.length + prunedRecords,
     unknownRecords,
+    unattributed: {
+      ...unattributed,
+      records: unknownRecords,
+      cacheHitRate: hitRate(unattributed),
+      sessions: unattributedDetail.sessions.size,
+      lastObservedAt: unattributedDetail.lastObservedAt,
+      models: [...unattributedDetail.models.values()].sort((a, b) => b.observedTokens - a.observedTokens).slice(0, 50),
+    },
     dimensions: {
       total: all.length,
       offset: query.offset,
