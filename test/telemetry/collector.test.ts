@@ -71,9 +71,27 @@ test("collector attributes the exact assistant message without inferring its mod
   assert.equal(record.parentSessionID, "parent-session")
   assert.equal(record.providerID, null)
   assert.equal(record.modelID, null)
-  assert.equal(record.hostAgentID, "reviewer")
+  // A child session names the dispatched subagent, which its messages do not.
+  assert.equal(record.hostAgentID, "current-agent")
   assert.equal(record.counts?.input, 4)
   assert.doesNotMatch(JSON.stringify(record), /never persist|prompt/)
+})
+
+test("collector names a dispatched subagent from its child session, not the invoking agent", async () => {
+  const storage = new MemoryStorage()
+  const ctx = {
+    event: {} as never,
+    storage,
+    session: {
+      get: async () => ({ projectID: "project-a", parentID: "root-session", agent: "explorer" }) as never,
+      context: async () => [{ type: "assistant", id: "message-a", agent: "orchestrator" }] as never,
+    },
+  }
+
+  await consumeTokenEvents(ctx, new TokenLedger(storage), events(), new AbortController().signal)
+
+  const [record] = await new TokenLedger(storage).list({ projectID: "project-a" })
+  assert.equal(record.hostAgentID, "explorer")
 })
 
 test("collector keeps usage when session attribution lookup fails", async () => {

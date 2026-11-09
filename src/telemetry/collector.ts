@@ -70,14 +70,19 @@ export async function consumeTokenEvents(
       // session yet, this instance's own project is the correct owner.
       let context: { projectID?: string; parentSessionID?: string } | undefined =
         fallbackProjectID === undefined ? undefined : { projectID: fallbackProjectID }
+      let sessionAgent: string | undefined
       try {
         const session = await ctx.session.get({ sessionID: candidate.hostSessionID })
         context = { projectID: session.projectID ?? fallbackProjectID, parentSessionID: session.parentID }
+        // A child session is a dispatched subagent: its own assistant messages
+        // still name the invoking agent, so the session record is the only place
+        // the subagent is named. A root session keeps its per-step message agent.
+        if (session.parentID && typeof session.agent === "string" && session.agent.length > 0) sessionAgent = session.agent
       } catch {
         // Keep the terminal usage record under this instance's project.
       }
 
-      let agentID: string | undefined
+      let agentID: string | undefined = sessionAgent
       let messageModel: { providerID: string; modelID: string; variant: string | null } | undefined
       let messages: readonly unknown[] | undefined
       try {
@@ -86,7 +91,7 @@ export async function consumeTokenEvents(
         const message = contextMessages.find((item) => item.type === "assistant" && item.id === candidate.hostMessageID)
         if (message?.type === "assistant") {
           if (typeof message.agent === "string" && message.agent.length > 0) {
-            agentID = message.agent
+            agentID ??= message.agent
           }
           // The assistant message names its own model, which is the fallback for a
           // step whose session.step.started this instance never saw.

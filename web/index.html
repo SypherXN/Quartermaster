@@ -972,7 +972,7 @@ function paintAgents(){
    sessionBlock('agent',item.agentID))
   return [line,h('tr',{class:'project-detail-row'},h('td',{colspan:String(cols.length)},panel))]
  })
- const table=h('table',{class:'ledger'},h('caption',{class:'hint',text:'Observed tokens by agent, highest first. An agent is named by the assistant message that spent the tokens, so a session can span several agents. Expand a row for its models.'}),h('thead',{},h('tr',{},...cols.map(([label,cls])=>h('th',{scope:'col',class:cls,text:label})))),h('tbody',{},...body))
+ const table=h('table',{class:'ledger'},h('caption',{class:'hint',text:'Observed tokens by agent, highest first. A dispatched subagent is named by its own session; a root session is named by the assistant message that spent the tokens, so it can span several agents. Expand a row for its models.'}),h('thead',{},h('tr',{},...cols.map(([label,cls])=>h('th',{scope:'col',class:cls,text:label})))),h('tbody',{},...body))
  const unknown=Number(usage?.unknownRecords)||0
  const foot=all.length>rows.length?`Showing the top ${rows.length} of ${number(all.length)} agents by observed tokens.`:`Showing all ${rows.length} agent${rows.length===1?'':'s'}.`
  mount('#agents-table',h('div',{class:'ledger-wrap'},table),h('p',{class:'chart-foot',text:`${foot}${unknown?` ${number(unknown)} step${unknown===1?'':'s'} named no agent and are not listed.`:''} ${coverageNote()}`}))
