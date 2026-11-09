@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import type { ModelRef } from "../src/config.ts"
-import { buildQuotaEligibility } from "../src/eligibility.ts"
+import { buildQuotaEligibility, quotaPaces } from "../src/eligibility.ts"
 import { modelKey, selectModel } from "../src/select.ts"
 import type { UsageReadResult, UsageSource, UsageSourceID } from "../src/usage.ts"
 import { normalizeUsageSnapshot } from "../src/usage.ts"
@@ -43,6 +43,53 @@ function usage(go: UsageSource["availability"], codex: UsageSource["availability
     },
   }
 }
+
+function withGoWindows(windows: UsageSource["windows"], stale = false): UsageReadResult {
+  return {
+    status: "ok",
+    snapshot: {
+      updatedAt: 1_000,
+      sources: {
+        go: { ...source("available"), stale, windows },
+        codex: source("available"),
+        cursor: source("unknown"),
+      } satisfies Record<UsageSourceID, UsageSource>,
+    },
+  }
+}
+
+test("pace is limited by the tightest window, and finished ones stop constraining", () => {
+  const minute = 60_000
+  const at = 1_000 * minute
+  const reading = withGoWindows([
+    // Roomy short window: 96% left over 40 minutes, so 2.4% a minute.
+    { name: "rolling", usedPercent: 4, state: "ok", resetsAt: at + 40 * minute },
+    // The weekly window is nearly spent with two days to go: 1% over 2880 minutes.
+    { name: "weekly", usedPercent: 99, state: "ok", resetsAt: at + 2 * 24 * 60 * minute },
+    // Already reset: it constrains nothing.
+    { name: "monthly", usedPercent: 60, state: "ok", resetsAt: at },
+  ])
+  const pace = quotaPaces({ "opencode-go": "go", openai: "codex" }, reading, at)
+  const go = pace({ providerID: "opencode-go", modelID: "paid-one" })
+
+  assert.ok(Math.abs((go as number) - 1 / (2 * 24 * 60)) < 1e-9)
+  // A stale source and an untracked provider have no pace, so they sort last.
+  const stale = withGoWindows([{ name: "weekly", usedPercent: 10, state: "ok", resetsAt: at + 60 * minute }], true)
+  assert.equal(quotaPaces({ openai: "go" }, stale, at)({ providerID: "openai", modelID: "codex-model" }), undefined)
+  assert.equal(pace({ providerID: "ollama", modelID: "local-model" }), undefined)
+})
+
+test("a fresh window near its cap blocks a model before the provider says limited", () => {
+  const eligible = (windows: UsageSource["windows"], stale = false) =>
+    buildQuotaEligibility(registry, { "opencode-go": "go", openai: "codex" }, ["opencode-go/free-model"], withGoWindows(windows, stale))
+      .get(modelKey(registry[0]))?.status
+
+  assert.equal(eligible([{ name: "weekly", usedPercent: 95, state: "ok", resetsAt: null }]), "limited")
+  assert.equal(eligible([{ name: "weekly", usedPercent: 40, state: "ok", resetsAt: null }]), "available")
+  assert.equal(eligible([{ name: "weekly", usedPercent: 5, state: "rate-limited", resetsAt: null }]), "limited")
+  // Old evidence must never block, whatever the window says.
+  assert.equal(eligible([{ name: "weekly", usedPercent: 100, state: "rate-limited", resetsAt: null }], true), "available")
+})
 
 test("a limited shared source excludes every mapped model except explicit exemptions", () => {
   const eligibility = buildQuotaEligibility(

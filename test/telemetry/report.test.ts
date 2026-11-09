@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import test from "node:test"
 import type { Schema } from "effect"
 import type { StorageDomain } from "@opencode/plugin/promise/storage"
-import { parseConfig } from "../../src/config.ts"
+import { expandPlans, parseConfig } from "../../src/config.ts"
 import { projectRetryError, ProviderErrorLedger } from "../../src/telemetry/errors.ts"
 import { PluginAttributionLedger } from "../../src/telemetry/attribution.ts"
 import { DirectUsageLedger } from "../../src/telemetry/direct-usage.ts"
@@ -100,7 +100,7 @@ test("report is project-scoped, bounded, unknown-aware, and rereads ledgers", as
       { id: "plugin-cap", dimension: "plugin", target: "plugin-a", limitTokens: 10, windowMs: 10_000 },
     ],
   })
-  const deps = { projectID: "project-a", tokenLedger, errorLedger, attributionLedger, budgets: config.budgets, tokenRates: config.tokenRates, plans: config.plans, now: () => 1_000 }
+  const deps = { projectID: "project-a", tokenLedger, errorLedger, attributionLedger, budgets: config.budgets, tokenRates: config.tokenRates, plans: expandPlans(config), now: () => 1_000 }
   const page = await buildQuartermasterReport(deps, { since: 850, until: 999, limit: 2, offset: 0 }, true)
   assert.equal(page.projectID, "project-a")
   assert.deepEqual(page.totals, {
@@ -553,7 +553,7 @@ test("pruned host rows keep model, agent, plan, and cache totals", async () => {
     attributionLedger: { list: async () => [] },
     budgets: config.budgets,
     tokenRates: config.tokenRates,
-    plans: config.plans,
+    plans: expandPlans(config),
     now: () => now,
   }, { limit: 20, offset: 0 }, false)
 

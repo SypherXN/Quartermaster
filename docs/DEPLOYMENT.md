@@ -98,9 +98,9 @@ Recovery probing is opt-in and off by default. `probeRateLimits` lists the
 fully qualified models that may be checked for rate-limit recovery,
 `probeIntervalMs` sets the base interval (default 300000) and
 `probeMaxBackoffMs` sets the longest backoff between two probes of one bucket
-(default 3600000): the base interval is the poll cadence, and the provider
+(default 1800000): the base interval is the poll cadence, and the provider
 cooldown stays the floor of the skip window. The interval doubles per failed
-probe, so the default gaps are 10, 20, 40 and then 60 minutes, and 60 minutes
+probe, so the default gaps are 5, 10, 20 and then 30 minutes, and 30 minutes
 after that. A probe spends one real
 provider request slot and a tiny completion, so enable it only where that is
 acceptable, such as a free tier; it is sent by the host, because the Zen free

@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises"
 import test from "node:test"
 import type { AgentEditor } from "@opencode/plugin/promise/agent"
 import { applyAgentRouting } from "../../src/agent-routing.ts"
-import { parseConfig, type ModelRef } from "../../src/config.ts"
+import { expandPlan, parseConfig, type ModelRef } from "../../src/config.ts"
 import { modelKey, type Availability, type ModelEligibility } from "../../src/select.ts"
 
 const readJson = async (path: string) =>
@@ -57,7 +57,7 @@ test("synthetic assignments select primary, backup, then recovered primary for b
 
     applyAgentRouting(editorFor(agent), config, registry, eligibility, 0)
 
-    const selected = plan.find((model: ModelRef) => `${model.providerID}/${model.modelID}` === assignment.selected)
+    const selected = expandPlan(plan, config.categories).find((model: ModelRef) => `${model.providerID}/${model.modelID}` === assignment.selected)
     assert.ok(selected, `selected model ${assignment.selected} is in the plan`)
     assert.deepEqual(agent.model, {
       providerID: selected.providerID,
@@ -71,15 +71,15 @@ test("unbound agent stays unchanged and eligible pins apply to both test agents"
   const { config, agentIDs } = await fixtureConfig()
   const agent = { id: "unbound-agent", model: { providerID: "host", id: "original" } }
   const eligibility = new Map<string, ModelEligibility>(
-    config.plans["test-agent"].map((model) => [modelKey(model), { status: "available" }]),
+    expandPlan(config.plans["test-agent"], config.categories).map((model) => [modelKey(model), { status: "available" }]),
   )
 
-  applyAgentRouting(editorFor(agent), config, config.plans["test-agent"], eligibility, 0)
+  applyAgentRouting(editorFor(agent), config, expandPlan(config.plans["test-agent"], config.categories), eligibility, 0)
   for (const agentID of agentIDs) {
     const boundAgent = { id: agentID, model: undefined as unknown }
     applyAgentRouting(
-      editorFor(boundAgent), config, config.plans["test-agent"], eligibility, 0,
-      new Map([[agentID, config.plans["test-agent"][1]]]),
+      editorFor(boundAgent), config, expandPlan(config.plans["test-agent"], config.categories), eligibility, 0,
+      new Map([[agentID, expandPlan(config.plans["test-agent"], config.categories)[1]]]),
     )
     assert.deepEqual(boundAgent.model, { providerID: "fixture", id: "backup-model" })
   }

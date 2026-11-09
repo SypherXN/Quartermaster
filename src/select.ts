@@ -1,4 +1,4 @@
-import type { ModelRef, QuartermasterConfig } from "./config.ts"
+import { expandPlan, type ModelRef, type PlanOrder, type QuartermasterConfig } from "./config.ts"
 
 export type Availability = "available" | "limited" | "unknown"
 
@@ -49,10 +49,11 @@ export type PlanResolution =
     }
 
 export function resolvePlan(
-  config: Pick<QuartermasterConfig, "plans" | "agents" | "workTypes">,
+  config: Pick<QuartermasterConfig, "plans" | "agents" | "workTypes"> & Partial<Pick<QuartermasterConfig, "categories">>,
   agentID: string,
-  options: { workType?: string; explicitModel?: ModelRef } = {},
+  options: { workType?: string; explicitModel?: ModelRef; order?: PlanOrder } = {},
 ): PlanResolution {
+  const plan = (planID: string) => expandPlan(config.plans[planID], config.categories ?? {}, options.order)
   if (options.explicitModel) {
     return { status: "explicit-model", model: options.explicitModel, reason: { code: "explicit-user-model" } }
   }
@@ -63,7 +64,7 @@ export function resolvePlan(
       return {
         status: "plan",
         planID,
-        plan: config.plans[planID],
+        plan: plan(planID),
         source: "work-type",
         reason: { code: "work-type-binding" },
       }
@@ -74,7 +75,7 @@ export function resolvePlan(
       return {
         status: "plan",
         planID: agentPlanID,
-        plan: config.plans[agentPlanID],
+        plan: plan(agentPlanID),
         source: "agent",
         reason: { code: "unknown-work-type-agent-fallback", workType: options.workType },
       }
@@ -88,7 +89,7 @@ export function resolvePlan(
   return {
     status: "plan",
     planID,
-    plan: config.plans[planID],
+    plan: plan(planID),
     source: "agent",
     reason: { code: "agent-binding" },
   }
@@ -145,30 +146,32 @@ export function selectModel(
 
 /** Plan order only. Callers supply eligibility; this does not read pins or sessions. */
 export function selectNamedPlan(
-  config: Pick<QuartermasterConfig, "plans">,
+  config: Pick<QuartermasterConfig, "plans"> & Partial<Pick<QuartermasterConfig, "categories">>,
   planID: string,
   registry: readonly ModelRef[],
   eligibility: ReadonlyMap<string, ModelEligibility>,
   now: number,
   busy?: (model: ModelRef) => boolean,
+  order?: PlanOrder,
 ): SelectionResult {
   if (!Object.hasOwn(config.plans, planID)) {
     return { status: "no-plan", reason: { code: "unknown-plan" }, skipped: [] }
   }
-  return selectModel(config.plans[planID], registry, eligibility, now, busy)
+  return selectModel(expandPlan(config.plans[planID], config.categories ?? {}, order), registry, eligibility, now, busy)
 }
 
 export function selectAgentModel(
-  config: Pick<QuartermasterConfig, "plans" | "agents">,
+  config: Pick<QuartermasterConfig, "plans" | "agents"> & Partial<Pick<QuartermasterConfig, "categories">>,
   agentID: string,
   registry: readonly ModelRef[],
   eligibility: ReadonlyMap<string, ModelEligibility>,
   now: number,
   pin?: ModelRef,
   busy?: (model: ModelRef) => boolean,
+  order?: PlanOrder,
 ): SelectionResult {
   const planID = Object.hasOwn(config.agents, agentID) ? config.agents[agentID] : undefined
-  const plan = planID === undefined ? undefined : config.plans[planID]
+  const plan = planID === undefined ? undefined : expandPlan(config.plans[planID], config.categories ?? {}, order)
   if (!plan) return { status: "no-plan", reason: { code: "no-plan" }, skipped: [] }
 
   const candidates = pin

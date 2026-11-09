@@ -4,8 +4,9 @@ import { resolve } from "node:path"
 import type { Agent } from "@opencode/plugin"
 import type { AgentEditor } from "@opencode/plugin/promise/agent"
 import type { Context } from "@opencode/plugin/promise/plugin"
-import type { ModelRef, QuartermasterConfig } from "./config.ts"
-import { buildQuotaEligibility } from "./eligibility.ts"
+import { expandPlan, expandPlans, type ModelRef, type PlanOrder, type QuartermasterConfig } from "./config.ts"
+import { categoryOrder, paceCategoryOrder } from "./decision.ts"
+import { buildQuotaEligibility, quotaClocks, quotaPaces } from "./eligibility.ts"
 import { classifyRetryFailure, FailureCooldowns, type FailureReport, type SuccessReport } from "./failures.ts"
 import { applyLocalHealth, LocalHealth } from "./local-health.ts"
 import { laterDeadline, parseRateLimitHeaders, RateLimitObservations, statedResetFromError } from "./rate-limit.ts"
@@ -101,6 +102,7 @@ export function applyAgentRouting(
   pins: ReadonlyMap<string, ModelRef> = new Map(),
   budgetReasons: readonly TokenBudgetReason[] = [],
   onBudgetWarning?: (agentID: string, selection: ReturnType<typeof selectAgentModel>, reasons: readonly TokenBudgetReason[]) => void,
+  order?: PlanOrder,
 ): void {
   for (const agentID of Object.keys(config.agents)) {
     if (!editor.get(agentID)) continue
@@ -112,6 +114,8 @@ export function applyAgentRouting(
       eligibility,
       now,
       pins.get(agentID),
+      undefined,
+      order,
     )
     if (budgetReasons.length > 0) onBudgetWarning?.(agentID, selection, budgetReasons)
     if (selection.status !== "selected") continue
@@ -160,6 +164,12 @@ export async function registerAgentRouting(
   eligibility = failures.apply(eligibility, registry, Date.now())
   const pins = await AgentPins.load(config, registry, ctx.storage, ctx.location?.project?.id)
   const leases = new ExclusiveLeases()
+  // Read `usage` at call time: refresh() replaces it when quota is re-read, and a
+  // decision plan should follow the fresh clock rather than the startup one.
+  const planOrder: PlanOrder = (category) =>
+    (category.pick?.by === "pace"
+      ? paceCategoryOrder(quotaPaces(config.usageSources, usage))
+      : categoryOrder(quotaClocks(config.usageSources, usage)))(category)
   const busyFor = (sessionID?: string) => (model: ModelRef) =>
     sessionID === undefined ? leases.taken(model) : leases.blocks(sessionID, model)
   const selectedFor = (agentID: string, sessionID?: string) => selectAgentModel(
@@ -170,6 +180,7 @@ export async function registerAgentRouting(
     Date.now(),
     pins.get(agentID),
     busyFor(sessionID),
+    planOrder,
   )
   const registration = Object.keys(config.agents).length > 0
       ? await ctx.agent.transform((editor) => {
@@ -183,6 +194,7 @@ export async function registerAgentRouting(
           pins.snapshot(),
           budgetGate?.reasons(now),
           (agentID, selection, reasons) => console.warn("[quartermaster] token budget advisory", JSON.stringify({ agentID, selection, reasons })),
+          planOrder,
         )
       })
     : undefined
@@ -270,7 +282,7 @@ export async function registerAgentRouting(
   let probeInFlight = false
 
   // A probe is a separate one-shot generation through the host: it never replays a user turn.
-  const probeModel = async (model: ModelRef): Promise<{ outcome: ProbeOutcome }> => {
+  const probeModel = async (model: ModelRef): Promise<{ outcome: ProbeOutcome; detail?: string }> => {
     const generate = ctx.generate
     if (!generate?.text) return { outcome: "error" }
     probeInFlight = true
@@ -291,9 +303,19 @@ export async function registerAgentRouting(
         model.modelID,
       )
       const classification = failure.report?.classification
+      const raw = error as { status?: unknown; type?: unknown; message?: unknown }
+      const detail = [raw.status ?? raw.type, typeof raw.message === "string" ? raw.message.slice(0, 160).replace(/\s+/g, " ") : undefined]
+        .filter((part): part is string | number => part !== undefined)
+        .join(" ")
+      // A bare generation is not a chat turn: a free tier can answer it with a quota-shaped
+      // 429 that says the caller is not an OpenCode session, while real turns keep working.
+      // That is not evidence of an exhausted bucket, so it must not keep one cooled.
+      if (/free usage limit|free models work in opencode/i.test(detail)) {
+        return { outcome: "inconclusive", detail }
+      }
       return classification === "temporary-rate-limit" || classification === "quota-exhausted"
-        ? { outcome: "still-limited" }
-        : { outcome: "error" }
+        ? { outcome: "still-limited", ...(detail ? { detail } : {}) }
+        : { outcome: "error", ...(detail ? { detail } : {}) }
     } finally {
       probeInFlight = false
     }
@@ -310,7 +332,11 @@ export async function registerAgentRouting(
       const now = Date.now()
       const cooldowns = new Map<string, number>()
       for (const entry of failures.knownLimitedModels()) {
-        cooldowns.set(modelKey({ providerID: entry.providerID, modelID: entry.modelID }), entry.until)
+        // A provider-stated reset can belong to a longer window than this bucket (a daily cap) or
+        // simply be wrong; it must not keep the bucket out of the probe schedule. Bound the floor
+        // by one backoff so a cooling bucket is re-tested instead of sitting the whole deadline out.
+        const floor = Math.min(entry.until, (entry.occurredAt ?? entry.until) + config.probeMaxBackoffMs)
+        cooldowns.set(modelKey({ providerID: entry.providerID, modelID: entry.modelID }), floor)
       }
       const deadlines = new Map<string, number>()
       for (const model of config.probeRateLimits) {
@@ -332,9 +358,10 @@ export async function registerAgentRouting(
       for (const target of targets) {
         if (running.size > 0) return
         const result = await probeModel(target)
-        probes.record(target, result.outcome, Date.now(), config.sharedRateLimits)
-        if (result.outcome === "success") {
-          // The bucket recovered: drop the cooldown of the model and of its shared group.
+        probes.record(target, result.outcome, Date.now(), config.sharedRateLimits, result.detail)
+        if (result.outcome === "success" || result.outcome === "inconclusive") {
+          // The bucket recovered, or the probe could not tell: either way it is no evidence
+          // for keeping the model and its shared group cooled.
           if (failures.clear(target.providerID, target.modelID)) {
             await persistCooldowns()
             await applyCurrent()
@@ -438,6 +465,7 @@ export async function registerAgentRouting(
     Date.now(),
     pins.get(agentID),
     busyFor(sessionID),
+    planOrder,
   )
 
   const diagnoseSession = async (sessionID: string) => {
@@ -466,7 +494,7 @@ export async function registerAgentRouting(
     const agentID = view.agent
     const bound = agentID !== undefined && Object.hasOwn(config.agents, agentID)
     const planID = bound ? config.agents[agentID] : undefined
-    const plan = planID === undefined ? undefined : config.plans[planID]
+    const plan = planID === undefined ? undefined : expandPlan(config.plans[planID], config.categories, planOrder)
     const mode = !agentID ? "unknown" : !bound ? "unbound" : ownershipRead !== "ok" ? "unknown"
       : ownership?.agent === agentID && ownership.mode === "manual" ? "manual" : "automatic"
     // Snapshot-only: refresh/select/status can adopt options, persist pins or reload agents.
@@ -474,6 +502,7 @@ export async function registerAgentRouting(
       config, agentID ?? "", registry, failures.apply(baseSnapshot(), registry, now), now,
       agentID ? pins.get(agentID) : undefined,
       (model) => leases.peekBlocks(sessionID, model),
+      planOrder,
     ))
     const observed = lastPrimaryModels.get(sessionID)
     const failureObservation = failureObservations.get(sessionID)
@@ -608,7 +637,7 @@ export async function registerAgentRouting(
             await ensureProjectOptions()
             await refresh()
             if (Object.hasOwn(config.agents, input.agent)) {
-              const plan = config.plans[config.agents[input.agent] ?? ""]
+              const plan = expandPlan(config.plans[config.agents[input.agent] ?? ""] ?? [], config.categories)
               // ponytail: validate the captured model only; native dequeue selection needs a host hook.
               const valid = selectModel(plan?.filter((candidate) => modelKey(candidate) === modelKey(model)),
                 registry, failures.apply(baseSnapshot(), registry, Date.now()), Date.now(), busyFor(input.sessionID))
@@ -667,7 +696,7 @@ export async function registerAgentRouting(
       if (!agentID || agentID !== event.agent || !Object.hasOwn(config.agents, agentID)) return
       const ownership = await ctx.storage.get(ownershipKey(event.sessionID)) as { mode?: unknown; agent?: unknown } | undefined
       if (ownership?.agent === agentID && ownership.mode === "manual") return
-      const plan = config.plans[config.agents[agentID] ?? ""]
+      const plan = expandPlan(config.plans[config.agents[agentID] ?? ""] ?? [], config.categories)
       if (!current || !plan?.some((candidate) => candidate.providerID === current.providerID && candidate.modelID === current.id)) return
       if (!sameSessionModel(modelRef(event.model), current)) return
 
@@ -793,6 +822,15 @@ export async function registerAgentRouting(
         console.warn("[quartermaster] terminal failure observation failed")
       }
     }
+    // A finished turn is the strongest evidence a bucket recovered: it carries the agent loop,
+    // tools and session the provider gates on, which a bare probe does not.
+    if (terminal.type === "session.execution.succeeded") {
+      const last = lastPrimaryModels.get(step.sessionID)
+      if (last && failures.clear(last.model.providerID, last.model.modelID)) {
+        await persistCooldowns()
+        await applyCurrent()
+      }
+    }
     if (typeof terminal.created === "number") {
       if (step.kind === "finish") requestHistory.end(step.sessionID, "primary", terminal.created, Date.now())
       if (terminal.type === "session.compaction.failed" || terminal.type === "session.compaction.ended") {
@@ -831,7 +869,7 @@ export async function registerAgentRouting(
   const select = async (agentID: string, workType?: string, sessionID?: string) => {
     await ensureProjectOptions()
     await refresh()
-    const resolution = resolvePlan(config, agentID, { workType })
+    const resolution = resolvePlan(config, agentID, { workType, order: planOrder })
     if (resolution.status === "explicit-model") {
       return { status: "explicit-model", model: resolution.model, reasonCode: resolution.reason.code }
     }
@@ -866,6 +904,7 @@ export async function registerAgentRouting(
       failures.apply(baseSnapshot(), registry, now),
       now,
       (model) => leases.taken(model),
+      planOrder,
     )
     if (selection.status === "no-plan") {
       return {
@@ -880,7 +919,7 @@ export async function registerAgentRouting(
     }
   }
 
-  const plans = () => ({ plans: config.plans, agents: config.agents, workTypes: config.workTypes })
+  const plans = () => ({ plans: expandPlans(config), agents: config.agents, workTypes: config.workTypes })
   const status = async () => {
     await ensureProjectOptions()
     const currentPlans = plans()

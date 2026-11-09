@@ -1,4 +1,4 @@
-import type { ModelRef, QuartermasterConfig } from "./config.ts"
+import { expandPlan, type ModelRef, type QuartermasterConfig } from "./config.ts"
 import { modelKey } from "./select.ts"
 
 export const PIN_STORAGE_KEY = "pins/v1"
@@ -16,13 +16,13 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 export class AgentPins {
   private readonly pins = new Map<string, ModelRef>()
-  private readonly config: Pick<QuartermasterConfig, "plans" | "agents">
+  private readonly config: Pick<QuartermasterConfig, "plans" | "categories" | "agents">
   private registry: readonly ModelRef[]
   private readonly storage: PinStorage
   private readonly storageKey: string
 
   private constructor(
-    config: Pick<QuartermasterConfig, "plans" | "agents">,
+    config: Pick<QuartermasterConfig, "plans" | "categories" | "agents">,
     registry: readonly ModelRef[],
     storage: PinStorage,
     projectID?: string,
@@ -34,7 +34,7 @@ export class AgentPins {
   }
 
   static async load(
-    config: Pick<QuartermasterConfig, "plans" | "agents">,
+    config: Pick<QuartermasterConfig, "plans" | "categories" | "agents">,
     registry: readonly ModelRef[],
     storage: PinStorage,
     projectID?: string,
@@ -101,7 +101,7 @@ export class AgentPins {
   private assertBoundAgent(agentID: string): readonly ModelRef[] {
     const planID = Object.hasOwn(this.config.agents, agentID) ? this.config.agents[agentID] : undefined
     if (planID === undefined) throw new Error(`agents.${agentID}: agent has no configured plan`)
-    return this.config.plans[planID]
+    return expandPlan(this.config.plans[planID], this.config.categories)
   }
 
   private validate(agentID: string, value: unknown): ModelRef {

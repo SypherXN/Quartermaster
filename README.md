@@ -71,6 +71,8 @@ alone, not a full OpenCode config. For other config locations, see
 - [Plugin integration](docs/PLUGIN_INTEGRATION.md): native selection, direct-call modules and options RPCs.
 - [Telemetry](docs/TOKEN_TELEMETRY.md) and [budgets](docs/TOKEN_BUDGETS.md):
   observed usage, unknown attribution and advisory limits.
+- [Provider strategy](docs/PROVIDER_STRATEGY.md): spending reset windows well,
+  the `reset-soonest` ordering and how to lay out categories and plans.
 - [Local tools](web/README.md): offline reports and opt-in configuration editing.
 - [Test agents](examples/test-agent/README.md): isolated routing checks.
 
@@ -125,6 +127,22 @@ All settings belong in `quartermaster.jsonc` next to the OpenCode config that re
 - **Plans:** ordered `providerID/modelID` strings or
   `{ "id": "providerID/modelID", "variant": "..." }` objects. Plans must be
   non-empty with unique candidates; bindings must name an existing plan.
+- **Categories:** `categories` maps a name to a non-empty, ordered list of
+  models, in the same two forms plans accept, or to
+  `{ "models": [...], "pick": { "by": "reset-soonest", "path": [...] } }`.
+  A plan may write `"@name"` (or `{ "category": "name" }`) in place of a model
+  and gets the members inline at that position, so editing the category
+  reaches every plan that names it. Categories hold models only, never other
+  categories, and a reference to an unknown category is a configuration error.
+  `pick.by: "reset-soonest"` orders the category at request time by the
+  provider window that resets first, then by the window with more quota used,
+  then by `pick.path` (provider IDs, most preferred first), then by the file's
+  order. Windows are read from `usageSources`; a provider with no fresh window
+  sorts last. Without `pick` the file's order is used. `pick.by: "pace"` ranks
+  instead by remaining room per minute of the tightest window, so no window runs
+  dry before its own reset; ties and unknowns behave the same way. See
+  [provider strategy](docs/PROVIDER_STRATEGY.md) for how to lay out categories
+  and plans around reset windows.
 - **Work types:** `workTypes` maps a work-type name to an existing plan. The
   `select` RPC checks the work-type binding before the agent binding; an
   unknown alias falls back to the agent binding.
@@ -139,7 +157,7 @@ All settings belong in `quartermaster.jsonc` next to the OpenCode config that re
   only that provider; remote providers are not health-probed.
 - **Durations:** positive integer milliseconds. `providerCooldownMs` defaults
   to 300000; `localHealthTimeoutMs` to 2000; `probeIntervalMs` to 300000;
-  `probeMaxBackoffMs` to 3600000.
+  `probeMaxBackoffMs` to 1800000.
 - **Shared rate limits:** `sharedRateLimits` lists groups of fully qualified
   model IDs that share one limit bucket. A temporary rate limit or confirmed
   quota error on any member cools the whole group for `providerCooldownMs`.
@@ -162,16 +180,17 @@ All settings belong in `quartermaster.jsonc` next to the OpenCode config that re
   a tiny completion, so enable it only where that is acceptable, such as a
   free tier. `probeIntervalMs` (default 300000) is the base interval; the
   interval doubles per failed probe and is capped at `probeMaxBackoffMs`
-  (default 3600000). With the defaults the gaps between probes of a still
-  limited bucket are 10, 20, 40 and then 60 minutes, and 60 minutes after
+  (default 1800000). With the defaults the gaps between probes of a still
+  limited bucket are 5, 10, 20 and then 30 minutes, and 30 minutes after
   that: a shared free-tier bucket can stay capped for hours, so the cap is
   deliberately long. The trade-off is honest: a longer cap means the recovery
   of a bucket can go unnoticed for up to the cap, so lower
   `probeMaxBackoffMs` if you want the model back sooner. It is the
   poll cadence, not the skip window: the first probe of a bucket waits for the
   model's own cooldown floor to expire, later probes follow the backoff. A
-  probe is only sent when no provider reset time is pending, when no primary
-  request is running, and at most once per shared bucket. A successful probe
+  probe is only sent when no provider reset time lands within one backoff
+  window, when no primary request is running, and at most once per shared
+  bucket. A successful probe
   clears the cooldown of that model and of its shared group; a probe that is
   still limited changes nothing, because a probe measures a bucket instead of
   being a user request: only a failed request may create or extend a cooldown,

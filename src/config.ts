@@ -42,8 +42,36 @@ export interface TokenRateConfig {
   asOf: number
 }
 
+export interface CategoryPick {
+  /**
+   * How the category orders its members at request time. Absent keeps the file's
+   * order. `reset-soonest` drains the window about to expire; `pace` spreads
+   * work so every window lasts until its own reset.
+   */
+  by?: "reset-soonest" | "pace"
+  /** Provider IDs, most preferred first, used to break a tie the clock cannot. */
+  path?: string[]
+}
+
+export interface CategoryDef {
+  models: ModelRef[]
+  pick?: CategoryPick
+}
+
+/** A plan entry that stands for a category, replaced by its ordered members. */
+export interface PlanCategoryRef {
+  category: string
+}
+
+export type PlanEntry = ModelRef | PlanCategoryRef
+
+/** Decides a category's member order for one request. */
+export type PlanOrder = (category: CategoryDef) => readonly ModelRef[]
+
 export interface QuartermasterConfig {
-  plans: Record<string, ModelRef[]>
+  plans: Record<string, PlanEntry[]>
+  /** Named, unordered sets of interchangeable models; a plan may name one with "@id". */
+  categories: Record<string, CategoryDef>
   agents: Record<string, string>
   workTypes: Record<string, string>
   usageSources: Record<string, string>
@@ -68,7 +96,7 @@ const DEFAULTS = {
   providerCooldownMs: 300_000,
   localHealthTimeoutMs: 2_000,
   probeIntervalMs: 300_000,
-  probeMaxBackoffMs: 3_600_000,
+  probeMaxBackoffMs: 1_800_000,
 }
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
@@ -99,7 +127,78 @@ function modelRef(value: unknown, path: string): ModelRef {
   return item.variant === undefined ? ref : { ...ref, variant: string(item.variant, `${path}.variant`) }
 }
 
-function plansFrom(value: unknown): Record<string, ModelRef[]> {
+function modelKey(ref: ModelRef) {
+  return JSON.stringify([ref.providerID, ref.modelID, ref.variant ?? null])
+}
+
+function modelsFrom(value: unknown, path: string): ModelRef[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error(`${path}: expected a non-empty array of models`)
+  }
+  const seen = new Set<string>()
+  return value.map((entry, index) => {
+    const ref = modelRef(entry, `${path}[${index}]`)
+    const key = modelKey(ref)
+    if (seen.has(key)) throw new Error(`${path}[${index}]: duplicate model`)
+    seen.add(key)
+    return ref
+  })
+}
+
+function providerPath(value: unknown, path: string): string[] {
+  if (!Array.isArray(value)) throw new Error(`${path}: expected an array of provider IDs`)
+  return value.map((entry, index) => string(entry, `${path}[${index}]`))
+}
+
+// A category is a named set of interchangeable models. A plan references one
+// with "@id" and gets its members in place, so editing the category reaches
+// every plan that names it. Categories hold models only, never other categories.
+function categoryFrom(value: unknown, path: string): CategoryDef {
+  if (Array.isArray(value)) return { models: modelsFrom(value, path) }
+  const item = record(value, path)
+  for (const key of Object.keys(item)) {
+    if (key !== "models" && key !== "pick") throw new Error(`${path}.${key}: unknown field`)
+  }
+  const models = modelsFrom(item.models, `${path}.models`)
+  if (item.pick === undefined) return { models }
+  const pick = record(item.pick, `${path}.pick`)
+  for (const key of Object.keys(pick)) {
+    if (key !== "by" && key !== "path") throw new Error(`${path}.pick.${key}: unknown field`)
+  }
+  if (pick.by !== undefined && pick.by !== "reset-soonest" && pick.by !== "pace") {
+    throw new Error(`${path}.pick.by: expected reset-soonest or pace`)
+  }
+  const path2 = pick.path === undefined ? undefined : providerPath(pick.path, `${path}.pick.path`)
+  // A path without a strategy changes nothing, so it is kept inert rather than
+  // rejected: the page stores it while the strategy reads "as listed".
+  if (pick.by === undefined && path2 === undefined) return { models }
+  return { models, pick: { ...(pick.by === undefined ? {} : { by: pick.by }), ...(path2 === undefined ? {} : { path: path2 }) } }
+}
+
+function categoriesFrom(value: unknown): Record<string, CategoryDef> {
+  return Object.fromEntries(Object.entries(record(value, "categories")).map(([id, category]) => {
+    const path = `categories.${id}`
+    string(id, path)
+    return [id, categoryFrom(category, path)]
+  }))
+}
+
+function planEntry(value: unknown, path: string, categories: Record<string, CategoryDef>): PlanEntry {
+  const named =
+    typeof value === "string" && value.startsWith("@") ? value.slice(1)
+    : isRecord(value) && !("id" in value) && typeof value.category === "string" ? value.category
+    : undefined
+  if (named === undefined) return modelRef(value, path)
+  if (isRecord(value)) {
+    for (const key of Object.keys(value)) {
+      if (key !== "category") throw new Error(`${path}.${key}: unknown field`)
+    }
+  }
+  if (!Object.hasOwn(categories, named)) throw new Error(`${path}: unknown category "${named}"`)
+  return { category: named }
+}
+
+function plansFrom(value: unknown, categories: Record<string, CategoryDef>): Record<string, PlanEntry[]> {
   return Object.fromEntries(Object.entries(record(value, "plans")).map(([id, candidates]) => {
     const path = `plans.${id}`
     string(id, path)
@@ -108,13 +207,44 @@ function plansFrom(value: unknown): Record<string, ModelRef[]> {
     }
     const seen = new Set<string>()
     return [id, candidates.map((value, index) => {
-      const ref = modelRef(value, `${path}[${index}]`)
-      const key = JSON.stringify([ref.providerID, ref.modelID, ref.variant ?? null])
+      const entry = planEntry(value, `${path}[${index}]`, categories)
+      const key = "category" in entry ? `@${entry.category}` : modelKey(entry)
       if (seen.has(key)) throw new Error(`${path}[${index}]: duplicate model candidate`)
       seen.add(key)
-      return ref
+      return entry
     })]
   }))
+}
+
+/**
+ * Flatten category references in place. `order` decides a category's member
+ * order for this call; the default keeps the order the file lists.
+ */
+export function expandPlan(
+  plan: readonly PlanEntry[],
+  categories: Readonly<Record<string, CategoryDef>>,
+  order: PlanOrder = (category) => category.models,
+): ModelRef[] {
+  const seen = new Set<string>()
+  const models: ModelRef[] = []
+  for (const entry of plan) {
+    const members = "category" in entry ? order(categories[entry.category]) : [entry]
+    for (const model of members) {
+      const key = modelKey(model)
+      if (seen.has(key)) continue
+      seen.add(key)
+      models.push(model)
+    }
+  }
+  return models
+}
+
+/** Static expansion of every plan, in the order the file lists its categories. */
+export function expandPlans(
+  config: Pick<QuartermasterConfig, "plans" | "categories">,
+  order?: PlanOrder,
+): Record<string, ModelRef[]> {
+  return Object.fromEntries(Object.entries(config.plans).map(([id, plan]) => [id, expandPlan(plan, config.categories, order)]))
 }
 
 function stringMap(value: unknown, path: string): Record<string, string> {
@@ -395,7 +525,7 @@ function localEndpoints(value: unknown): Record<string, string> {
 export function parseConfig(input: unknown = {}): QuartermasterConfig {
   const options = record(input, "options")
   const fields = new Set([
-    "plans", "agents", "workTypes", "usageSources", "quotaExemptModels", "exclusiveModels", "sharedRateLimits", "providerCooldownMs",
+    "plans", "categories", "agents", "workTypes", "usageSources", "quotaExemptModels", "exclusiveModels", "sharedRateLimits", "providerCooldownMs",
     "localHealthTimeoutMs", "localEndpoints", "budgets", "tokenRates", "modules", "probeRateLimits", "probeIntervalMs",
     "probeMaxBackoffMs",
   ])
@@ -403,7 +533,8 @@ export function parseConfig(input: unknown = {}): QuartermasterConfig {
     if (!fields.has(key)) throw new Error(`options.${key}: unknown field`)
   }
 
-  const plans = options.plans === undefined ? {} : plansFrom(options.plans)
+  const categories = options.categories === undefined ? {} : categoriesFrom(options.categories)
+  const plans = options.plans === undefined ? {} : plansFrom(options.plans, categories)
   const agents = options.agents === undefined ? {} : stringMap(options.agents, "agents")
   const workTypes = options.workTypes === undefined ? {} : stringMap(options.workTypes, "workTypes")
   const usageSources = options.usageSources === undefined ? {} : stringMap(options.usageSources, "usageSources")
@@ -433,6 +564,7 @@ export function parseConfig(input: unknown = {}): QuartermasterConfig {
 
   return {
     plans,
+    categories,
     agents,
     workTypes,
     usageSources,

@@ -12,7 +12,7 @@ const sibling: ModelRef = { providerID: "opencode", modelID: "sibling-free" }
 const outsider: ModelRef = { providerID: "opencode", modelID: "outsider-free" }
 const groups = [[primary, sibling]]
 
-/** The shipped defaults: a five minute base interval and a one hour cap. */
+/** An explicit cap for the math below; the shipped default is 30 minutes. */
 const intervalMs = 300_000
 const maxBackoffMs = 3_600_000
 
@@ -46,6 +46,18 @@ test("a provider-stated reset in the future suppresses the probe", () => {
   assert.equal(
     selectProbeTargets({ now: 5_000, models, groups, cooldowns: limited, deadlines, intervalMs, maxBackoffMs }).length,
     1,
+  )
+})
+
+test("a stated reset hours away does not park the bucket: it is probed on the backoff", () => {
+  const models = [primary]
+  const limited = cooldowns([{ model: primary, until: 1_000 }])
+  const day = 24 * 3_600_000
+  const deadlines = new Map([[modelKey(primary), 20_000 + day]])
+  assert.deepEqual(
+    selectProbeTargets({ now: 20_000, models, groups, cooldowns: limited, deadlines, intervalMs, maxBackoffMs })
+      .map((model) => model.modelID),
+    ["primary-free"],
   )
 })
 
@@ -207,4 +219,18 @@ test("an auth or unknown probe failure changes nothing", () => {
     const cooling = failures.apply(eligible, [primary, sibling], 1)
     assert.equal(cooling.get(modelKey(primary))?.cooldownUntil, 300_000, JSON.stringify(error))
   }
+})
+
+test("an inconclusive probe keeps the backoff but does not count as a failure", () => {
+  const probes = new RateLimitProbes()
+  const groups: ModelRef[][] = []
+  const base = { models: [primary], groups, cooldowns: cooldowns([{ model: primary, until: 1_000 }]), intervalMs: 300_000, maxBackoffMs: 1_800_000 }
+  probes.record(primary, "still-limited", 1_000, groups)
+  // A quota-shaped 429 that only says the caller is not an OpenCode session teaches nothing.
+  probes.record(primary, "inconclusive", 1_000, groups, "429 Free usage limit reached")
+  assert.equal(probes.select({ ...base, now: 1_000 + 600_000 - 1 }).length, 0, "the failed probe still doubles the window")
+  assert.equal(probes.select({ ...base, now: 1_000 + 600_000 }).length, 1, "and it does not double it twice")
+  const last = probes.records.at(-1)
+  assert.equal(last?.outcome, "inconclusive")
+  assert.equal(last?.detail, "429 Free usage limit reached")
 })

@@ -656,9 +656,12 @@ A model is probed only when all of the following hold: it is listed in
 group whose bucket is exhausted; the bucket's first probe waited for its own
 cooldown floor to expire, so a probe never runs while the model is still
 known-limited and never extends a known penalty window; no provider-stated
-reset is pending, because that time already says when the limit clears; the
+reset lands within one backoff window, because that time already says when the
+limit clears and waiting it out is cheaper than a probe -- a reset further away
+than the cap is usually a longer window of the same account, so it does not
+suppress probing; the
 backoff window since the last probe of that bucket has elapsed (the interval
-doubles per failed probe and is capped at `probeMaxBackoffMs`, default 60
+doubles per failed probe and is capped at `probeMaxBackoffMs`, default 30
 minutes); no primary request is
 running, so a probe never adds load next to real work; and at most one probe is
 sent per shared bucket per cycle. The probe interval is the poll cadence, not
@@ -666,10 +669,10 @@ the skip window: after the first probe of a bucket the backoff alone drives the
 schedule, so a provider floor never swallows the backoff and polling keeps
 running.
 
-With the default interval of 5 minutes and the default cap of 60 minutes, the
-gaps between probes of a bucket that stays limited are 10, 20, 40 and then 60
-minutes, and 60 minutes after that. The long cap is deliberate: a shared
-free-tier bucket can stay capped for hours, and a 15 minute heartbeat would
+With the default interval of 5 minutes and the default cap of 30 minutes, the
+gaps between probes of a bucket that stays limited are 5, 10, 20 and then 30
+minutes, and 30 minutes after that. The long cap is deliberate: a shared
+free-tier bucket can stay capped for hours, and a short heartbeat would
 spend a lot of requests against it. The trade-off is honest: a longer cap means
 the recovery of a bucket can go unnoticed for up to the cap, so lower
 `probeMaxBackoffMs` if you want the model back sooner.

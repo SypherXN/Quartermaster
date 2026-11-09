@@ -124,6 +124,7 @@ p+p{margin-top:8px}
 .binding-option{display:block;width:100%;text-align:left;border:0;border-bottom:1px solid var(--line);border-radius:0;background:transparent;box-shadow:none;padding:8px 10px;font:12px var(--mono)}
 .binding-option:hover:not(:disabled),.binding-option:focus-visible{background:var(--accent-soft)}
 .pool-row{grid-template-columns:minmax(150px,1fr) auto}
+.category-policy{display:grid;grid-template-columns:minmax(140px,.6fr) minmax(180px,1.4fr);gap:10px;align-items:center;margin:10px 0 0}
 .toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:14px 0 0}
 .toolbar input{width:210px}
 .toolbar button{font-size:12px}
@@ -133,6 +134,9 @@ p+p{margin-top:8px}
 .check{display:flex;gap:8px;align-items:center;padding:10px 0}
 .check input{width:auto;margin:0}
 .usage-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}
+#routing-strategies,#routing-groups{gap:28px}
+#routing-panel-strategies .note,#routing-panel-categories .note{margin:18px 0 26px;padding:18px 20px}
+#routing-panel-strategies .panel,#routing-panel-categories .panel{padding:26px}
 .variants{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
 .variants .badge{margin:0;border-color:#9aa88a;background:transparent}
 .quota{padding-top:16px;margin-top:16px;border-top:1px solid var(--line)}
@@ -372,6 +376,16 @@ details.plan[open]>summary{margin-bottom:18px}
 
  .sidebar :focus-visible{outline-color:#e7c77b}
 
+.combo-field{position:relative;display:block;min-width:0}
+.combo-menu{position:absolute;z-index:8;left:0;right:0;top:calc(100% + 2px);max-height:300px;overflow-y:auto;background:#fffdf6;border:1px solid #aeb49b;box-shadow:2px 3px 0 #e0ddcd;display:none}
+.combo-menu.open{display:block}
+.combo-group{padding:8px 10px 3px;font:10px var(--mono);letter-spacing:1.3px;text-transform:uppercase;color:var(--muted)}
+.combo-option{display:block;width:100%;text-align:left;border:0;border-bottom:1px solid var(--line);border-radius:0;background:transparent;box-shadow:none;padding:7px 10px;font:12px var(--mono);overflow-wrap:anywhere}
+.combo-option:hover,.combo-option.active{background:var(--accent-soft)}
+.combo-desc{display:block;font:11px/1.5 'Segoe UI',sans-serif;color:var(--muted)}
+.combo-more{padding:6px 10px;font:11px var(--mono);color:var(--muted)}
+.slot-strategy{display:inline-block;width:auto;font-size:11px;padding:5px 7px;margin:2px;color:var(--muted)}
+
  @media(max-width:700px){
 .model-actions{padding:10px 15px;flex-wrap:wrap}
 .model-actions .hint{margin:0}
@@ -388,8 +402,9 @@ details.plan[open]>summary{margin-bottom:18px}
     <a href="#overview" aria-current="page"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z"/></svg>Overview<span class="nav-index" aria-hidden="true">01</span></a>
     <a href="#usage"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>Usage<span class="nav-index" aria-hidden="true">02</span></a>
     <a href="#plans"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h16M8 3v4M16 10v4M10 17v4"/></svg>Plans<span class="nav-index" aria-hidden="true">03</span></a>
-    <a href="#providers"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5 9-5Zm-9 9 9 5 9-5M3 16l9 5 9-5"/></svg>Providers &amp; models<span class="nav-index" aria-hidden="true">04</span></a>
-    <a href="#quota"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 19a7 7 0 1 1 7-7M12 12l4-3"/></svg>Quota<span class="nav-index" aria-hidden="true">05</span></a>
+    <a href="#routing"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 6h5l4 6-4 6H4M13 12h7M17 8l3 4-3 4"/></svg>Routing<span class="nav-index" aria-hidden="true">04</span></a>
+    <a href="#providers"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5 9-5Zm-9 9 9 5 9-5M3 16l9 5 9-5"/></svg>Providers &amp; models<span class="nav-index" aria-hidden="true">05</span></a>
+    <a href="#quota"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 19a7 7 0 1 1 7-7M12 12l4-3"/></svg>Quota<span class="nav-index" aria-hidden="true">06</span></a>
   </nav>
   <div class="sidebar-foot"><span class="badge neutral"><span class="local-dot"></span>Local workspace</span><p>Deliberate routing.<br>A little more headroom.</p></div>
 </aside>
@@ -443,20 +458,20 @@ details.plan[open]>summary{margin-bottom:18px}
    <div class="page-head"><div><div class="eyebrow"><span class="register-index" aria-hidden="true">03</span>Routing plans</div><h1 id="plan-heading">Routing plans.</h1><p>Set the first choice. Give it a fallback. Keep every agent on course.</p></div><span class="badge neutral">Winning settings</span></div>
    <div class="note editor-intro"><strong id="options-heading">Your routing playbook.</strong> Earlier models are tried first; named variants stay separate. Apply saves the winning quartermaster.jsonc, including a settings file outside this project. A registration with no settings file stays read-only. The current session is unchanged; the next assignment reads the saved file. Cancel discards unsaved edits, not a submitted save.</div>
    <p id="options-status" class="status-line" role="status" aria-live="polite">Plans load from the local gateway when this page is open.</p>
-  <div class="tab-strip" role="tablist" aria-label="Routing plan settings"><button type="button" class="tab" role="tab" id="tab-plans" aria-selected="true" aria-controls="panel-plans" tabindex="0"><span class="register-index" aria-hidden="true">01</span>Plans</button><button type="button" class="tab" role="tab" id="tab-agents" aria-selected="false" aria-controls="panel-agents" tabindex="-1"><span class="register-index" aria-hidden="true">02</span>Agent bindings</button><button type="button" class="tab" role="tab" id="tab-modules" aria-selected="false" aria-controls="panel-modules" tabindex="-1"><span class="register-index" aria-hidden="true">03</span>Modules</button><button type="button" class="tab" role="tab" id="tab-settings" aria-selected="false" aria-controls="panel-settings" tabindex="-1"><span class="register-index" aria-hidden="true">04</span>Settings</button></div>
+  <div class="tab-strip" role="tablist" aria-label="Routing plan settings"><button type="button" class="tab" role="tab" id="tab-plans" aria-selected="true" aria-controls="panel-plans" tabindex="0"><span class="register-index" aria-hidden="true">01</span>Plans</button><button type="button" class="tab" role="tab" id="plan-tab-agents" aria-selected="false" aria-controls="plan-panel-agents" tabindex="-1"><span class="register-index" aria-hidden="true">02</span>Agent bindings</button><button type="button" class="tab" role="tab" id="tab-modules" aria-selected="false" aria-controls="panel-modules" tabindex="-1"><span class="register-index" aria-hidden="true">03</span>Modules</button><button type="button" class="tab" role="tab" id="tab-settings" aria-selected="false" aria-controls="panel-settings" tabindex="-1"><span class="register-index" aria-hidden="true">04</span>Settings</button></div>
   <fieldset id="options-fields" aria-labelledby="options-heading" style="border:0;padding:0;margin:0;min-width:0">
     <div class="editor-actions"><button id="load-options" type="button">Load plans</button><button id="apply-options" class="primary" type="button" disabled>Apply plans</button><button id="cancel-options" type="button">Cancel edits</button><button id="download-options" type="button">Download draft</button></div>
    <div class="tab-panel" id="panel-plans" role="tabpanel" aria-labelledby="tab-plans" tabindex="0">
-      <div class="editor-section"><label for="plans">Plans</label><p class="hint">Order matters. Use providerID/modelID and the exact variant name from the catalog. Browser-shortlisted models appear first in suggestions; existing values and chain order never change. Filter the list here. Categories stay in this browser, start collapsed, and do not change routing or the saved file.</p><p id="plan-preference-status" class="hint"></p><div id="plan-tools"></div><div id="plans"></div></div>
+      <div class="editor-section"><label for="plans">Plans</label><p class="hint">Order matters. Use providerID/modelID and the exact variant name from the catalog. Browser-shortlisted models appear first in suggestions; existing values and chain order never change. Filter the list here. Browser categories stay in this browser, start collapsed, and do not change routing or the saved file.</p><p id="plan-preference-status" class="hint"></p><div id="plan-tools"></div><div id="plans"></div></div>
    </div>
-    <div class="tab-panel" id="panel-agents" role="tabpanel" aria-labelledby="tab-agents" tabindex="-1" hidden>
-    <div class="editor-section"><label for="agents">Agent bindings</label><p class="hint">Type a plan name. A dropdown lists matching plans. A name that is not listed yet stays marked until that plan exists. Apply still requires that plan to exist. Filter the list here. Categories stay in this browser, start collapsed, and can be reordered by dragging their handle. They do not change routing or the saved file.</p>
+    <div class="tab-panel" id="plan-panel-agents" role="tabpanel" aria-labelledby="plan-tab-agents" tabindex="-1" hidden>
+    <div class="editor-section"><label for="agents">Agent bindings</label><p class="hint">Type a plan name. A dropdown lists matching plans. A name that is not listed yet stays marked until that plan exists. Apply still requires that plan to exist. Filter the list here. Browser categories stay in this browser, start collapsed, and can be reordered by dragging their handle. They do not change routing or the saved file.</p>
   <div id="agent-tools"></div>
   <div id="agents"></div>
     </div>
    </div>
     <div class="tab-panel" id="panel-modules" role="tabpanel" aria-labelledby="tab-modules" tabindex="-1" hidden>
-     <div class="editor-section"><label for="modules">Modules</label><p class="hint">A module keeps its own ordered chain and cooldowns, used only while that module is selected. Changes here stay in the draft until Apply. Filter the list here. Categories stay in this browser, start collapsed, and do not change the saved file.</p>
+     <div class="editor-section"><label for="modules">Modules</label><p class="hint">A module keeps its own ordered chain and cooldowns, used only while that module is selected. Changes here stay in the draft until Apply. Filter the list here. Browser categories stay in this browser, start collapsed, and do not change the saved file.</p>
   <div id="module-tools"></div>
   <div id="modules"></div>
    </div>
@@ -469,8 +484,22 @@ details.plan[open]>summary{margin-bottom:18px}
    </div>
   </fieldset>
 </section>
+<section data-page="routing" hidden class="fade-in" aria-labelledby="routing-heading">
+   <div class="page-head"><div><div class="eyebrow"><span class="register-index" aria-hidden="true">04</span>Provider routing</div><h1 id="routing-heading">Routing.</h1><p>The routing strategies on offer, ranked against live provider quota.</p></div><button id="refresh-routing" type="button" class="head-action">↻ &nbsp; Refresh routing</button></div>
+   <p id="routing-status" class="status-line" role="status" aria-live="polite">Routing reads the latest quota snapshot. Nothing here changes a plan.</p>
+   <div class="tab-strip" role="tablist" aria-label="Routing views"><button type="button" class="tab" role="tab" id="routing-tab-strategies" aria-selected="true" aria-controls="routing-panel-strategies" tabindex="0"><span class="register-index" aria-hidden="true">01</span>Strategies</button><button type="button" class="tab" role="tab" id="routing-tab-categories" aria-selected="false" aria-controls="routing-panel-categories" tabindex="-1"><span class="register-index" aria-hidden="true">02</span>Categories</button></div>
+   <div class="tab-panel" id="routing-panel-strategies" role="tabpanel" aria-labelledby="routing-tab-strategies" tabindex="0">
+    <div class="note">Each strategy ranks providers from the live quota snapshot — the same evidence the plugin uses on the next request. A provider with no fresh window sorts last.</div>
+    <div id="routing-strategies" class="usage-grid"></div>
+   </div>
+   <div class="tab-panel" id="routing-panel-categories" role="tabpanel" aria-labelledby="routing-tab-categories" tabindex="-1" hidden>
+    <div class="note">Each category orders its own models with the strategy it names. Row one is the next pick.</div>
+    <div class="editor-section"><label for="categories">Categories</label><p class="hint">@name in a plan refers to a category, so editing that category updates every plan that references it. Reset soonest orders a category at request time by the provider window that resets first, breaking ties by used quota and then by the provider path. Balanced pace orders by remaining room per minute of the tightest window.</p><div id="categories"></div></div>
+    <div id="routing-groups" class="usage-grid"></div>
+   </div>
+</section>
 <section data-page="providers" hidden class="fade-in" aria-labelledby="providers-heading">
-  <div class="page-head"><div><div class="eyebrow"><span class="register-index" aria-hidden="true">04</span>Provider inventory</div><h1 id="providers-heading">Providers &amp; models.</h1><p>Browse OpenCode’s provider catalog. Compare capabilities and exact named variants. Catalog metadata does not establish connectivity.</p></div><button id="refresh-providers" type="button" class="head-action">↻ &nbsp; Refresh catalog</button></div>
+  <div class="page-head"><div><div class="eyebrow"><span class="register-index" aria-hidden="true">05</span>Provider inventory</div><h1 id="providers-heading">Providers &amp; models.</h1><p>Browse OpenCode’s provider catalog. Compare capabilities and exact named variants. Catalog metadata does not establish connectivity.</p></div><button id="refresh-providers" type="button" class="head-action">↻ &nbsp; Refresh catalog</button></div>
   <p id="catalog-status" class="status-line" role="status" aria-live="polite">Refresh the catalog to see provider metadata. No inference calls are made.</p>
   <div class="shortlist-filter"><label class="check" for="preferred-filter"><input id="preferred-filter" type="checkbox" disabled>Preferred models only</label><button id="retry-preferences" type="button" class="shortlist-reload">Reload browser shortlist</button></div>
   <p id="preference-status" class="hint no-margin" role="status" aria-live="polite">Reading browser shortlist…</p>
@@ -489,7 +518,7 @@ details.plan[open]>summary{margin-bottom:18px}
   </fieldset>
 </section>
 <section data-page="quota" hidden class="fade-in" aria-labelledby="quota-heading">
-   <div class="page-head"><div><div class="eyebrow"><span class="register-index" aria-hidden="true">05</span>Provider quota</div><h1 id="quota-heading">Quota.</h1><p>Provider windows from the latest snapshot. A missing percent or reset stays unknown.</p></div><button id="refresh-quota" type="button" class="head-action">↻ &nbsp; Refresh quota</button></div>
+   <div class="page-head"><div><div class="eyebrow"><span class="register-index" aria-hidden="true">06</span>Provider quota</div><h1 id="quota-heading">Quota.</h1><p>Provider windows from the latest snapshot. A missing percent or reset stays unknown.</p></div><button id="refresh-quota" type="button" class="head-action">↻ &nbsp; Refresh quota</button></div>
   <div id="quota-providers" class="usage-grid"></div>
   <p id="quota-status" class="status-line" role="status" aria-live="polite">Quota loads with this page.</p>
 </section>
@@ -1013,7 +1042,7 @@ function bar(label,value,max){
  return h('div',{class:'bar-row'},h('div',{class:'bar-label'},h('span',{text:label}),h('span',{class:'mono',text:number(value)})),h('div',{class:'bar-track','aria-hidden':'true'},fill))
 }
 function navigate(){
-  const names={overview:'Overview',usage:'Usage',plans:'Plans',providers:'Providers & models',quota:'Quota'}
+  const names={overview:'Overview',usage:'Usage',plans:'Plans',routing:'Routing',providers:'Providers & models',quota:'Quota'}
   const candidate=window.location.hash.slice(1).split('?')[0], route=Object.hasOwn(names,candidate)?candidate:candidate==='models'?'usage':'overview'
  for(const page of document.querySelectorAll('[data-page]'))page.hidden=page.getAttribute('data-page')!==route
  for(const link of document.querySelectorAll('.nav a')){if(link.getAttribute('href')===`#${route}`)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current')}
@@ -1021,7 +1050,10 @@ function navigate(){
   document.title=`${names[route]} · Quartermaster`
   if(route==='plans'||route==='providers')void maybeLoadPlans()
   if(route==='providers')void maybeLoadCatalog()
+  // Plans and Routing suggest models, so the catalog has to be in hand there too.
+  if(route==='plans'||route==='routing')void maybeLoadCatalog()
   if(route==='quota')void maybeLoadWorkspace()
+  if(route==='routing')void loadRouting()
   if(route==='usage')void maybeLoadWorkspace()
 }
 function maybeLoadPlans(){
@@ -1221,9 +1253,108 @@ function paintCatalog(reset=true,focusIndex){
 }
 function modelSuggestions(){
  const models=catalogModels(), preferred=[], other=[]
+ const categories=Object.keys(draft?.categories||{}).map(name=>h('option',{value:`@${name}`,text:`@${name} category`}))
  for(const model of models){const id=`${model.providerID}/${model.id}`;(preferredModels.has(id)?preferred:other).push(h('option',{value:id,text:`${preferredModels.has(id)?'Preferred · ':''}${model.name||model.id}`}))}
  const missing=[...preferredModels].filter(id=>!models.some(model=>`${model.providerID}/${model.id}`===id)).map(id=>h('option',{value:id,text:'Preferred · not in current catalog'}))
- mount('#model-suggestions',...preferred,...missing,...other)
+ mount('#model-suggestions',...categories,...preferred,...missing,...other)
+}
+let comboSeq=0, openCombo=null
+function categoryByNameOf(value){
+  if(typeof value!=='string'||!value.startsWith('@'))return null
+  const name=value.trim().slice(1)
+  if(!name||!draft?.categories||!Object.hasOwn(draft.categories,name))return null
+  return name
+}
+function slotStrategyControl(label,getName,refresh){
+  const select=h('select',{class:'slot-strategy','aria-label':label,onChange:()=>{
+    const name=getName();if(!name)return
+    writeCategoryPick(name,select.value,categoryPick(draft.categories[name]).path||[]);refresh()
+  }},
+    h('option',{value:'',text:'As listed'}),
+    h('option',{value:'reset-soonest',text:'Reset soonest'}),
+    h('option',{value:'pace',text:'Balanced pace'}))
+  select.hidden=true
+  return {node:select,sync(){const name=getName();select.hidden=!name;select.value=name?(categoryPick(draft.categories[name]).by||''):''}}
+}
+function attachModelCombo(input,commit){
+  const id=`combo-menu-${++comboSeq}`
+  const menu=h('div',{class:'combo-menu',role:'listbox',id,'aria-label':`${input.getAttribute('aria-label')||'Model'} suggestions`})
+  const wrap=h('span',{class:'combo-field'},input,menu)
+  input.setAttribute('role','combobox');input.setAttribute('aria-expanded','false');input.setAttribute('aria-controls',id);input.setAttribute('autocomplete','off')
+  const api={close:closeOpen}
+  let options=[],active=-1
+  function closeOpen(){
+    openCombo=null;menu.classList.remove('open')
+    input.setAttribute('aria-expanded','false');input.removeAttribute('aria-activedescendant');active=-1
+  }
+  const setActive=index=>{
+    if(!options.length){input.removeAttribute('aria-activedescendant');return}
+    active=index<0?options.length-1:index>=options.length?0:index
+    options.forEach((opt,i)=>{opt.node.classList.toggle('active',i===active);opt.node.setAttribute('aria-selected',String(i===active))})
+    input.setAttribute('aria-activedescendant',options[active].node.id)
+    options[active].node.scrollIntoView?.({block:'nearest'})
+  }
+  function pick(item){input.value=item.value;closeOpen();commit(item.value)}
+  function build(){
+    const needle=(input.value||'').trim().toLowerCase()
+    const hit=(...texts)=>!needle||texts.some(text=>text.toLowerCase().includes(needle))
+    const models=catalogModels()
+    const catalogIds=new Set(models.map(model=>`${model.providerID}/${model.id}`))
+    const groups=[['Categories',[]],['Preferred',[]],['Catalog',[]]]
+    for(const name of Object.keys(draft?.categories||{})){
+      const label=`@${name}`
+      if(!hit(label,label))continue
+      const pick=categoryPick(draft.categories[name])
+      const members=categoryModelsOf(draft.categories[name]).length
+      groups[0][1].push({label,value:label,desc:`${members} model${members===1?'':'s'} · ${pick.by==='pace'?'balanced pace':pick.by==='reset-soonest'?'reset soonest':'as listed'}`})
+    }
+    for(const model of models){
+      const value=`${model.providerID}/${model.id}`
+      if(!hit(value,model.name||model.id))continue
+      ;(preferredModels.has(value)?groups[1][1]:groups[2][1]).push({label:`${value} · ${model.name||model.id}`,value})
+    }
+    for(const value of preferredModels){
+      if(catalogIds.has(value)||!hit(value,value))continue
+      groups[1][1].push({label:`${value} · not in catalog`,value})
+    }
+    options=[];menu.replaceChildren()
+    let left=40
+    for(const [heading,items] of groups){
+      if(!items.length)continue
+      const slice=items.slice(0,left)
+      if(!slice.length)break
+      menu.append(h('div',{class:'combo-group',text:heading}))
+      for(const item of slice){
+        const node=h('button',{type:'button',role:'option',id:`${id}-opt-${options.length}`,class:'combo-option',text:item.label,
+          onMouseDown:event=>event.preventDefault(),onClick:()=>pick(item)})
+        if(item.desc)node.append(h('small',{class:'combo-desc',text:item.desc}))
+        options.push({node,value:item.value});menu.append(node)
+      }
+      left-=slice.length
+    }
+    if(!options.length)menu.append(h('div',{class:'combo-more',text:'No matches. Typed values save as-is.'}))
+    else{
+      const total=groups.reduce((sum,[,items])=>sum+items.length,0)
+      if(total>options.length)menu.append(h('div',{class:'combo-more',text:`${total-options.length} more…`}))
+    }
+  }
+  function open(){
+    if(openCombo&&openCombo!==api)openCombo.close()
+    openCombo=api
+    build();active=-1;setActive(0)
+    menu.classList.add('open');input.setAttribute('aria-expanded','true')
+  }
+  input.addEventListener('input',()=>{open();commit(input.value)})
+  input.addEventListener('keydown',event=>{
+    const opened=menu.classList.contains('open')
+    if(event.key==='ArrowDown'){event.preventDefault();opened?setActive(active+1):open()}
+    else if(event.key==='ArrowUp'){event.preventDefault();if(opened)setActive(active-1)}
+    else if(event.key==='Enter'){if(opened&&active>=0&&options[active]){event.preventDefault();pick(options[active])}}
+    else if(event.key==='Escape'){if(opened){event.preventDefault();closeOpen()}}
+  })
+  input.addEventListener('blur',closeOpen)
+  input.addEventListener('focus',()=>{if(!menu.classList.contains('open'))open()})
+  return wrap
 }
 function catalogSuggestions(){
   modelSuggestions()
@@ -1234,7 +1365,8 @@ function catalogSuggestions(){
   catalogHasSelection=true
 }
 function assistVariant(idInput,variantInput,key){
- idInput.setAttribute('list','model-suggestions')
+ // A combobox carries its own menu; a native datalist here would open a second one.
+ if(idInput.getAttribute('role')!=='combobox')idInput.setAttribute('list','model-suggestions')
  const choices=h('datalist',{id:`variants-${key}`})
  const update=()=>{const model=catalogModels().find(item=>`${item.providerID}/${item.id}`===idInput.value);choices.replaceChildren(...(model?.variants||[]).map(value=>h('option',{value})));variantInput.setAttribute('list',`variants-${key}`)}
  idInput.addEventListener('input',update);variantRefreshers.push(update);update();return choices
@@ -1270,6 +1402,125 @@ function paintUsage(){
   cards.push(card)
  }
  mount('#quota-providers',...(cards.length?cards:[empty('No quota snapshot yet.','Open this page through the local gateway, or refresh quota. Missing windows stay unknown.')]))
+}
+// Routing reads what the next request would do: categories ordered by their pick
+// policy against the live quota snapshot, and plans expanded in place.
+// ponytail: the pace/reset ranking is restated here so the page needs no new RPC;
+// move it behind the gateway if a third policy appears.
+function modelParts(entry){
+ const id=typeof entry==='string'?entry:typeof entry?.id==='string'?entry.id:''
+ const slash=id.indexOf('/')
+ return {id,providerID:slash>0?id.slice(0,slash):'',modelID:slash>0?id.slice(slash+1):id,variant:typeof entry==='object'&&entry&&typeof entry.variant==='string'?entry.variant:null}
+}
+function categoryModelsOf(category){return Array.isArray(category)?category:Array.isArray(category?.models)?category.models:[]}
+function categoryPickOf(category){return !Array.isArray(category)&&category?.pick&&typeof category.pick==='object'?category.pick:{}}
+function routingSources(){
+ const map=new Map()
+ for(const source of usageData||[]){if(typeof source?.providerID==='string'&&source.providerID)map.set(source.providerID,source)}
+ return map
+}
+function providerClock(source){
+ let soonest, pace
+ if(source){
+  for(const window of source.windows||[]){
+   const percent=finite(window.percent)??finite(window.usedPercent), resetsAt=epoch(window.resetsAt)
+   if(resetsAt===undefined)continue
+   if(!soonest||resetsAt<soonest.resetsAt||(resetsAt===soonest.resetsAt&&(percent??-1)>(soonest.percent??-1)))soonest={label:window.label,percent,resetsAt}
+   if(source.stale===true||percent===undefined)continue
+   const minutes=(resetsAt-Date.now())/60000
+   if(!(minutes>0))continue
+   const value=(100-percent)/minutes
+   if(!pace||value<pace.value)pace={value,label:window.label,percent,resetsAt}
+  }
+ }
+ return {soonest,pace,stale:source?source.stale===true:false,known:!!source}
+}
+function routingOrder(category){
+ const pick=categoryPickOf(category), path=Array.isArray(pick.path)?pick.path:[], sources=routingSources()
+ const rows=categoryModelsOf(category).map((entry,index)=>{const parts=modelParts(entry);return {...parts,entry,index,clock:providerClock(sources.get(parts.providerID))}})
+ const rank=id=>{const at=path.indexOf(id);return at<0?path.length:at}
+ const tail=(left,right)=>rank(left.providerID)-rank(right.providerID)||left.index-right.index
+ const asc=(left,right)=>{if(left===undefined&&right===undefined)return 0;if(left===undefined)return 1;if(right===undefined)return -1;return left-right}
+ const desc=(left,right)=>{if(left===undefined&&right===undefined)return 0;if(left===undefined)return 1;if(right===undefined)return -1;return right-left}
+ if(pick.by==='pace')rows.sort((left,right)=>desc(left.clock.pace?.value,right.clock.pace?.value)||tail(left,right))
+ else if(pick.by==='reset-soonest')rows.sort((left,right)=>asc(left.clock.soonest?.resetsAt,right.clock.soonest?.resetsAt)||desc(left.clock.soonest?.percent,right.clock.soonest?.percent)||tail(left,right))
+ return rows
+}
+function routingTime(timestamp){
+ const text=timeText(timestamp)
+ const at=text.lastIndexOf(' · ')
+ return at<0?text:text.slice(at+3)
+}
+function routingStrategyRows(){
+ const rows=(usageData||[]).map(source=>({providerID:source?.providerID,clock:providerClock(source)})).filter(row=>typeof row.providerID==='string'&&row.providerID!=='')
+ const asc=(left,right)=>{if(left===undefined&&right===undefined)return 0;if(left===undefined)return 1;if(right===undefined)return -1;return left-right}
+ const desc=(left,right)=>{if(left===undefined&&right===undefined)return 0;if(left===undefined)return 1;if(right===undefined)return -1;return right-left}
+ const pace=[...rows].sort((left,right)=>desc(left.clock.pace?.value,right.clock.pace?.value)||left.providerID.localeCompare(right.providerID))
+ const reset=[...rows].sort((left,right)=>asc(left.clock.soonest?.resetsAt,right.clock.soonest?.resetsAt)||desc(left.clock.soonest?.percent,right.clock.soonest?.percent)||left.providerID.localeCompare(right.providerID))
+ return {pace,reset}
+}
+function routingStrategyCard(title,description,badge,rows,weighted){
+ const total=weighted?rows.reduce((sum,row)=>sum+(row.clock.pace?.value||0),0):0
+ const card=h('section',{class:'panel'},h('div',{class:'panel-head'},h('div',{},h('h2',{text:title}),h('p',{text:description})),h('span',{class:'badge neutral',text:badge})))
+ if(!rows.length){card.append(empty('No provider quota yet.','Open this page through the local gateway, or refresh.'));return card}
+ const body=rows.map((row,position)=>{
+  const window=weighted?row.clock.pace:row.clock.soonest
+  const share=weighted&&total>0&&row.clock.pace?Math.round(row.clock.pace.value/total*100):undefined
+  const notes=[]
+  if(row.clock.stale)notes.push('stale quota')
+  if(known(row.clock.soonest?.percent)&&row.clock.soonest.percent>=90)notes.push('over the 90% gate')
+  const line=[window?.label||'',known(window?.percent)?`${number(window.percent)}% used`:'',...notes].filter(Boolean).join(' · ')
+  return h('tr',{},
+   h('td',{class:'num',text:String(position+1)}),
+   h('td',{},h('div',{},h('span',{class:'mono',text:row.providerID})),h('div',{class:'hint',text:line||'no window'})),
+   h('td',{class:'num',text:row.clock.soonest?routingTime(row.clock.soonest.resetsAt):'—',title:row.clock.soonest?timeText(row.clock.soonest.resetsAt):''}),
+   h('td',{class:'num mono',text:known(row.clock.pace?.value)?row.clock.pace.value.toFixed(3):'—'}),
+   h('td',{class:'num',text:share===undefined?'—':`${share}%`}))
+ })
+ card.append(h('div',{class:'ledger-wrap'},h('table',{class:'ledger'},h('thead',{},h('tr',{},h('th',{scope:'col',class:'num',text:'#'}),h('th',{scope:'col',text:'Provider'}),h('th',{scope:'col',class:'num',text:'Resets in'}),h('th',{scope:'col',class:'num',text:'Pace %/min'}),h('th',{scope:'col',class:'num',text:'Share'}))),h('tbody',{},...body))))
+ return card
+}
+function routingCategoryCard(name,category){
+ const pick=categoryPickOf(category), rows=routingOrder(category)
+ const policy=pick.by==='pace'?'balanced pace':pick.by==='reset-soonest'?'reset soonest':'as listed'
+ const head=h('div',{class:'panel-head'},h('div',{},h('h2',{text:`@${name}`}),h('p',{class:'mono',text:Array.isArray(pick.path)&&pick.path.length?`path · ${pick.path.join(' → ')}`:'no provider path'})),h('span',{class:'badge neutral',text:policy}))
+ const card=h('section',{class:'panel'},head)
+ if(!rows.length){card.append(empty('No models in this category.','Add one on the Plans page.'));return card}
+ const body=rows.map((row,position)=>{
+  const window=row.clock.pace||row.clock.soonest
+  const notes=[]
+  if(!row.clock.known)notes.push('no quota source')
+  else if(row.clock.stale)notes.push('stale quota')
+  if(known(window?.percent)&&window.percent>=90)notes.push('over the 90% gate')
+  if(position===0)notes.unshift('next pick')
+  const line=[window?.label||'',known(window?.percent)?`${number(window.percent)}% used`:'',...notes].filter(Boolean).join(' · ')
+  const label=row.variant?`${row.id} · ${row.variant}`:row.id
+  return h('tr',{},h('td',{class:'num',text:String(position+1)}),h('td',{},h('div',{},h('span',{class:'mono',text:label})),h('div',{class:'hint',text:line||'no window'})),h('td',{class:'num',text:row.clock.soonest?routingTime(row.clock.soonest.resetsAt):'—',title:row.clock.soonest?timeText(row.clock.soonest.resetsAt):''}),h('td',{class:'num mono',text:known(row.clock.pace?.value)?`${row.clock.pace.value.toFixed(3)}`:'—'}))
+ })
+ card.append(h('div',{class:'ledger-wrap'},h('table',{class:'ledger'},h('caption',{class:'hint',text:pick.by==='pace'?'Ordered by remaining room per minute of the tightest window, most first. Pace is percent of a window per minute.':'Ordered by the window that resets first. Ties fall to used quota, then the provider path, then file order.'}),h('thead',{},h('tr',{},h('th',{scope:'col',class:'num',text:'#'}),h('th',{scope:'col',text:'Model'}),h('th',{scope:'col',class:'num',text:'Resets in'}),h('th',{scope:'col',class:'num',text:'Pace %/min'}))),h('tbody',{},...body))))
+ return card
+}
+function paintRouting(){
+ const options=saved||{}
+ const categories=options.categories&&typeof options.categories==='object'?options.categories:{}
+ const rows=routingStrategyRows()
+ mount('#routing-strategies',
+  routingStrategyCard('Reset soonest','Whichever provider window resets first goes first, then the one with more quota used.','reset soonest',rows.reset,false),
+  routingStrategyCard('Balanced pace','Whichever provider has the most room left per minute of its tightest window goes first. Share is how the traffic splits.','balanced pace',rows.pace,true))
+ const cards=Object.entries(categories).map(([name,category])=>routingCategoryCard(name,category))
+ mount('#routing-groups',...(cards.length?cards:[empty('No categories yet.','Add one above to see how it orders its models.')]))
+}
+function loadRouting(){
+ const button=document.querySelector('#refresh-routing')
+ try{const protocol=location.protocol;if(protocol!=='http:'&&protocol!=='https:'){paintRouting();return}}catch{paintRouting();return}
+ if(button)button.disabled=true
+ setMessage('#routing-status','Reading the quota snapshot…')
+ return Promise.allSettled([maybeLoadPlans(),maybeLoadWorkspace()]).then(()=>{
+  paintRouting()
+  if(button)button.disabled=false
+  const categories=Object.keys(saved?.categories||{}).length
+  setMessage('#routing-status',`Two strategies · ${categories} categor${categories===1?'y':'ies'} in the saved plans. Order is what the next request would try.`)
+ })
 }
 function finite(value){return typeof value==='number'&&Number.isFinite(value)?value:undefined}
 function epoch(value){const numeric=finite(value);if(numeric!==undefined)return numeric;if(typeof value==='string'&&/^\d{4}-\d{2}-\d{2}T/.test(value)){const parsed=Date.parse(value);if(Number.isFinite(parsed))return parsed}}
@@ -1389,13 +1640,59 @@ function normalizeModel(model){
   if(split<=0||split===modelID.length-1||/\s/.test(modelID))throw Error('Each model must be providerID/modelID')
   return effort?{id:modelID,variant:effort}:modelID
 }
+function normalizePlanModel(model){
+  const raw=typeof model==='string'?model:modelBits(model).id
+  if(typeof raw==='string'&&raw.trim().startsWith('@')){
+    const name=raw.trim().slice(1)
+    if(!name||/\s/.test(name))throw Error('A category reference must look like @name')
+    return `@${name}`
+  }
+  return normalizeModel(model)
+}
+function categoryModels(value){return Array.isArray(value)?value:Array.isArray(value?.models)?value.models:[]}
+function categoryPick(value){const pick=Array.isArray(value)?null:value?.pick;return pick&&typeof pick==='object'&&!Array.isArray(pick)?pick:{}}
+function normalizeCategoryPick(name,pick){
+  if(pick===undefined)return undefined
+  if(!pick||typeof pick!=='object'||Array.isArray(pick))throw Error(`Category ${name} pick must be an object`)
+  const out={}
+  for(const key of Object.keys(pick)){
+    if(key==='by'){
+      if(pick.by!=='reset-soonest'&&pick.by!=='pace')throw Error(`Category ${name} pick by must be reset-soonest or pace`)
+      out.by=pick.by
+    }else if(key==='path'){
+      if(!Array.isArray(pick.path))throw Error(`Category ${name} pick path must be a list of provider IDs`)
+      const path=pick.path.map(item=>{
+        if(typeof item!=='string'||!item||/\s/.test(item))throw Error(`Category ${name} pick path must list provider IDs without spaces`)
+        return item
+      })
+      if(path.length)out.path=path
+    }else throw Error(`Category ${name} pick only takes by and path`)
+  }
+  return Object.keys(out).length?out:undefined
+}
+function normalizeCategories(categories){
+  const out=Object.create(null)
+  if(categories===undefined)return out
+  if(!categories||typeof categories!=='object'||Array.isArray(categories))throw Error('Categories must be a list of named groups')
+  for(const name of Object.keys(categories)){
+    const value=categories[name]
+    const raw=Array.isArray(value)?value:Array.isArray(value?.models)?value.models:null
+    if(!raw||!raw.length)throw Error(`Category ${name} needs a model`)
+    const models=raw.map(normalizeModel)
+    if(Array.isArray(value)){out[name]=models;continue}
+    if(!value||typeof value!=='object')throw Error(`Category ${name} must be a list of models or an object with models`)
+    const pick=normalizeCategoryPick(name,value.pick)
+    out[name]=pick?{models,pick}:{models}
+  }
+  return out
+}
 function normalizePlans(plans){
   if(!plans||typeof plans!=='object'||Array.isArray(plans))throw Error('Plans are missing')
   const out=Object.create(null)
   for(const name of Object.keys(plans)){
     const models=plans[name]
     if(!Array.isArray(models)||!models.length)throw Error(`Plan ${name} needs a model`)
-    out[name]=models.map(normalizeModel)
+    out[name]=models.map(normalizePlanModel)
   }
   return out
 }
@@ -1413,6 +1710,7 @@ function editedOptions(){
   if(!draft)throw Error('Load project options before applying')
   const out=ownCopy(draft)
   out.plans=normalizePlans(out.plans)
+  out.categories=normalizeCategories(out.categories)
   out.agents=normalizeMap(out.agents,'agent')
   out.workTypes=normalizeMap(out.workTypes,'work type')
   for(const [name,plan] of Object.entries(out.agents))if(!Object.hasOwn(out.plans,plan))throw Error(`Agent ${name} uses a plan that is not listed`)
@@ -1433,7 +1731,7 @@ function editedOptions(){
   }
   return out
 }
-function show(options){draft=ownCopy(options);renderBoard();paintAccess()}
+function show(options){draft=ownCopy(options);if(!draft.categories||typeof draft.categories!=='object'||Array.isArray(draft.categories))draft.categories={};renderBoard();paintAccess()}
 function setPlanModels(plan,models){if(!draft?.plans)throw Error('Load project options before applying');draft.plans[plan]=models.slice();renderBoard()}
 function moveItem(list,index,delta){const target=index+delta;if(target<0||target>=list.length)return;list.splice(target,0,list.splice(index,1)[0]);renderBoard()}
 function moveKey(object,key,delta){
@@ -1826,9 +2124,87 @@ function renderPlanTools(){
     h('div',{class:'plan-organizer-add'},h('label',{class:'field'},h('span',{text:'New plan'}),planName),addPlan),
   ),planFilterStatus)
 }
+function writeCategoryModel(name,index,id,variant){
+  const value=draft.categories[name], models=categoryModels(value)
+  models[index]=variant?{id,variant}:id
+  if(!Array.isArray(value))value.models=models
+}
+function writeCategoryPick(name,by,path){
+  const value=draft.categories[name], models=categoryModels(value)
+  const pick={}
+  if(by)pick.by=by
+  if(Array.isArray(path)&&path.length)pick.path=path
+  if(!pick.by&&!pick.path)draft.categories[name]=models
+  else if(Array.isArray(value))draft.categories[name]={models,pick}
+  else{value.models=models;value.pick=pick}
+}
+const categoryChainExpansion=new Map()
+function renderCategories(){
+  const host=document.querySelector('#categories')
+  if(!host||typeof host.replaceChildren!=='function')return
+  const categories=draft.categories&&typeof draft.categories==='object'&&!Array.isArray(draft.categories)?draft.categories:null
+  if(!categories){host.replaceChildren();return}
+  const names=Object.keys(categories)
+  const created=h('input',{type:'text','aria-label':'New category name, saved with plans','placeholder':'category name'})
+  const add=h('button',{type:'button',text:'Add category',onClick:()=>{
+    const name=created.value.trim()
+    if(!name){optionsStatus.textContent='Enter a category name first.';return}
+    if(name.startsWith('@')){optionsStatus.textContent='Category names do not take an @.';return}
+    if(!draft.categories||typeof draft.categories!=='object'||Array.isArray(draft.categories))draft.categories=Object.create(null)
+    if(Object.hasOwn(draft.categories,name)){optionsStatus.textContent='That category is already listed.';return}
+    draft.categories[name]=['']
+    renderBoard()
+  }})
+  host.replaceChildren(h('div',{class:'plan-organizer'},h('div',{class:'plan-organizer-add'},h('label',{class:'field'},h('span',{text:'New category'}),created),add)))
+  if(!names.length){host.append(h('p',{class:'hint',text:'No category yet.'}));return}
+  for(const name of names){
+    if(!Array.isArray(categories[name])&&!Array.isArray(categories[name]?.models))categories[name]=[]
+    const value=categories[name], models=categoryModels(value), pick=categoryPick(value)
+    const card=h('details',{class:'plan',onToggle:()=>categoryChainExpansion.set(name,card.open)})
+    if(categoryChainExpansion.has(name)?categoryChainExpansion.get(name):names.length<=6||name===names[0])card.setAttribute('open','')
+    const chain=h('span',{class:'chain',text:chainLabel(models)})
+    const refresh=()=>{chain.textContent=chainLabel(categoryModels(draft.categories[name]))}
+    card.append(h('summary',{},h('strong',{text:name}),h('span',{text:` · ${models.length} model${models.length===1?'':'s'}`}),pick.by?h('span',{text:pick.by==='pace'?' · balanced pace':' · reset soonest'}):null,chain))
+    models.forEach((model,index)=>{
+      const bits=modelBits(model)
+      const idInput=h('input',{type:'text','aria-label':`${name} model ${index+1}`,value:bits.id})
+      const strategy=slotStrategyControl(`${name} model ${index+1} strategy`,()=>categoryByNameOf(idInput.value),refresh)
+      const comboModel=attachModelCombo(idInput,value=>{
+        const nested=value.trim().startsWith('@')
+        idInput.setAttribute('aria-invalid',String(nested))
+        strategy.sync()
+        if(!nested){writeCategoryModel(name,index,value,modelBits(models[index]).variant);refresh()}
+      })
+      const variantInput=h('input',{type:'text','aria-label':`${name} variant ${index+1}`,value:bits.variant,placeholder:'Exact variant (optional)',onInput:()=>{writeCategoryModel(name,index,modelBits(models[index]).id,variantInput.value);refresh()}})
+      const suggestions=assistVariant(idInput,variantInput,`category-${encodeURIComponent(name)}-${index}`)
+      card.append(suggestions)
+      strategy.sync()
+      card.append(h('div',{class:'row'},h('span',{text:String(index+1)}),comboModel,variantInput,h('span',{},
+        strategy.node,
+        index?h('button',{type:'button',text:'Earlier',onClick:()=>moveItem(models,index,-1)}):null,
+        index<models.length-1?h('button',{type:'button',text:'Later',onClick:()=>moveItem(models,index,1)}):null,
+        h('button',{type:'button',text:'Remove',onClick:()=>{models.splice(index,1);renderBoard()}}),
+      )))
+    })
+    const pickSelect=h('select',{'aria-label':`${name} pick`,onChange:()=>{writeCategoryPick(name,pickSelect.value,categoryPick(draft.categories[name]).path||[]);renderBoard()}},
+      h('option',{value:'',text:'As listed'}),
+      h('option',{value:'reset-soonest',text:'Reset soonest'}),
+      h('option',{value:'pace',text:'Balanced pace'}))
+    pickSelect.value=pick.by||''
+    const pathInput=h('input',{type:'text','aria-label':`${name} provider path`,placeholder:'Provider tie-break, comma separated',value:(pick.path||[]).join(', '),onInput:()=>{
+      writeCategoryPick(name,categoryPick(draft.categories[name]).by||'',pathInput.value.split(',').map(item=>item.trim()).filter(Boolean))
+    }})
+    card.append(h('div',{class:'category-policy'},pickSelect,pathInput))
+    card.append(h('div',{class:'toolbar'},
+      h('button',{type:'button',text:'Add model',onClick:()=>{models.push('');renderBoard()}}),
+      h('button',{type:'button',text:'Remove category',onClick:()=>{delete draft.categories[name];renderBoard()}}),
+    ))
+    host.append(card)
+  }
+}
 function renderBoard(){
   if(typeof document.createElement!=='function'||!draft)return
-  const mounts={pools:document.querySelector('#shared-pools'),probes:document.querySelector('#probes'),plans:document.querySelector('#plans'),modules:document.querySelector('#modules'),agents:document.querySelector('#agents'),limits:document.querySelector('#limits')}
+  const mounts={pools:document.querySelector('#shared-pools'),probes:document.querySelector('#probes'),plans:document.querySelector('#plans'),categories:document.querySelector('#categories'),modules:document.querySelector('#modules'),agents:document.querySelector('#agents'),limits:document.querySelector('#limits')}
    if(Object.values(mounts).some(node=>!node||typeof node.replaceChildren!=='function'))return
    variantRefreshers=[]
   const inPool=pooled(), inProbe=probed()
@@ -1949,14 +2325,21 @@ function renderBoard(){
     card.append(h('summary',{},h('span',{class:'drag-handle',draggable:'true','aria-hidden':'true',title:'Drag to reorder',text:'⋮⋮',onDragStart:event=>startDrag(event,'plan',plan),onDragEnd:endDrag}),h('strong',{text:plan}),category,h('span',{text:usedBy(plan).length?` · ${usedBy(plan).join(', ')}`:''}),chain))
     models.forEach((model,index)=>{
       const bits=modelBits(model)
-    const idInput=h('input',{type:'text',list:'model-suggestions','aria-label':`${plan} model ${index+1}`,value:bits.id,onInput:()=>{writeModel(plan,index,idInput.value,modelBits(draft.plans[plan][index]).variant);refresh()}})
+    const idInput=h('input',{type:'text','aria-label':`${plan} model ${index+1}`,value:bits.id})
+    const strategy=slotStrategyControl(`${plan} model ${index+1} strategy`,()=>categoryByNameOf(idInput.value),refresh)
+    const comboModel=attachModelCombo(idInput,value=>{
+      writeModel(plan,index,value,modelBits(draft.plans[plan][index]).variant)
+      strategy.sync();refresh()
+    })
     const variantInput=h('input',{type:'text','aria-label':`${plan} variant ${index+1}`,value:bits.variant,placeholder:'Exact variant (optional)',onInput:()=>{writeModel(plan,index,modelBits(draft.plans[plan][index]).id,variantInput.value);refresh()}})
       const suggestions=assistVariant(idInput,variantInput,`plan-${encodeURIComponent(plan)}-${index}`)
       card.append(suggestions)
       const badges=h('span',{})
       if(inPool.has(bits.id))badges.append(h('span',{class:'badge',text:'shared pool'}))
       if(inProbe.has(bits.id))badges.append(h('span',{class:'badge',text:'probe'}))
-      card.append(h('div',{class:'row'},h('span',{text:String(index+1)}),idInput,variantInput,h('span',{},
+      strategy.sync()
+      card.append(h('div',{class:'row'},h('span',{text:String(index+1)}),comboModel,variantInput,h('span',{},
+        strategy.node,
         index?h('button',{type:'button',text:'Earlier',onClick:()=>moveItem(draft.plans[plan],index,-1)}):null,
         index<models.length-1?h('button',{type:'button',text:'Later',onClick:()=>moveItem(draft.plans[plan],index,1)}):null,
         h('button',{type:'button',text:'Remove',onClick:()=>{draft.plans[plan].splice(index,1);renderBoard()}}),
@@ -1973,6 +2356,8 @@ function renderBoard(){
      }
     }
      paintPlanFilter()
+   renderCategories()
+   modelSuggestions()
    renderAgentTools()
    renderBindings(mounts.agents,'agent','agents',planNames)
   renderModuleTools()
@@ -2503,7 +2888,7 @@ bind('#provider-filter','change',()=>paintCatalog())
 bind('#thinking-filter','change',()=>paintCatalog())
 bind('#preferred-filter','change',()=>paintCatalog())
 bind('#retry-preferences','click',loadPreferences)
-const planTabs=[document.querySelector('#tab-plans'),document.querySelector('#tab-agents'),document.querySelector('#tab-modules'),document.querySelector('#tab-settings')], planTabPanels=[document.querySelector('#panel-plans'),document.querySelector('#panel-agents'),document.querySelector('#panel-modules'),document.querySelector('#panel-settings')]
+const planTabs=[document.querySelector('#tab-plans'),document.querySelector('#plan-tab-agents'),document.querySelector('#tab-modules'),document.querySelector('#tab-settings')], planTabPanels=[document.querySelector('#panel-plans'),document.querySelector('#plan-panel-agents'),document.querySelector('#panel-modules'),document.querySelector('#panel-settings')]
 function selectPlanTab(index){for(const [position,tab] of planTabs.entries()){if(!tab)continue
     tab.setAttribute?.('aria-selected',String(position===index))
     tab.tabIndex=position===index?0:-1
@@ -2521,7 +2906,17 @@ planTabs.forEach((tab,index)=>{if(!tab||typeof tab.addEventListener!=='function'
     event.preventDefault()
     selectPlanTab(next)})})
 if(typeof document.querySelectorAll==='function'){{const saved=/[?&]range=([a-z0-9]+)/.exec(window.location.hash)?.[1];if(saved&&Object.hasOwn(RANGES,saved))activeRange=saved}
- addEventListener('hashchange',navigate);navigate();loadPreferences();paintOverview();paintCatalog();paintUsage()}
+ document.querySelector('#refresh-routing')?.addEventListener('click',()=>{void loadRouting()})
+ const routingViews=['strategies','categories']
+ function selectRoutingView(name){
+   for(const view of routingViews){
+     const panel=document.querySelector(`#routing-panel-${view}`), tab=document.querySelector(`#routing-tab-${view}`)
+     if(panel){panel.hidden=view!==name;panel.tabIndex=view===name?0:-1}
+     if(tab){tab.setAttribute('aria-selected',String(view===name));tab.tabIndex=view===name?0:-1}
+   }
+ }
+ for(const view of routingViews){const tab=document.querySelector(`#routing-tab-${view}`);if(tab)tab.addEventListener('click',()=>selectRoutingView(view))}
+addEventListener('hashchange',navigate);navigate();loadPreferences();paintOverview();paintCatalog();paintUsage()}
 const usageViews=['models','projects','agents','providers','plugins']
 function selectUsageView(name){
   for(const view of usageViews){

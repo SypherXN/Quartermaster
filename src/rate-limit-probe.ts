@@ -8,13 +8,15 @@ import { modelKey } from "./select.ts"
  * re-issues a user turn, and it is only ever sent to a model the operator listed in
  * `probeRateLimits`.
  */
-export type ProbeOutcome = "success" | "still-limited" | "error"
+export type ProbeOutcome = "success" | "still-limited" | "inconclusive" | "error"
 
 export interface ProbeRecord {
   providerID: string
   modelID: string
   outcome: ProbeOutcome
   at: number
+  /** Short, sanitized reason a probe did not succeed, so the outcome is not a dead end. */
+  detail?: string
 }
 
 export interface ProbeAttempt {
@@ -88,9 +90,11 @@ export function selectProbeTargets(input: ProbeDecisionInput): ModelRef[] {
       ? Number.NEGATIVE_INFINITY
       : Math.max(...cooling.map((member) => input.cooldowns.get(modelKey(member))!))
     if (!attempt && input.now < until) continue
-    // A provider-stated reset already says when the limit clears.
+    // A provider-stated reset already says when the limit clears -- but only wait it out when it
+    // lands within one backoff window. A deadline hours away is usually a different (longer)
+    // window of the same account, and trusting it would park a recovered bucket for that long.
     const deadline = Math.max(...members.map((member) => input.deadlines?.get(modelKey(member)) ?? Number.NEGATIVE_INFINITY))
-    if (deadline > input.now) continue
+    if (deadline > input.now && deadline - input.now <= input.maxBackoffMs) continue
     // After the first probe the backoff alone drives the schedule: the cooldown floor must not
     // swallow it, or polling would stop at the provider cooldown.
     if (attempt && input.now < attempt.at + probeBackoffMs(input.intervalMs, attempt.failures, input.maxBackoffMs)) continue
@@ -108,7 +112,13 @@ export class RateLimitProbes {
     return selectProbeTargets({ ...input, lastProbe: this.attempts })
   }
 
-  record(model: ModelRef, outcome: ProbeOutcome, now: number, groups: readonly ModelRef[][]): void {
+  record(
+    model: ModelRef,
+    outcome: ProbeOutcome,
+    now: number,
+    groups: readonly ModelRef[][],
+    detail?: string,
+  ): void {
     const bucket = bucketId(model, groups)
     const attempt = this.attempts.get(bucket)
     if (outcome === "success") {
@@ -120,7 +130,7 @@ export class RateLimitProbes {
         failures: outcome === "still-limited" ? (attempt?.failures ?? 0) + 1 : attempt?.failures ?? 0,
       })
     }
-    this.records.push({ providerID: model.providerID, modelID: model.modelID, outcome, at: now })
+    this.records.push({ providerID: model.providerID, modelID: model.modelID, outcome, at: now, ...(detail ? { detail } : {}) })
     while (this.records.length > 64) this.records.shift()
   }
 

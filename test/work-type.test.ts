@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { parseConfig } from "../src/config.ts"
+import { expandPlans, parseConfig } from "../src/config.ts"
 import { modelKey, resolvePlan, selectAgentModel, selectModel } from "../src/select.ts"
 import type { ModelRef } from "../src/config.ts"
 
@@ -12,7 +12,7 @@ const config = parseConfig({
   agents: { reviewer: "review" },
   workTypes: { review: "review", quick: "fast" },
 })
-const registry: ModelRef[] = Object.values(config.plans).flat()
+const registry: ModelRef[] = Object.values(expandPlans(config)).flat()
 const eligibility = new Map(registry.map((model) => [modelKey(model), { status: "available" as const }]))
 
 test("explicit work types select distinct plans for the same agent", () => {

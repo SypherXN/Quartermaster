@@ -1,6 +1,6 @@
 import { Rpc } from "@opencode/plugin/rpc"
 import type { Context } from "@opencode/plugin/promise/plugin"
-import type { QuartermasterConfig } from "./config.ts"
+import { expandPlans, type ModelRef, type QuartermasterConfig } from "./config.ts"
 import type { FailureReport, SuccessReport } from "./failures.ts"
 import { ModuleConfigurationUnavailable, type ModuleCooldowns, type ModuleCooldownReport, type ModuleSelection } from "./modules.ts"
 import type { registerAgentRouting } from "./agent-routing.ts"
@@ -30,7 +30,7 @@ export type ReportingServices = {
   windowLedger?: WindowLedger
   budgets: readonly TokenBudgetConfig[] | undefined
   tokenRates: QuartermasterConfig["tokenRates"]
-  plans?: QuartermasterConfig["plans"]
+  plans?: Readonly<Record<string, readonly ModelRef[]>>
   catalog?: () => Promise<CatalogSnapshot>
   now?: () => number
 }
@@ -437,7 +437,7 @@ export async function requestReport(
 }
 
 function planStatus(config: QuartermasterConfig) {
-  return { plans: config.plans, agents: config.agents, workTypes: config.workTypes }
+  return { plans: expandPlans(config), agents: config.agents, workTypes: config.workTypes }
 }
 
 function statusFallback(config: QuartermasterConfig, usage?: UsageReadResult) {
@@ -607,7 +607,7 @@ export async function registerQuartermasterRpc(
       }
       const report = await buildQuartermasterReport({
         ...reporting,
-        plans: reporting.plans ?? config.plans,
+        plans: reporting.plans ?? expandPlans(config),
         catalog: reporting.catalog ?? (() => readCatalogSnapshot(() => ctx.model.list())),
       }, query, input.refresh === true, { names, merge, exclude, known, fallback })
       // Opt-in only; ranged/paged requests must not replace the all-time snapshot.

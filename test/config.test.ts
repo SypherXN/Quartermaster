@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { readFile } from "node:fs/promises"
 import test from "node:test"
-import { parseConfig } from "../src/config.ts"
+import { expandPlan, parseConfig } from "../src/config.ts"
 
 test("example config parses", async () => {
   const input = JSON.parse(await readFile(new URL("../examples/quartermaster.json", import.meta.url), "utf8"))
@@ -28,6 +28,56 @@ test("normalizes candidates, variants, bindings, and defaults", () => {
   assert.equal(config.providerCooldownMs, 300_000)
   assert.equal(config.localHealthTimeoutMs, 2_000)
   assert.deepEqual(config.localEndpoints, { ollama: "http://127.0.0.1:11434/" })
+})
+
+test("keeps a category reference in the plan and expands it on demand", () => {
+  const config = parseConfig({
+    categories: {
+      fast: ["provider-a/quick", { id: "provider-b/quick", variant: "low" }],
+      deep: ["provider-c/think"],
+    },
+    plans: { review: ["@deep", "provider-a/quality", { category: "fast" }] },
+  })
+  assert.deepEqual(config.categories.fast, {
+    models: [{ providerID: "provider-a", modelID: "quick" }, { providerID: "provider-b", modelID: "quick", variant: "low" }],
+  })
+  assert.deepEqual(config.plans.review, [
+    { category: "deep" },
+    { providerID: "provider-a", modelID: "quality" },
+    { category: "fast" },
+  ])
+  assert.deepEqual(expandPlan(config.plans.review, config.categories).map((model) => model.modelID),
+    ["think", "quality", "quick", "quick"])
+})
+
+test("parses a category pick policy and rejects an unknown strategy", () => {
+  const config = parseConfig({
+    categories: { fast: { models: ["provider-a/quick"], pick: { by: "reset-soonest", path: ["provider-a", "provider-b"] } } },
+    plans: { review: ["@fast"] },
+  })
+  assert.deepEqual(config.categories.fast.pick, { by: "reset-soonest", path: ["provider-a", "provider-b"] })
+  const paced = parseConfig({
+    categories: { fast: { models: ["provider-a/quick"], pick: { by: "pace" } } },
+    plans: { review: ["@fast"] },
+  })
+  assert.deepEqual(paced.categories.fast.pick, { by: "pace" })
+  assert.throws(
+    () => parseConfig({ categories: { fast: { models: ["provider-a/quick"], pick: { by: "cheapest" } } } }),
+    /expected reset-soonest or pace/,
+  )
+  assert.throws(
+    () => parseConfig({ categories: { fast: { models: ["provider-a/quick"], pick: { by: "reset-soonest", other: 1 } } } }),
+    /unknown field/,
+  )
+})
+
+test("rejects unknown categories, empty categories, and duplicate plan candidates", () => {
+  assert.throws(() => parseConfig({ plans: { review: ["@missing"] } }), /unknown category/)
+  assert.throws(() => parseConfig({ categories: { fast: [] }, plans: {} }), /non-empty array/)
+  assert.throws(
+    () => parseConfig({ categories: { fast: ["provider-a/quick"] }, plans: { review: ["@fast", "@fast"] } }),
+    /duplicate model candidate/,
+  )
 })
 
 test("parses opt-in token budgets without enabling them by default", () => {
@@ -113,8 +163,8 @@ test("preserves slashes inside provider model IDs", () => {
 
 test("allows no bindings and accepts custom durations", () => {
   assert.deepEqual(parseConfig({}), {
-    plans: {}, agents: {}, workTypes: {}, usageSources: {}, quotaExemptModels: [], exclusiveModels: [], sharedRateLimits: [],
-    probeRateLimits: [], probeIntervalMs: 300_000, probeMaxBackoffMs: 3_600_000,
+    plans: {}, categories: {}, agents: {}, workTypes: {}, usageSources: {}, quotaExemptModels: [], exclusiveModels: [], sharedRateLimits: [],
+    probeRateLimits: [], probeIntervalMs: 300_000, probeMaxBackoffMs: 1_800_000,
     providerCooldownMs: 300_000, localHealthTimeoutMs: 2_000, localEndpoints: {},
   })
   assert.equal(parseConfig({ providerCooldownMs: 30, localHealthTimeoutMs: 50 }).providerCooldownMs, 30)
@@ -123,7 +173,7 @@ test("allows no bindings and accepts custom durations", () => {
 test("probing is opt-in and only accepts fully qualified model references", () => {
   assert.deepEqual(parseConfig({}).probeRateLimits, [], "probing must be off by default")
   assert.equal(parseConfig({}).probeIntervalMs, 300_000)
-  assert.equal(parseConfig({}).probeMaxBackoffMs, 3_600_000)
+  assert.equal(parseConfig({}).probeMaxBackoffMs, 1_800_000)
   assert.deepEqual(parseConfig({ probeRateLimits: ["opencode/primary-free"] }).probeRateLimits, [
     { providerID: "opencode", modelID: "primary-free" },
   ])

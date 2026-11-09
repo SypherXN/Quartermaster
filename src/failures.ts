@@ -192,12 +192,13 @@ export class FailureCooldowns {
    * Model-scoped cooldown records, expired entries included: the models known to be rate limited.
    * An expired record is what marks a bucket as still limited after its own floor ran out.
    */
-  knownLimitedModels(): { providerID: string; modelID: string; until: number }[] {
-    const limited: { providerID: string; modelID: string; until: number }[] = []
+  knownLimitedModels(): { providerID: string; modelID: string; until: number; occurredAt?: number }[] {
+    const limited: { providerID: string; modelID: string; until: number; occurredAt?: number }[] = []
     for (const [scopeKey, until] of this.until) {
       const [providerID, modelID] = JSON.parse(scopeKey) as [string, string | null]
       if (modelID === null) continue
-      limited.push({ providerID, modelID, until })
+      const occurredAt = this.evidence.get(scopeKey)?.occurredAt
+      limited.push({ providerID, modelID, until, ...(occurredAt === undefined ? {} : { occurredAt }) })
     }
     return limited
   }
