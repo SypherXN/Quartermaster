@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { modelKey, selectAgentModel, selectModel, selectNamedPlan } from "../src/select.ts"
+import { modelKey, selectAgentModel, selectModel, selectNamedPlan, STICKY_IDLE_MS } from "../src/select.ts"
 import type { ModelEligibility } from "../src/select.ts"
 import type { ModelRef } from "../src/config.ts"
 
@@ -151,5 +151,89 @@ test("named plan follows plan order and does not borrow an agent pin", () => {
   if (busy.status === "selected") {
     assert.equal(busy.model, backup)
     assert.equal(busy.skipped[0]?.reason.code, "exclusive-busy")
+  }
+})
+
+const categoryConfig = {
+  categories: { fast: { models: [primary, backup] } },
+  plans: { review: [{ category: "fast" }] },
+  agents: { reviewer: "review" },
+}
+const bothEligible = new Map<string, ModelEligibility>([
+  [modelKey(primary), { status: "available" }],
+  [modelKey(backup), { status: "available" }],
+])
+
+test("category stickiness holds the exact current model through a rank flip, then expires", () => {
+  const sticky = { model: backup, lastActiveAt: 0 }
+  const held = selectAgentModel(categoryConfig, "reviewer", registry, bothEligible, 100, undefined, undefined, undefined, sticky)
+  assert.equal(held.status, "selected")
+  if (held.status === "selected") {
+    assert.equal(held.model, backup)
+    assert.equal(held.reason.code, "category-sticky")
+  }
+
+  const expired = selectAgentModel(categoryConfig, "reviewer", registry, bothEligible, STICKY_IDLE_MS, undefined, undefined, undefined, sticky)
+  assert.equal(expired.status, "selected")
+  if (expired.status === "selected") {
+    assert.equal(expired.model, primary)
+    assert.equal(expired.reason.code, "highest-priority-eligible")
+  }
+})
+
+test("category stickiness is exact about variant and unavailable models fall through", () => {
+  const otherVariant = { providerID: primary.providerID, modelID: primary.modelID, variant: "other" }
+  const wrongVariant = selectAgentModel(
+    categoryConfig, "reviewer", registry, bothEligible, 100, undefined, undefined, undefined,
+    { model: otherVariant, lastActiveAt: 0 },
+  )
+  assert.equal(wrongVariant.status, "selected")
+  if (wrongVariant.status === "selected") assert.equal(wrongVariant.model, primary)
+
+  const limited = new Map(bothEligible)
+  limited.set(modelKey(backup), { status: "limited" })
+  const fallback = selectAgentModel(
+    categoryConfig, "reviewer", registry, limited, 100, undefined, undefined, undefined,
+    { model: backup, lastActiveAt: 0 },
+  )
+  assert.equal(fallback.status, "selected")
+  if (fallback.status === "selected") {
+    assert.equal(fallback.model, primary)
+    assert.deepEqual(fallback.skipped, [{ model: backup, reason: { code: "limited" } }])
+  }
+})
+
+test("earlier plan slots beat a sticky fallback and pins keep precedence", () => {
+  const split = {
+    categories: { free: { models: [primary] }, hard: { models: [backup] } },
+    plans: { review: [{ category: "free" }, { category: "hard" }], literal: [primary, { category: "hard" }] },
+    agents: { reviewer: "review", literal: "literal" },
+  }
+  const earlier = selectAgentModel(split, "reviewer", registry, bothEligible, 100, undefined, undefined, undefined, { model: backup, lastActiveAt: 0 })
+  assert.equal(earlier.status, "selected")
+  if (earlier.status === "selected") {
+    assert.equal(earlier.model, primary)
+    assert.equal(earlier.reason.code, "highest-priority-eligible")
+  }
+
+  const literal = selectAgentModel(split, "literal", registry, bothEligible, 100, undefined, undefined, undefined, { model: backup, lastActiveAt: 0 })
+  assert.equal(literal.status, "selected")
+  if (literal.status === "selected") assert.equal(literal.model, primary)
+
+  const pinned = selectAgentModel(categoryConfig, "reviewer", registry, bothEligible, 100, backup, undefined, undefined, { model: primary, lastActiveAt: 0 })
+  assert.equal(pinned.status, "selected")
+  if (pinned.status === "selected") {
+    assert.equal(pinned.model, backup)
+    assert.equal(pinned.reason.code, "manual-pin")
+  }
+})
+
+test("a literal-only plan ignores category stickiness", () => {
+  const config = { plans: { review: [primary, backup] }, agents: { reviewer: "review" } }
+  const result = selectAgentModel(config, "reviewer", registry, bothEligible, 100, undefined, undefined, undefined, { model: backup, lastActiveAt: 0 })
+  assert.equal(result.status, "selected")
+  if (result.status === "selected") {
+    assert.equal(result.model, primary)
+    assert.equal(result.reason.code, "highest-priority-eligible")
   }
 })

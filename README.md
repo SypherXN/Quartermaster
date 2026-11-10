@@ -140,7 +140,11 @@ All settings belong in `quartermaster.jsonc` next to the OpenCode config that re
   order. Windows are read from `usageSources`; a provider with no fresh window
   sorts last. Without `pick` the file's order is used. `pick.by: "pace"` ranks
   instead by remaining room per minute of the tightest window, so no window runs
-  dry before its own reset; ties and unknowns behave the same way. See
+  dry before its own reset; ties and unknowns behave the same way. Automatic
+  routing keeps the exact model (and variant) it last assigned or confirmed at
+  admission inside its category for up to an hour of idle time; earlier plan
+  slots still win, and a recovered earlier category is used before the sticky
+  fallback. This is a routing preference, not a provider cache guarantee. See
   [provider strategy](docs/PROVIDER_STRATEGY.md) for how to lay out categories
   and plans around reset windows.
 - **Work types:** `workTypes` maps a work-type name to an existing plan. The

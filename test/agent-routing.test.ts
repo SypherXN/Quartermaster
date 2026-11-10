@@ -1497,3 +1497,180 @@ test("named plan selection refreshes a stale registry and quota without switchin
   assert.equal(switches, 0, "a named-plan query does not switch a session")
   await routing?.dispose()
 })
+
+async function routingHarness(
+  config: ReturnType<typeof parseConfig>,
+  models: readonly { providerID: string; modelID: string; variant?: string }[],
+) {
+  const hooks: Record<string, Array<(input: {
+    sessionID: string
+    kind?: string
+    agent?: string
+    model?: { providerID: string; id: string; variant?: string }
+  }) => Promise<void>>> = {}
+  const commands: Record<string, { execute(input: { sessionID: string }): Promise<void> }> = {}
+  const stored = new Map<string, unknown>()
+  const sessions: Record<string, { agent: string; model: { providerID: string; id: string; variant?: string } }> = {}
+  const events: Array<{ event: unknown; done: () => void }> = []
+  let waiting: ((item: typeof events[number] | undefined) => void) | undefined
+  const routing = await registerAgentRouting({
+    model: { list: async () => ({ data: models.map((model) => ({
+      providerID: model.providerID, id: model.modelID, variant: model.variant, enabled: true,
+    })) }) },
+    storage: {
+      get: async (key: string) => stored.get(key),
+      set: async (key: string, value: unknown) => { stored.set(key, value) },
+      remove: async (key: string) => { stored.delete(key) },
+      scan: async () => ({ entries: [] }),
+    },
+    rpc: () => ({ status: async () => { throw new Error("not configured") } }),
+    agent: { transform: async () => ({ dispose: async () => {} }), reload: async () => {} },
+    session: {
+      hook: async (name: string, callback: (typeof hooks)[string][number]) => {
+        hooks[name] ??= []
+        hooks[name].push(callback)
+        return { dispose: async () => {} }
+      },
+      get: async ({ sessionID }: { sessionID: string }) => ({ data: sessions[sessionID] }),
+      switchModel: async ({ sessionID, model }: { sessionID: string; model: { providerID: string; id: string; variant?: string } }) => {
+        sessions[sessionID].model = model
+      },
+    },
+    command: {
+      transform: async (callback: (editor: { add(command: { name: string; execute(input: { sessionID: string }): Promise<void> }): void }) => void) => {
+        callback({ add: (command) => { commands[command.name] = command } })
+        return { dispose: async () => {} }
+      },
+    },
+    location: { directory: "project-a" },
+    event: {
+      subscribe({ signal }: { signal: AbortSignal }) {
+        return (async function* () {
+          while (!signal.aborted) {
+            const item = events.shift() ?? await new Promise<typeof events[number] | undefined>((resolve) => {
+              waiting = resolve
+              signal.addEventListener("abort", () => resolve(undefined), { once: true })
+            })
+            if (!item || signal.aborted) return
+            yield item.event
+            item.done()
+          }
+        })()
+      },
+    },
+  } as never, config)
+  const prompt = (sessionID: string) => hooks.prompt[0]({ sessionID })
+  const request = async (sessionID: string, model: { providerID: string; id: string; variant?: string }) => {
+    for (const callback of hooks["model.request"]) {
+      await callback({ sessionID, kind: "primary", agent: sessions[sessionID].agent, model })
+    }
+  }
+  const finish = (sessionID: string) => new Promise<void>((done) => {
+    const item = {
+      event: { type: "session.execution.succeeded", created: Date.now(), data: { sessionID } },
+      done: () => setTimeout(done, 2),
+    }
+    if (waiting) {
+      const resume = waiting
+      waiting = undefined
+      resume(item)
+    } else events.push(item)
+  })
+  return { routing: routing!, sessions, commands, prompt, request, finish }
+}
+
+test("automatic routing keeps a category model sticky for an hour of idle time and recovers earlier slots", async () => {
+  const stickyConfig = parseConfig({
+    categories: {
+      free: { models: ["provider-c/other"] },
+      fast: { models: [{ id: "provider-b/backup", variant: "fast" }, "provider-a/primary"] },
+    },
+    plans: { review: ["@free", "@fast"] },
+    agents: { reviewer: "review" },
+    providerCooldownMs: 20_000_000,
+  })
+  const other = { providerID: "provider-c", modelID: "other" }
+  const harness = await routingHarness(stickyConfig, [primary, backup, other])
+  harness.sessions.s = { agent: "reviewer", model: { providerID: "composer", id: "default" } }
+  const realNow = Date.now
+  let now = 1_000_000
+  Date.now = () => now
+  try {
+    await harness.routing.reportFailure({ providerID: "provider-c", modelID: "other", classification: "quota-exhausted" })
+    harness.sessions.e = { agent: "reviewer", model: { providerID: "provider-b", id: "backup", variant: "fast" } }
+    harness.sessions.n = { agent: "reviewer", model: { providerID: "provider-a", id: "primary" } }
+    await harness.prompt("e")
+    assert.deepEqual(harness.sessions.e.model, { providerID: "provider-b", id: "backup", variant: "fast" }, "admission confirms the strategy's winning host model")
+    await harness.request("e", harness.sessions.e.model)
+    await harness.finish("e")
+    await harness.prompt("n")
+    assert.deepEqual(harness.sessions.n.model, { providerID: "provider-b", id: "backup", variant: "fast" }, "an in-plan inherited host model does not become sticky on first assignment")
+
+    await harness.prompt("s")
+    assert.deepEqual(harness.sessions.s.model, { providerID: "provider-b", id: "backup", variant: "fast" }, "the first assignment follows the strategy, not the inherited host model")
+    await harness.request("s", harness.sessions.s.model)
+    await harness.finish("s")
+
+    stickyConfig.categories.fast.models = [primary, backup]
+    now += 10 * 60_000
+    await harness.prompt("e")
+    assert.deepEqual(harness.sessions.e.model, { providerID: "provider-b", id: "backup", variant: "fast" }, "a confirmed host model stays sticky through a rank flip")
+    await harness.prompt("s")
+    assert.equal(harness.sessions.s.model.id, "backup", "a rank flip inside the hour keeps the dispatched model")
+
+    now += 50 * 60_000
+    await harness.request("s", harness.sessions.s.model)
+    await harness.finish("s")
+    now += 50 * 60_000
+    await harness.prompt("s")
+    assert.equal(harness.sessions.s.model.id, "backup", "managed activity refreshes the idle hour")
+
+    const diagnostic = await harness.routing.diagnoseSession("s")
+    assert.equal(diagnostic?.recommendation.reasonCode, "category-sticky", "the snapshot recommendation uses the same sticky state")
+    now += 9 * 60_000
+    const later = await harness.routing.diagnoseSession("s")
+    assert.equal(later?.recommendation.reasonCode, "category-sticky", "diagnostics read but do not refresh the idle clock")
+    now += 2 * 60_000
+    await harness.prompt("s")
+    assert.deepEqual(harness.sessions.s.model, { providerID: "provider-a", id: "primary" }, "after an hour idle the rank flip applies")
+    await harness.request("s", harness.sessions.s.model)
+    await harness.finish("s")
+
+    await harness.routing.reportSuccess({ providerID: "provider-c", scope: "model", modelID: "other" })
+    await harness.prompt("s")
+    assert.deepEqual(harness.sessions.s.model, { providerID: "provider-c", id: "other" }, "a recovered earlier category beats the sticky fallback")
+  } finally {
+    Date.now = realNow
+    await harness.routing.dispose()
+  }
+})
+
+test("qm-auto reset drops the category sticky preference", async () => {
+  const resetConfig = parseConfig({
+    categories: { fast: { models: [{ id: "provider-b/backup", variant: "fast" }, "provider-a/primary"] } },
+    plans: { review: ["@fast"] },
+    agents: { reviewer: "review" },
+  })
+  const harness = await routingHarness(resetConfig, [primary, backup])
+  harness.sessions.s = { agent: "reviewer", model: { providerID: "composer", id: "default" } }
+  const realNow = Date.now
+  let now = 2_000_000
+  Date.now = () => now
+  try {
+    await harness.prompt("s")
+    assert.deepEqual(harness.sessions.s.model, { providerID: "provider-b", id: "backup", variant: "fast" })
+    await harness.request("s", harness.sessions.s.model)
+    await harness.finish("s")
+    resetConfig.categories.fast.models = [primary, backup]
+    now += 10 * 60_000
+    await harness.prompt("s")
+    assert.equal(harness.sessions.s.model.id, "backup", "the sticky model still holds before the reset")
+    await harness.commands["qm-manual"].execute({ sessionID: "s" })
+    await harness.commands["qm-auto"].execute({ sessionID: "s" })
+    await harness.prompt("s")
+    assert.deepEqual(harness.sessions.s.model, { providerID: "provider-a", id: "primary" }, "returning to automatic routing forgets the old sticky choice")
+  } finally {
+    Date.now = realNow
+    await harness.routing.dispose()
+  }
+})

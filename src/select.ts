@@ -28,7 +28,7 @@ export type SelectionResult =
   | {
       status: "selected"
       model: ModelRef
-      reason: { code: "highest-priority-eligible" | "manual-pin" }
+      reason: { code: "highest-priority-eligible" | "manual-pin" | "category-sticky" }
       skipped: SkippedCandidate[]
     }
   | { status: "no-plan"; reason: { code: "no-plan" | "unknown-plan" }; skipped: [] }
@@ -97,6 +97,19 @@ export function resolvePlan(
 
 export function modelKey(model: Pick<ModelRef, "providerID" | "modelID">): string {
   return JSON.stringify([model.providerID, model.modelID])
+}
+
+/** How long an automatically routed model stays preferred inside its category. */
+export const STICKY_IDLE_MS = 3_600_000
+
+/** Provenance for category-local stickiness: the exact model the router last assigned. */
+export interface StickyModel {
+  model: ModelRef
+  lastActiveAt: number
+}
+
+function exactModelKey(model: ModelRef): string {
+  return JSON.stringify([model.providerID, model.modelID, model.variant ?? null])
 }
 
 export function selectModel(
@@ -169,15 +182,32 @@ export function selectAgentModel(
   pin?: ModelRef,
   busy?: (model: ModelRef) => boolean,
   order?: PlanOrder,
+  sticky?: StickyModel,
 ): SelectionResult {
   const planID = Object.hasOwn(config.agents, agentID) ? config.agents[agentID] : undefined
-  const plan = planID === undefined ? undefined : expandPlan(config.plans[planID], config.categories ?? {}, order)
-  if (!plan) return { status: "no-plan", reason: { code: "no-plan" }, skipped: [] }
+  if (planID === undefined) return { status: "no-plan", reason: { code: "no-plan" }, skipped: [] }
+  const categories = config.categories ?? {}
+  const baseOrder: PlanOrder = order ?? ((category) => category.models)
+  const activeSticky = sticky && now - sticky.lastActiveAt < STICKY_IDLE_MS ? sticky.model : undefined
+  const activeKey = activeSticky === undefined ? undefined : exactModelKey(activeSticky)
+  const stickyOrder: PlanOrder = activeKey === undefined ? baseOrder : (category) => {
+    const members = baseOrder(category)
+    const index = members.findIndex((member) => exactModelKey(member) === activeKey)
+    return index <= 0 ? members : [members[index], ...members.slice(0, index), ...members.slice(index + 1)]
+  }
+  const plan = expandPlan(config.plans[planID], categories, stickyOrder)
 
   const candidates = pin
     ? [pin, ...plan.filter((candidate) => modelKey(candidate) !== modelKey(pin))]
     : plan
   const selection = selectModel(candidates, registry, eligibility, now, busy)
-  if (selection.status !== "selected" || !pin || modelKey(selection.model) !== modelKey(pin)) return selection
-  return { ...selection, reason: { code: "manual-pin" } }
+  if (selection.status !== "selected") return selection
+  if (pin && modelKey(selection.model) === modelKey(pin)) return { ...selection, reason: { code: "manual-pin" } }
+  if (activeKey === undefined || exactModelKey(selection.model) !== activeKey) return selection
+  const plain = expandPlan(config.plans[planID], categories, baseOrder)
+  const plainIndex = plain.findIndex((candidate) => exactModelKey(candidate) === activeKey)
+  const stickyIndex = plan.findIndex((candidate) => exactModelKey(candidate) === activeKey)
+  return plainIndex >= 0 && stickyIndex >= 0 && stickyIndex < plainIndex
+    ? { ...selection, reason: { code: "category-sticky" } }
+    : selection
 }

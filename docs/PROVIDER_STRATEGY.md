@@ -163,6 +163,15 @@ strands a turn:
 
 Rules worth keeping:
 
+- **Sticky within a category.** Automatic routing remembers the exact model
+  (provider, model and variant) it last assigned or confirmed at admission for a
+  session. For up to an hour of idle time, that model moves to the front of its
+  own category, so a `pace` or `reset-soonest` rank flip does not churn the
+  session between interchangeable models. It never moves across plan slots: an
+  earlier literal or category still wins, and a recovered earlier category beats
+  the sticky fallback. The hour is a routing preference, not a provider cache
+  lifetime; plugin restart drops it harmlessly. Actual primary use and a finished
+  turn refresh the clock; diagnostics do not.
 - **One copy of a model.** A category is expanded inline, so editing it reaches
   every plan that names it. Never list the same model in two categories that
   appear in the same plan; `expandPlan` keeps the first occurrence and silently

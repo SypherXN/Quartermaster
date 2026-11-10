@@ -33,7 +33,9 @@ export function explainSelection(selection: SelectionResult): SelectionExplanati
     reason: selection.status === "selected"
       ? selection.reason.code === "manual-pin"
         ? "Selected because this model is pinned for the agent."
-        : "Selected as the highest-priority eligible candidate."
+        : selection.reason.code === "category-sticky"
+          ? "Selected to keep this category's current model until it has been idle for an hour."
+          : "Selected as the highest-priority eligible candidate."
       : selection.status === "no-plan"
         ? "No model plan is configured for this agent."
         : "No candidate in the configured plan is eligible.",

@@ -395,6 +395,14 @@ export async function registerAgentRouting(
   const requestKinds = new Map<string, { kind: string; agent: string; model: ModelRef; observedAt: number }>()
   const attemptedModels = new Map<string, Set<string>>()
   const lastPrimaryModels = new Map<string, { agent: string; model: ModelRef }>()
+  // In-memory only: category stickiness is a routing preference, not durable state.
+  const stickyModels = new Map<string, { agent: string; model: ModelRef; lastActiveAt: number }>()
+  const stickyFor = (sessionID: string, agentID: string, current?: SessionModel) => {
+    const sticky = stickyModels.get(sessionID)
+    return sticky && sticky.agent === agentID && current !== undefined && sameSessionModel(sticky.model, current)
+      ? { model: sticky.model, lastActiveAt: sticky.lastActiveAt }
+      : undefined
+  }
   const ownershipScope = encodeURIComponent(ctx.location?.project?.id ?? ctx.location?.directory ?? "runtime")
   const ownershipKey = (sessionID: string) => `routing/ownership-v1/${ownershipScope}/${encodeURIComponent(sessionID)}`
   const clearOwnership = async (sessionID: string) => {
@@ -415,6 +423,7 @@ export async function registerAgentRouting(
             throw new Error("Quartermaster automatic routing requires a bound agent with a configured plan")
           }
           await ctx.storage.set(ownershipKey(sessionID), { mode: "automatic", agent: view.agent })
+          stickyModels.delete(sessionID)
         },
       })
       editor.add({
@@ -423,6 +432,7 @@ export async function registerAgentRouting(
         execute: async ({ sessionID }) => {
           const view = sessionView(await ctx.session!.get({ sessionID } as never))
           await ctx.storage.set(ownershipKey(sessionID), { mode: "manual", ...(view.agent ? { agent: view.agent } : {}) })
+          stickyModels.delete(sessionID)
           leases.releaseReservation(sessionID)
         },
       })
@@ -458,7 +468,7 @@ export async function registerAgentRouting(
     await pins.revalidate()
   }
 
-  const choose = (agentID: string, sessionID: string) => selectAgentModel(
+  const choose = (agentID: string, sessionID: string, current?: SessionModel) => selectAgentModel(
     config,
     agentID,
     registry,
@@ -467,6 +477,7 @@ export async function registerAgentRouting(
     pins.get(agentID),
     busyFor(sessionID),
     planOrder,
+    stickyFor(sessionID, agentID, current),
   )
 
   const diagnoseSession = async (sessionID: string) => {
@@ -498,12 +509,16 @@ export async function registerAgentRouting(
     const plan = planID === undefined ? undefined : expandPlan(config.plans[planID], config.categories, planOrder)
     const mode = !agentID ? "unknown" : !bound ? "unbound" : ownershipRead !== "ok" ? "unknown"
       : ownership?.agent === agentID && ownership.mode === "manual" ? "manual" : "automatic"
+    // Read the sticky record without refreshing it; diagnostics are not activity, and
+    // selectAgentModel applies the idle cutoff.
+    const sticky = mode === "automatic" && agentID ? stickyFor(sessionID, agentID, view.model) : undefined
     // Snapshot-only: refresh/select/status can adopt options, persist pins or reload agents.
     const recommendation = explainSelection(selectAgentModel(
       config, agentID ?? "", registry, failures.apply(baseSnapshot(), registry, now), now,
       agentID ? pins.get(agentID) : undefined,
       (model) => leases.peekBlocks(sessionID, model),
       planOrder,
+      sticky,
     ))
     const observed = lastPrimaryModels.get(sessionID)
     const failureObservation = failureObservations.get(sessionID)
@@ -567,6 +582,7 @@ export async function registerAgentRouting(
     const agentID = view.agent
     if (!agentID || !Object.hasOwn(config.agents, agentID)) {
       if (agentID) await clearOwnership(sessionID)
+      stickyModels.delete(sessionID)
       leases.releaseReservation(sessionID)
       return
     }
@@ -579,13 +595,22 @@ export async function registerAgentRouting(
       leases.releaseReservation(sessionID)
       throw new Error("Quartermaster could not read session ownership before provider admission")
     }
-    if (ownership?.agent !== agentID) await clearOwnership(sessionID)
+    if (ownership?.agent !== agentID) {
+      await clearOwnership(sessionID)
+      if (ownership?.agent !== undefined) stickyModels.delete(sessionID)
+    }
     if (ownership?.agent === agentID && ownership.mode === "manual") {
+      stickyModels.delete(sessionID)
       leases.releaseReservation(sessionID)
       return
     }
+    // An external switch away from the router's model ends its provenance.
+    const sticky = stickyModels.get(sessionID)
+    if (sticky && (sticky.agent !== agentID || !view.model || !sameSessionModel(sticky.model, view.model))) {
+      stickyModels.delete(sessionID)
+    }
     // Bound agents are automatic by default; /qm-manual is the per-session opt-out.
-    let selection = choose(agentID, sessionID)
+    let selection = choose(agentID, sessionID, view.model)
     if (selection.status !== "selected") {
       leases.releaseReservation(sessionID)
       throw new Error("Quartermaster could not select an eligible model before provider admission")
@@ -593,13 +618,20 @@ export async function registerAgentRouting(
     if (exclusiveKeys.has(modelKey(selection.model))) {
       leases.releaseReservation(sessionID)
       if (leases.reserve(selection.model, sessionID, agentID) === "busy") {
-        selection = choose(agentID, sessionID)
+        selection = choose(agentID, sessionID, view.model)
         if (selection.status !== "selected" || exclusiveKeys.has(modelKey(selection.model))) {
           throw new Error("Quartermaster could not reserve an eligible model before provider admission")
         }
       }
     } else leases.releaseReservation(sessionID)
-    if (selection.status !== "selected" || sameSessionModel(selection.model, view.model)) return
+    if (selection.status !== "selected" || sameSessionModel(selection.model, view.model)) {
+      // Admission is enough provenance when the strategy already picked the host model.
+      // Do not refresh an existing record here; actual dispatch owns that clock.
+      if (selection.status === "selected" && !stickyModels.has(sessionID)) {
+        stickyModels.set(sessionID, { agent: agentID, model: selection.model, lastActiveAt: Date.now() })
+      }
+      return
+    }
     try {
       await ctx.session.switchModel({
         sessionID,
@@ -613,6 +645,7 @@ export async function registerAgentRouting(
       if (!sameSessionModel(selection.model, selectedView.model)) {
         throw new Error("Quartermaster model switch was not reflected before provider admission")
       }
+      stickyModels.set(sessionID, { agent: agentID, model: selection.model, lastActiveAt: Date.now() })
     } catch {
       console.warn("[quartermaster] session model selection failed")
       if (exclusiveKeys.has(modelKey(selection.model))) leases.releaseReservation(sessionID)
@@ -644,6 +677,14 @@ export async function registerAgentRouting(
                 registry, failures.apply(baseSnapshot(), registry, Date.now()), Date.now(), busyFor(input.sessionID))
               if (valid.status !== "selected") {
                 throw new Error("Quartermaster blocked a stale or ineligible model before provider dispatch; send again when the session is idle")
+              }
+            }
+            const sticky = stickyModels.get(input.sessionID)
+            if (sticky) {
+              if (sticky.agent === input.agent && sameModelRef(sticky.model, model)) {
+                stickyModels.set(input.sessionID, { ...sticky, lastActiveAt: Date.now() })
+              } else {
+                stickyModels.delete(input.sessionID)
               }
             }
           }
@@ -756,6 +797,7 @@ export async function registerAgentRouting(
         } as never)
         attempted.add(modelKey(selection.model))
         attemptedModels.set(event.sessionID, attempted)
+        stickyModels.set(event.sessionID, { agent: agentID, model: selection.model, lastActiveAt: Date.now() })
         if (exclusiveKeys.has(modelKey(modelRef(current)))) leases.releaseModelReservation(modelRef(current), event.sessionID)
       } catch {
         console.warn("[quartermaster] retry model selection failed")
@@ -838,6 +880,15 @@ export async function registerAgentRouting(
         requestHistory.end(step.sessionID, "compaction", terminal.created, Date.now())
       }
     }
+    // A finished turn refreshes the idle clock so a long successful turn does not expire
+    // on completion. A failed turn is not evidence of good use; let its hour run out.
+    if (step.kind === "finish" && terminal.type !== "session.execution.failed") {
+      const last = lastPrimaryModels.get(step.sessionID)
+      const sticky = stickyModels.get(step.sessionID)
+      if (last && sticky && sticky.agent === last.agent && sameModelRef(sticky.model, last.model)) {
+        stickyModels.set(step.sessionID, { ...sticky, lastActiveAt: Date.now() })
+      }
+    }
     if (step.kind === "finish" || step.kind === "delete") {
       running.delete(step.sessionID)
       requestKinds.delete(step.sessionID)
@@ -849,6 +900,7 @@ export async function registerAgentRouting(
       failureObservations.delete(step.sessionID)
       requestHistory.delete(step.sessionID)
       lastPrimaryModels.delete(step.sessionID)
+      stickyModels.delete(step.sessionID)
       await clearOwnership(step.sessionID)
     }
     const recovery = compactionRecovery.get(step.sessionID)
@@ -987,6 +1039,7 @@ export async function registerAgentRouting(
       requestKinds.clear()
       attemptedModels.clear()
       lastPrimaryModels.clear()
+      stickyModels.clear()
       await runningHook?.dispose()
       await retryHook?.dispose()
       await promptHook?.dispose()
