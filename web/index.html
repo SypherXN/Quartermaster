@@ -3,6 +3,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Quartermaster · Model operations</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2024%2024'%3E%3Crect%20width='24'%20height='24'%20fill='%23b39250'/%3E%3Cg%20fill='none'%20stroke='%2326311f'%20stroke-width='1.7'%20stroke-linecap='round'%20stroke-linejoin='round'%3E%3Crect%20x='3'%20y='6'%20width='18'%20height='14'%20rx='1.5'/%3E%3Cpath%20d='M3%2010h7m4%200h7M10%206v8h4V6'/%3E%3C/g%3E%3C/svg%3E">
 <style>
   :root{--paper:#e5dfcf;--surface:#fcfaf2;--ink:#303729;--muted:#626a58;--line:#c8c9b5;--accent:#806020;--accent-soft:#eee2bf;--green:#4e6240;--green-soft:#e2e9d7;--radius:1px;--mono:ui-monospace,Consolas,monospace}
 
@@ -460,7 +461,7 @@ details.plan[open]>summary{margin-bottom:18px}
    <p id="options-status" class="status-line" role="status" aria-live="polite">Plans load from the local gateway when this page is open.</p>
   <div class="tab-strip" role="tablist" aria-label="Routing plan settings"><button type="button" class="tab" role="tab" id="tab-plans" aria-selected="true" aria-controls="panel-plans" tabindex="0"><span class="register-index" aria-hidden="true">01</span>Plans</button><button type="button" class="tab" role="tab" id="plan-tab-agents" aria-selected="false" aria-controls="plan-panel-agents" tabindex="-1"><span class="register-index" aria-hidden="true">02</span>Agent bindings</button><button type="button" class="tab" role="tab" id="tab-modules" aria-selected="false" aria-controls="panel-modules" tabindex="-1"><span class="register-index" aria-hidden="true">03</span>Modules</button><button type="button" class="tab" role="tab" id="tab-settings" aria-selected="false" aria-controls="panel-settings" tabindex="-1"><span class="register-index" aria-hidden="true">04</span>Settings</button></div>
   <fieldset id="options-fields" aria-labelledby="options-heading" style="border:0;padding:0;margin:0;min-width:0">
-    <div class="editor-actions"><button id="load-options" type="button">Load plans</button><button id="apply-options" class="primary" type="button" disabled>Apply plans</button><button id="cancel-options" type="button">Cancel edits</button><button id="download-options" type="button">Download draft</button></div>
+    <div class="editor-actions"><button id="load-options" type="button">Load plans</button><button id="apply-options" class="primary apply-changes" type="button" disabled>Apply changes</button><button id="cancel-options" type="button">Cancel edits</button><button id="download-options" type="button">Download draft</button></div>
    <div class="tab-panel" id="panel-plans" role="tabpanel" aria-labelledby="tab-plans" tabindex="0">
       <div class="editor-section"><label for="plans">Plans</label><p class="hint">Order matters. Use providerID/modelID and the exact variant name from the catalog. Browser-shortlisted models appear first in suggestions; existing values and chain order never change. Filter the list here. Browser categories stay in this browser, start collapsed, and do not change routing or the saved file.</p><p id="plan-preference-status" class="hint"></p><div id="plan-tools"></div><div id="plans"></div></div>
    </div>
@@ -494,8 +495,12 @@ details.plan[open]>summary{margin-bottom:18px}
    </div>
    <div class="tab-panel" id="routing-panel-categories" role="tabpanel" aria-labelledby="routing-tab-categories" tabindex="-1" hidden>
     <div class="note">Each category orders its own models with the strategy it names. Row one is the next pick.</div>
+     <fieldset id="category-fields" style="border:0;padding:0;margin:0;min-width:0">
     <div class="editor-section"><label for="categories">Categories</label><p class="hint">@name in a plan refers to a category, so editing that category updates every plan that references it. Reset soonest orders a category at request time by the provider window that resets first, breaking ties by used quota and then by the provider path. Balanced pace orders by remaining room per minute of the tightest window. In order leaves the chain exactly as written — the right pick when several models share one provider bucket and you want them tried in your own sequence.</p><div id="categories"></div></div>
-    <div id="routing-groups" class="usage-grid"></div>
+     <div class="editor-actions"><button id="apply-routing" class="primary apply-changes" type="button" disabled>Apply changes</button></div>
+     <p id="routing-apply-status" class="status-line apply-status" role="status" aria-live="polite">Edits stay in this browser draft until Apply changes saves the winning settings file.</p>
+     </fieldset>
+     <div id="routing-groups" class="usage-grid"></div>
    </div>
 </section>
 <section data-page="providers" hidden class="fade-in" aria-labelledby="providers-heading">
@@ -509,12 +514,14 @@ details.plan[open]>summary{margin-bottom:18px}
   <fieldset id="pool-fields" style="border:0;padding:0;margin:0;min-width:0">
   <details class="editor-section"><summary><strong>Shared pools &amp; recovery</strong> <span class="muted">· Coordinate rate limits</span></summary>
   <label for="shared-pools" class="section-gap">Shared pools</label>
-  <p class="hint">Models in one pool share a cooldown. A limit on any member cools the others. Beam stays out of the Zen free pool. Apply on Plans saves this draft.</p>
+  <p class="hint">Models in one pool share a cooldown. A limit on any member cools the others. Beam stays out of the Zen free pool. Apply changes saves this draft.</p>
   <div id="shared-pools"></div>
   <label for="probes">Recovery probes</label>
   <p class="hint">One probe from a pool is enough. It runs only while that pool is cooling.</p>
   <div id="probes"></div>
-  </details>
+   <div class="editor-actions"><button id="apply-pools" class="primary apply-changes" type="button" disabled>Apply changes</button></div>
+   <p id="pool-apply-status" class="status-line apply-status" role="status" aria-live="polite">Edits stay in this browser draft until Apply changes saves the winning settings file.</p>
+   </details>
   </fieldset>
 </section>
 <section data-page="quota" hidden class="fade-in" aria-labelledby="quota-heading">
@@ -543,8 +550,15 @@ async function loadReport(read){const mine=++loadID;output.replaceChildren();liv
 input.addEventListener('change',()=>{const file=input.files?.[0];if(file)void loadReport(async()=>JSON.parse(await file.text()))})
 live.addEventListener('click',()=>void loadReport(async()=>{const response=await fetch('/api/report',{cache:'no-store',credentials:'same-origin'});if(!response.ok)throw Error('Gateway unavailable');return response.json()}))
 
-const optionsFields=document.querySelector('#options-fields'), poolFields=document.querySelector('#pool-fields'), optionsStatus=document.querySelector('#options-status')
-function lockOptions(locked){if(optionsFields)optionsFields.disabled=locked;if(poolFields)poolFields.disabled=locked}
+const optionsFields=document.querySelector('#options-fields'), poolFields=document.querySelector('#pool-fields'), categoryFields=document.querySelector('#category-fields'), optionsStatus=mirrorStatus(document.querySelector('#options-status'))
+function mirrorStatus(node){
+  if(!node)return{textContent:''}
+  return Object.defineProperty({},'textContent',{
+    get(){return node.textContent},
+    set(message){node.textContent=message;for(const other of document.querySelectorAll?.('.apply-status')??[])other.textContent=message}
+  })
+}
+function lockOptions(locked){if(optionsFields)optionsFields.disabled=locked;if(poolFields)poolFields.disabled=locked;if(categoryFields)categoryFields.disabled=locked;paintAccess()}
 let revision, saved, draft, settingsPath=''
 let canWrite=false
 function ownCopy(value){
@@ -1637,7 +1651,7 @@ async function refreshCatalog(){
  }catch{setMessage('#catalog-status','Could not refresh the catalog. Start the local gateway, then try again. Any previous catalog stays visible.')}
  finally{button.disabled=false}
 }
-function paintAccess(){const apply=document.querySelector('#apply-options');if(apply)apply.disabled=!canWrite}
+function paintAccess(){const locked=!canWrite||!!optionsFields?.disabled;for(const apply of document.querySelectorAll?.('.apply-changes')??[document.querySelector('#apply-options')])if(apply)apply.disabled=locked}
 function modelBits(model){return typeof model==='string'?{id:model,variant:''}:{id:model?.id??'',variant:model?.variant??''}}
 function writeModel(plan,index,id,variant){draft.plans[plan][index]=variant?{id,variant}:id}
 function chainLabel(models){const text=chainText(models);return text||'This chain is empty.'}
@@ -2864,10 +2878,10 @@ document.querySelector('#download-options').addEventListener('click',()=>{
     optionsStatus.textContent='Downloaded a JSON draft. Comments from the current file are not in it. Review it before replacing a settings file.'
   }catch(error){optionsStatus.textContent=error.message||'Could not download a draft.'}
 })
-document.querySelector('#apply-options').addEventListener('click',async()=>{
+async function applyChanges(){
   if(optionsFields.disabled)return
   lockOptions(true)
-  optionsStatus.textContent='Applying plans…'
+  optionsStatus.textContent='Applying changes…'
   try{
     if(typeof revision!=='number'||!saved)throw Error('Load project options before applying')
     if(!canWrite)throw Error('Apply requires a winning settings file.')
@@ -2881,9 +2895,11 @@ document.querySelector('#apply-options').addEventListener('click',async()=>{
     if(typeof body.path==='string')settingsPath=body.path
     show(saved)
     optionsStatus.textContent='Applied. The current session is unchanged. The next assignment uses these options.'
-  }catch(error){optionsStatus.textContent=error.message||'Could not apply project options.'}
+  }catch(error){optionsStatus.textContent=error.message||'Could not apply changes.'}
   finally{lockOptions(false);paintAccess()}
-})
+}
+document.querySelector('#apply-options').addEventListener('click',applyChanges)
+for(const applySelector of['#apply-routing','#apply-pools']){const button=document.querySelector(applySelector);if(button)button.addEventListener('click',applyChanges)}
 function bind(selector,type,handler){const node=document.querySelector(selector);if(node&&typeof node.addEventListener==='function')node.addEventListener(type,handler)}
 bind('#refresh-dashboard','click',()=>{void refreshWorkspace()})
 bind('#refresh-quota','click',()=>{void refreshWorkspace()})

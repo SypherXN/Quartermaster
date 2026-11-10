@@ -213,7 +213,7 @@ export function createLocalUiServer({ openCodeURL, token, resolveEndpoint, proje
         res.writeHead(200, {
           "content-type": "text/html; charset=utf-8", "cache-control": "no-store",
           "x-content-type-options": "nosniff", "referrer-policy": "no-referrer", "x-frame-options": "DENY",
-          "content-security-policy": "default-src 'self'; connect-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+          "content-security-policy": "default-src 'self'; connect-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
         })
         res.end(html)
       } catch {
