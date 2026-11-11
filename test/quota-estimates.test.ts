@@ -144,7 +144,13 @@ test("stale, unauthenticated, errored and future observations cannot build confi
 
 test("expired history is pruned and a positive history with no fresh observation stays stale", () => {
   const expired = recorded([{ at: t0 - 70 * MIN, percent: 40 }])
+  const before = expired.snapshot()
   assert.equal(expired.estimate("go", usageWindow(40), t0)?.sampleCount, 0)
+
+  // Reading the estimate must not prune the stored history: diagnostics are
+  // side-effect free, and only observe() may drop samples.
+  expired.estimate("go", usageWindow(40), t0)
+  assert.deepEqual(expired.snapshot(), before)
 
   const old = recorded([{ at: t0 - 40 * MIN, percent: 40 }, { at: t0 - 25 * MIN, percent: 50 }])
   assert.equal(old.estimate("go", usageWindow(50), t0)?.status, "stale")

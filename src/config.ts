@@ -47,10 +47,12 @@ export interface CategoryPick {
    * How the category orders its members at request time. `in-order`, and absent,
    * keep the file's order: with no reordering by quota, models on the same
    * provider stay in the sequence you wrote. `reset-soonest` drains the window
-   * about to expire; `pace` spreads work so every window lasts until its own
-   * reset.
+   * about to expire; `pace` ranks the tightest remaining budget per minute;
+   * `weighted-pace` races providers in proportion to that pace for independent
+   * session assignments, with a reproducible context/hour draw; `window-protection` is
+   * `pace` with providers held back when a fresh forecast exhausts before reset.
    */
-  by?: "in-order" | "reset-soonest" | "pace"
+  by?: "in-order" | "reset-soonest" | "pace" | "weighted-pace" | "window-protection"
   /** Provider IDs, most preferred first, used to break a tie the clock cannot. */
   path?: string[]
 }
@@ -169,14 +171,16 @@ function categoryFrom(value: unknown, path: string): CategoryDef {
   for (const key of Object.keys(pick)) {
     if (key !== "by" && key !== "path") throw new Error(`${path}.pick.${key}: unknown field`)
   }
-  if (pick.by !== undefined && pick.by !== "in-order" && pick.by !== "reset-soonest" && pick.by !== "pace") {
-    throw new Error(`${path}.pick.by: expected in-order, reset-soonest or pace`)
+  const pickStrategies = ["in-order", "reset-soonest", "pace", "weighted-pace", "window-protection"] as const
+  const by = pick.by === undefined ? undefined : pick.by as (typeof pickStrategies)[number]
+  if (by !== undefined && !pickStrategies.includes(by)) {
+    throw new Error(`${path}.pick.by: expected in-order, reset-soonest, pace, weighted-pace or window-protection`)
   }
   const path2 = pick.path === undefined ? undefined : providerPath(pick.path, `${path}.pick.path`)
   // A path without a strategy changes nothing, so it is kept inert rather than
   // rejected: the page stores it while the strategy reads "as listed".
-  if (pick.by === undefined && path2 === undefined) return { models }
-  return { models, pick: { ...(pick.by === undefined ? {} : { by: pick.by }), ...(path2 === undefined ? {} : { path: path2 }) } }
+  if (by === undefined && path2 === undefined) return { models }
+  return { models, pick: { ...(by === undefined ? {} : { by }), ...(path2 === undefined ? {} : { path: path2 }) } }
 }
 
 function categoriesFrom(value: unknown): Record<string, CategoryDef> {

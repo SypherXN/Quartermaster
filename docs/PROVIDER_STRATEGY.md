@@ -107,7 +107,7 @@ Two behaviours to know:
 - A provider with no fresh window, or with windows that carry no usage figure,
   has no pace and sorts after every provider that has one.
 
-## The third option: in order
+## In order
 
 `pick.by: "in-order"`, or no `pick` at all, leaves the chain exactly as written.
 Nothing is re-ranked by quota, so the first model stays the first try.
@@ -121,6 +121,53 @@ encodes quality rather than availability: flagship first, cheap backstop after.
 provider whose window is nearly spent until the eligibility gate or a real 429
 takes that model out.
 
+## Weighted pace: distribute new assignments
+
+`pick.by: "weighted-pace"` uses the same tightest-window budget as pace, but
+turns positive provider weights into a proportional draw rather than always
+choosing the largest one. With weights 1 and 3, independent session assignments
+approach 25% and 75%. These are assignment shares, not token or dollar shares.
+Several models or variants on one provider count as one weight and retain their
+declared order within that provider.
+
+The implementation uses weighted rendezvous ordering: each provider gets a
+reproducible hash-derived draw `u`, and the smallest `-ln(u) / pace` wins.
+The seed includes session, agent, plan and clock hour. Repeating diagnostics
+with the same context and evidence does not consume a turn or change a scheduler
+counter. Without a session ID, calls share the agent/plan/hour draw; they are not
+independent draws per RPC. Missing, zero or invalid weights follow positive
+weights, using `pick.path` and then file order as fallbacks.
+
+Both this strategy and window protection require authenticated, error-free quota
+observations no older than five minutes, with finite percentages from 0 to 100
+and future resets. Eligibility, pins and exclusive reservations still apply.
+
+## Window protection: discount early exhaustion
+
+`pick.by: "window-protection"` ranks by ordinary sustainable pace multiplied by
+the smallest usable window factor:
+
+```text
+factor = clamp((minutes to 100% at observed rate) / minutes to reset, 0, 1)
+protected pace = tightest-window pace × minimum factor
+```
+
+For example, a provider with pace 0.25 whose weekly window is forecast to exhaust
+in 60 minutes but reset in 180 gets factor 1/3 and score about 0.083. A safe
+provider scoring 0.15 then ranks ahead. Weekly and monthly windows participate,
+not just the short window. This is a soft ranking penalty, never an extra quota
+block or a promise that a window will last until reset.
+
+The observed rate reuses the existing quota history: at least two fresh readings
+spanning 15 minutes. A missing or flat trend, stale source, past reset or guessed
+reset contributes no penalty (factor 1). Without usable history, this strategy
+falls back to fresh pace ranking. No additional provider requests are made.
+The ordinary 100%/provider-reported eligibility gate is unchanged.
+
+Both strategies respect the existing one-hour idle preference within a category.
+They primarily affect new or reassigned categories, not every turn of an active
+sticky session. Earlier eligible plan slots still win.
+
 ## Laying out categories and plans
 
 Categories describe **what a model is for**, not who sells it. A good set:
@@ -133,8 +180,9 @@ Categories describe **what a model is for**, not who sells it. A good set:
 | `long-context` | models with a large window, used rarely | `in-order` |
 | `free` | OpenCode Zen free tier, shared bucket | `reset-soonest` |
 
-Use `pace` wherever the models are interchangeable and the provider is the only
-variable: it spreads work so no window runs dry before its reset. Use
+Use `pace` for a greedy sustainable-budget ranking when the models are
+interchangeable. Use `weighted-pace` to spread independent new assignments, or
+`window-protection` to discount providers whose observed trend exhausts early. Use
 `reset-soonest` when you deliberately want to drain a bucket that is about to
 expire — burst jobs, a free tier — and `in-order` where the order encodes
 quality, or where the members share a provider bucket.
@@ -166,7 +214,7 @@ Rules worth keeping:
 - **Sticky within a category.** Automatic routing remembers the exact model
   (provider, model and variant) it last assigned or confirmed at admission for a
   session. For up to an hour of idle time, that model moves to the front of its
-  own category, so a `pace` or `reset-soonest` rank flip does not churn the
+   own category, so a strategy rank flip does not churn the
   session between interchangeable models. It never moves across plan slots: an
   earlier literal or category still wins, and a recovered earlier category beats
   the sticky fallback. The hour is a routing preference, not a provider cache

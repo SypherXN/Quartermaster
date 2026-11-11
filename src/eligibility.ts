@@ -1,15 +1,12 @@
 import type { ModelRef, QuartermasterConfig } from "./config.ts"
 import type { QuotaClock } from "./decision.ts"
+import { QUOTA_BLOCK_PERCENT, freshObservationAt, type QuotaEstimates } from "./quota-estimates.ts"
 import { modelKey, type ModelEligibility } from "./select.ts"
 import type { UsageReadResult, UsageSource, UsageSourceID } from "./usage.ts"
 
-export type ModuleQuota = "unknown" | "available" | "limited"
+export { QUOTA_BLOCK_PERCENT }
 
-// ponytail: one fixed ceiling for every provider; make it configurable if a
-// provider ever needs its own line. At 100 only a filled window blocks, so a
-// near-cap window keeps its remaining headroom usable. A provider that reports
-// itself limited still blocks at any percentage (see quotaExhausted).
-export const QUOTA_BLOCK_PERCENT = 100
+export type ModuleQuota = "unknown" | "available" | "limited"
 
 /** A fresh source blocks a model when it is already limited or any window is full. */
 function quotaExhausted(source: UsageSource | undefined): boolean {
@@ -92,6 +89,41 @@ export function quotaClocks(
   }
 }
 
+/** The tightest sustainable pace among a source's future windows, if any. */
+function sourcePace(source: UsageSource, now: number): number | undefined {
+  let pace: number | undefined
+  for (const window of source.windows) {
+    if (typeof window.resetsAt !== "number" || typeof window.usedPercent !== "number") continue
+    const minutes = (window.resetsAt - now) / 60_000
+    if (minutes <= 0) continue
+    const perMinute = (QUOTA_BLOCK_PERCENT - window.usedPercent) / minutes
+    if (pace === undefined || perMinute < pace) pace = perMinute
+  }
+  return pace
+}
+
+/**
+ * The same figure for the two evidence strategies, with malformed windows
+ * dropped instead of propagating NaN, Infinity or an out-of-range percentage.
+ * `quotaPaces` keeps its previous permissive read so old strategies do not move.
+ */
+function strictPace(source: UsageSource, now: number): number | undefined {
+  let pace: number | undefined
+  for (const window of source.windows) {
+    const percent = window.usedPercent
+    const resetsAt = window.resetsAt
+    if (typeof percent !== "number" || !Number.isFinite(percent)) continue
+    if (percent < 0 || percent > QUOTA_BLOCK_PERCENT) continue
+    if (typeof resetsAt !== "number" || !Number.isFinite(resetsAt)) continue
+    const minutes = (resetsAt - now) / 60_000
+    if (!(minutes > 0) || !Number.isFinite(minutes)) continue
+    const perMinute = (QUOTA_BLOCK_PERCENT - percent) / minutes
+    if (!Number.isFinite(perMinute) || perMinute < 0) continue
+    if (pace === undefined || perMinute < pace) pace = perMinute
+  }
+  return pace
+}
+
 /**
  * How hard each provider can be used right now, in percent of a window per
  * minute: the tightest of its windows, because one request is charged to all of
@@ -110,15 +142,89 @@ export function quotaPaces(
     if (!Object.hasOwn(usageSources, model.providerID) || usage?.status !== "ok") return undefined
     const source = usage.snapshot.sources[usageSources[model.providerID] as UsageSourceID]
     if (!source || source.stale) return undefined
-    let pace: number | undefined
+    return sourcePace(source, now)
+  }
+}
+
+/**
+ * Pace with the evidence rules the two new strategies share: the source must be
+ * authenticated, error-free and observed within the last five minutes. Older
+ * snapshots report nothing, exactly like an untracked provider.
+ */
+export function quotaFreshPaces(
+  usageSources: QuartermasterConfig["usageSources"],
+  usage: UsageReadResult | undefined,
+  now = Date.now(),
+): (model: Pick<ModelRef, "providerID" | "modelID">) => number | undefined {
+  return (model) => {
+    if (!Object.hasOwn(usageSources, model.providerID) || usage?.status !== "ok") return undefined
+    const source = usage.snapshot.sources[usageSources[model.providerID] as UsageSourceID]
+    if (!source || freshObservationAt(source, now) === undefined) return undefined
+    return strictPace(source, now)
+  }
+}
+
+/**
+ * The protection factor for one window: how much of its sustainable pace is
+ * actually usable before the forecast cutoff. `undefined` means the window
+ * cannot contribute evidence (no history, flat/no trend, stale data, a guessed
+ * or past reset, malformed figures), which leaves the factor neutral at 1.
+ */
+function windowProtection(
+  sourceID: UsageSourceID,
+  window: UsageSource["windows"][number],
+  estimates: QuotaEstimates,
+  now: number,
+): number | undefined {
+  // A reset the source guessed cannot bound a ratio; leave ordinary pace alone.
+  if (window.resetEstimated === true) return undefined
+  const percent = window.usedPercent
+  const resetsAt = window.resetsAt
+  if (typeof percent !== "number" || !Number.isFinite(percent)) return undefined
+  if (percent < 0 || percent > QUOTA_BLOCK_PERCENT) return undefined
+  if (typeof resetsAt !== "number" || !Number.isFinite(resetsAt) || resetsAt <= now) return undefined
+  const estimate = estimates.estimate(sourceID, window, now)
+  if (!estimate || estimate.status !== "estimated") return undefined
+  // QuotaEstimates normally enforces these, but a protection factor must not
+  // depend on that: a two-point, 15-minute trend is the floor for evidence.
+  if (estimate.sampleCount < 2 || estimate.spanMs < 900_000) return undefined
+  const rate = estimate.ratePerMinute
+  if (typeof rate !== "number" || !Number.isFinite(rate) || rate <= 0) return undefined
+  const minutesToReset = (resetsAt - now) / 60_000
+  if (!Number.isFinite(minutesToReset) || minutesToReset <= 0) return undefined
+  // Derive the cutoff from the current percentage, not a cached cutoffAt, so a
+  // percentage that moved since the forecast cannot skew the ratio.
+  const minutesToCutoff = (QUOTA_BLOCK_PERCENT - percent) / rate
+  const ratio = minutesToCutoff / minutesToReset
+  return Number.isFinite(ratio) ? Math.min(1, Math.max(0, ratio)) : undefined
+}
+
+/**
+ * Pace scaled by window protection: each provider's tightest sustainable rate
+ * times the smallest ratio across its usable forecasts (exhaustion before reset
+ * holds it back; exhaustion after reset never does). Evidence is per provider,
+ * so every model on that provider shares it.
+ */
+export function quotaProtectedPaces(
+  usageSources: QuartermasterConfig["usageSources"],
+  usage: UsageReadResult | undefined,
+  estimates: QuotaEstimates,
+  now = Date.now(),
+): (model: Pick<ModelRef, "providerID" | "modelID">) => number | undefined {
+  return (model) => {
+    if (!Object.hasOwn(usageSources, model.providerID) || usage?.status !== "ok") return undefined
+    const sourceID = usageSources[model.providerID] as UsageSourceID
+    const source = usage.snapshot.sources[sourceID]
+    if (!source || freshObservationAt(source, now) === undefined) return undefined
+    const pace = strictPace(source, now)
+    if (pace === undefined) return undefined
+    let factor = 1
     for (const window of source.windows) {
-      if (typeof window.resetsAt !== "number" || typeof window.usedPercent !== "number") continue
-      const minutes = (window.resetsAt - now) / 60_000
-      if (minutes <= 0) continue
-      const perMinute = (100 - window.usedPercent) / minutes
-      if (pace === undefined || perMinute < pace) pace = perMinute
+      const protection = windowProtection(sourceID, window, estimates, now)
+      if (protection !== undefined && protection < factor) factor = protection
     }
-    return pace
+    const protectedPace = pace * factor
+    return Number.isFinite(protectedPace) && protectedPace >= 0 ? protectedPace : undefined
   }
 }
 

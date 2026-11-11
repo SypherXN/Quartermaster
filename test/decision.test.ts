@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import type { CategoryDef, ModelRef } from "../src/config.ts"
-import { orderCategory, orderCategoryByPace } from "../src/decision.ts"
+import { orderCategory, orderCategoryByPace, orderCategoryByProtectedPace, orderCategoryByWeightedPace } from "../src/decision.ts"
 
 const model = (providerID: string, modelID: string): ModelRef => ({ providerID, modelID })
 const minute = 60_000
@@ -85,4 +85,69 @@ test("pace sorts a provider without a clock last and ties by path then file orde
   const shared = [model("a", "x"), model("a", "y")]
   assert.deepEqual(orderCategory(category(shared, { by: "in-order" }), clock({ known: { resetsAt: 1, usedPercent: 99 } })), shared)
   assert.deepEqual(orderCategoryByPace(category(shared, { by: "in-order" }), pace({ a: 9 })), shared)
+})
+
+test("weighted pace splits independent seeds in proportion to provider pace", () => {
+  const weighted = category([model("slow", "a"), model("fast", "b")], { by: "weighted-pace" })
+  const weights = pace({ slow: 1, fast: 3 })
+  const seeds = 10_000
+  let fast = 0
+  for (let index = 0; index < seeds; index++) {
+    const winner = orderCategoryByWeightedPace(weighted, weights, `session-${index}|agent|plan|42`)[0]
+    if (winner.providerID === "fast") fast += 1
+  }
+  assert.ok(Math.abs(fast / seeds - 0.75) < 0.03, `expected about 75% on the 3x provider, saw ${fast / seeds}`)
+})
+
+test("weighted pace is deterministic and a provider races once, not once per model", () => {
+  const duplicated = category(
+    [model("a", "x"), model("b", "x"), model("a", "y")],
+    { by: "weighted-pace" },
+  )
+  const weights = pace({ a: 1, b: 1 })
+  const first = orderCategoryByWeightedPace(duplicated, weights, "seed")
+  assert.deepEqual(first, orderCategoryByWeightedPace(duplicated, weights, "seed"))
+  assert.deepEqual(first.filter((entry) => entry.providerID === "a").map((entry) => entry.modelID), ["x", "y"],
+    "declared order stands inside one provider")
+
+  const seeds = 10_000
+  let a = 0
+  for (let index = 0; index < seeds; index++) {
+    const winner = orderCategoryByWeightedPace(duplicated, weights, `seed-${index}`)[0]
+    if (winner.providerID === "a") a += 1
+    if (winner.providerID === "a") assert.equal(winner.modelID, "x", "the provider's first declared model is its entry point")
+  }
+  // Two models on provider a must not double its 1:1 weight to 2:1.
+  assert.ok(Math.abs(a / seeds - 0.5) < 0.03, `expected about 50% for provider a, saw ${a / seeds}`)
+})
+
+test("weighted pace ranks invalid weights last by path then file order", () => {
+  const invalid = category(
+    [model("zero", "a"), model("nan", "b"), model("missing", "c"), model("negative", "d"), model("fine", "e")],
+    { by: "weighted-pace", path: ["missing", "nan"] },
+  )
+  const ordered = orderCategoryByWeightedPace(
+    invalid,
+    pace({ zero: 0, nan: Number.NaN, negative: -2, fine: 4 }),
+    "seed",
+  )
+  assert.deepEqual(ordered.map((entry) => entry.providerID), ["fine", "missing", "nan", "zero", "negative"])
+  const models = [model("a", "x")]
+  assert.deepEqual(orderCategoryByWeightedPace(category(models), pace({ a: 1 }), "seed"), models)
+  assert.deepEqual(orderCategoryByWeightedPace(category(models, { by: "pace" }), pace({ a: 1 }), "seed"), models)
+})
+
+test("window protection keeps the pace ranking and only claims its own strategy", () => {
+  const protectedCategory = category(
+    [model("risky", "a"), model("safe", "b")],
+    { by: "window-protection", path: ["safe"] },
+  )
+  assert.deepEqual(
+    orderCategoryByProtectedPace(protectedCategory, pace({ risky: 0.12, safe: 0.3 })).map((entry) => entry.providerID),
+    ["safe", "risky"],
+  )
+  assert.deepEqual(
+    orderCategoryByProtectedPace(category(protectedCategory.models, { by: "pace" }), pace({})),
+    protectedCategory.models,
+  )
 })

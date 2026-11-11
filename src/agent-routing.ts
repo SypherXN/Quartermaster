@@ -5,8 +5,8 @@ import type { Agent } from "@opencode/plugin"
 import type { AgentEditor } from "@opencode/plugin/promise/agent"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import { expandPlan, expandPlans, type ModelRef, type PlanOrder, type QuartermasterConfig } from "./config.ts"
-import { categoryOrder, paceCategoryOrder } from "./decision.ts"
-import { buildQuotaEligibility, quotaClocks, quotaPaces } from "./eligibility.ts"
+import { orderCategory, orderCategoryByPace, orderCategoryByProtectedPace, orderCategoryByWeightedPace } from "./decision.ts"
+import { buildQuotaEligibility, quotaClocks, quotaFreshPaces, quotaPaces, quotaProtectedPaces } from "./eligibility.ts"
 import { classifyRetryFailure, FailureCooldowns, type FailureReport, type SuccessReport } from "./failures.ts"
 import { applyLocalHealth, LocalHealth } from "./local-health.ts"
 import { laterDeadline, parseRateLimitHeaders, RateLimitObservations, statedResetFromError } from "./rate-limit.ts"
@@ -16,7 +16,7 @@ import { explainSelection, type SelectionExplanation } from "./explain.ts"
 import { AgentPins } from "./pins.ts"
 import { RequestEvidenceHistory } from "./request-evidence.ts"
 import { adoptProjectQuartermasterOptions, readNativeConfiguration, type ConfigurationReader } from "./project-options.ts"
-import { modelKey, resolvePlan, selectAgentModel, selectModel, selectNamedPlan, type ModelEligibility } from "./select.ts"
+import { modelKey, resolvePlan, selectAgentModel, selectModel, selectNamedPlan, STICKY_IDLE_MS, type ModelEligibility } from "./select.ts"
 import { readUsageStatus, type UsageReadResult, type UsageSourceID } from "./usage.ts"
 import { QuotaEstimates, freshObservationAt } from "./quota-estimates.ts"
 import { QuotaHistory, type QuotaHistoryQuery } from "./quota-history.ts"
@@ -106,7 +106,7 @@ export function applyAgentRouting(
   pins: ReadonlyMap<string, ModelRef> = new Map(),
   budgetReasons: readonly TokenBudgetReason[] = [],
   onBudgetWarning?: (agentID: string, selection: ReturnType<typeof selectAgentModel>, reasons: readonly TokenBudgetReason[]) => void,
-  order?: PlanOrder,
+  orderFor?: (agentID: string) => PlanOrder,
 ): void {
   for (const agentID of Object.keys(config.agents)) {
     if (!editor.get(agentID)) continue
@@ -119,7 +119,7 @@ export function applyAgentRouting(
       now,
       pins.get(agentID),
       undefined,
-      order,
+      orderFor?.(agentID),
     )
     if (budgetReasons.length > 0) onBudgetWarning?.(agentID, selection, budgetReasons)
     if (selection.status !== "selected") continue
@@ -157,8 +157,8 @@ export async function registerAgentRouting(
     !(ctx.command && ctx.session)
   ) return undefined
 
-  // Quota forecasts are informational: they persist a percentage trend but never
-  // participate in eligibility, selection or cooldowns.
+  // Forecasts adjust ranking only for window-protection; they never change
+  // eligibility or cooldowns.
   const estimates = await QuotaEstimates.load(ctx.storage)
   const history = new QuotaHistory(ctx.storage)
   const recordUsage = async (result: UsageReadResult | undefined) => {
@@ -206,22 +206,43 @@ export async function registerAgentRouting(
   const leases = new ExclusiveLeases()
   // Read `usage` at call time: refresh() replaces it when quota is re-read, and a
   // decision plan should follow the fresh clock rather than the startup one.
-  const planOrder: PlanOrder = (category) =>
-    (category.pick?.by === "pace"
-      ? paceCategoryOrder(quotaPaces(config.usageSources, usage))
-      : categoryOrder(quotaClocks(config.usageSources, usage)))(category)
+  // The seed is the routing context plus the current one-hour bucket, so the same
+  // session/agent/plan repeats an identical weighted draw while independent
+  // sessions split by pace; it is derived on every call, never stored.
+  const planOrderFor = (
+    context: { sessionID?: string; agentID?: string; planID?: string },
+    now = Date.now(),
+  ): PlanOrder => {
+    const bucket = Math.floor(now / STICKY_IDLE_MS)
+    const seed = [context.sessionID ?? "", context.agentID ?? "", context.planID ?? "", String(bucket)].join("|")
+    return (category) => {
+      switch (category.pick?.by) {
+        case "weighted-pace":
+          return orderCategoryByWeightedPace(category, quotaFreshPaces(config.usageSources, usage, now), seed)
+        case "window-protection":
+          return orderCategoryByProtectedPace(category, quotaProtectedPaces(config.usageSources, usage, estimates, now))
+        case "pace":
+          return orderCategoryByPace(category, quotaPaces(config.usageSources, usage, now))
+        default:
+          return orderCategory(category, quotaClocks(config.usageSources, usage))
+      }
+    }
+  }
   const busyFor = (sessionID?: string) => (model: ModelRef) =>
     sessionID === undefined ? leases.taken(model) : leases.blocks(sessionID, model)
-  const selectedFor = (agentID: string, sessionID?: string) => selectAgentModel(
-    config,
-    agentID,
-    registry,
-    failures.apply(baseSnapshot(), registry, Date.now()),
-    Date.now(),
-    pins.get(agentID),
-    busyFor(sessionID),
-    planOrder,
-  )
+  const selectedFor = (agentID: string, sessionID?: string) => {
+    const now = Date.now()
+    return selectAgentModel(
+      config,
+      agentID,
+      registry,
+      failures.apply(baseSnapshot(), registry, now),
+      now,
+      pins.get(agentID),
+      busyFor(sessionID),
+      planOrderFor({ sessionID, agentID, planID: config.agents[agentID] }, now),
+    )
+  }
   const registration = Object.keys(config.agents).length > 0
       ? await ctx.agent.transform((editor) => {
         const now = Date.now()
@@ -234,7 +255,7 @@ export async function registerAgentRouting(
           pins.snapshot(),
           budgetGate?.reasons(now),
           (agentID, selection, reasons) => console.warn("[quartermaster] token budget advisory", JSON.stringify({ agentID, selection, reasons })),
-          planOrder,
+          (agentID) => planOrderFor({ agentID, planID: config.agents[agentID] }, now),
         )
       })
     : undefined
@@ -509,17 +530,20 @@ export async function registerAgentRouting(
     await pins.revalidate()
   }
 
-  const choose = (agentID: string, sessionID: string, current?: SessionModel) => selectAgentModel(
-    config,
-    agentID,
-    registry,
-    failures.apply(baseSnapshot(), registry, Date.now()),
-    Date.now(),
-    pins.get(agentID),
-    busyFor(sessionID),
-    planOrder,
-    stickyFor(sessionID, agentID, current),
-  )
+  const choose = (agentID: string, sessionID: string, current?: SessionModel) => {
+    const now = Date.now()
+    return selectAgentModel(
+      config,
+      agentID,
+      registry,
+      failures.apply(baseSnapshot(), registry, now),
+      now,
+      pins.get(agentID),
+      busyFor(sessionID),
+      planOrderFor({ sessionID, agentID, planID: config.agents[agentID] }, now),
+      stickyFor(sessionID, agentID, current),
+    )
+  }
 
   const diagnoseSession = async (sessionID: string) => {
     let view: ReturnType<typeof sessionView> = {}
@@ -547,7 +571,10 @@ export async function registerAgentRouting(
     const agentID = view.agent
     const bound = agentID !== undefined && Object.hasOwn(config.agents, agentID)
     const planID = bound ? config.agents[agentID] : undefined
-    const plan = planID === undefined ? undefined : expandPlan(config.plans[planID], config.categories, planOrder)
+    // One order for both the reported plan and the recommendation: same session,
+    // agent, plan and hour must produce the same evidence.
+    const order = planOrderFor({ sessionID, agentID, planID }, now)
+    const plan = planID === undefined ? undefined : expandPlan(config.plans[planID], config.categories, order)
     const mode = !agentID ? "unknown" : !bound ? "unbound" : ownershipRead !== "ok" ? "unknown"
       : ownership?.agent === agentID && ownership.mode === "manual" ? "manual" : "automatic"
     // Read the sticky record without refreshing it; diagnostics are not activity, and
@@ -558,7 +585,7 @@ export async function registerAgentRouting(
       config, agentID ?? "", registry, failures.apply(baseSnapshot(), registry, now), now,
       agentID ? pins.get(agentID) : undefined,
       (model) => leases.peekBlocks(sessionID, model),
-      planOrder,
+      order,
       sticky,
     ))
     const observed = lastPrimaryModels.get(sessionID)
@@ -779,7 +806,14 @@ export async function registerAgentRouting(
       if (!agentID || agentID !== event.agent || !Object.hasOwn(config.agents, agentID)) return
       const ownership = await ctx.storage.get(ownershipKey(event.sessionID)) as { mode?: unknown; agent?: unknown } | undefined
       if (ownership?.agent === agentID && ownership.mode === "manual") return
-      const plan = expandPlan(config.plans[config.agents[agentID] ?? ""] ?? [], config.categories)
+      // Keep the strategy's order for the fallback. The membership check below
+      // only needs the set, but selection must see the same context seed as
+      // admission, or a retry could ignore the session's weighted draw.
+      const plan = expandPlan(
+        config.plans[config.agents[agentID] ?? ""] ?? [],
+        config.categories,
+        planOrderFor({ sessionID: event.sessionID, agentID, planID: config.agents[agentID] }),
+      )
       if (!current || !plan?.some((candidate) => candidate.providerID === current.providerID && candidate.modelID === current.id)) return
       if (!sameSessionModel(modelRef(event.model), current)) return
 
@@ -963,7 +997,16 @@ export async function registerAgentRouting(
   const select = async (agentID: string, workType?: string, sessionID?: string) => {
     await ensureProjectOptions()
     await refresh()
-    const resolution = resolvePlan(config, agentID, { workType, order: planOrder })
+    const now = Date.now()
+    // Name the plan the binding resolves to before ordering, so the seed stays
+    // agent/plan identity rather than a per-call surprise.
+    const planID = workType !== undefined && Object.hasOwn(config.workTypes, workType)
+      ? config.workTypes[workType]
+      : config.agents[agentID]
+    const resolution = resolvePlan(config, agentID, {
+      workType,
+      order: planOrderFor({ sessionID, agentID, planID }, now),
+    })
     if (resolution.status === "explicit-model") {
       return { status: "explicit-model", model: resolution.model, reasonCode: resolution.reason.code }
     }
@@ -976,10 +1019,10 @@ export async function registerAgentRouting(
       }
     }
     const currentRegistry = registry
-    const currentEligibility = failures.apply(baseSnapshot(), currentRegistry, Date.now())
+    const currentEligibility = failures.apply(baseSnapshot(), currentRegistry, now)
     const pin = pins.get(agentID)
     const candidates = pin ? [pin, ...resolution.plan.filter((candidate) => modelKey(candidate) !== modelKey(pin))] : resolution.plan
-    let selection = selectModel(candidates, currentRegistry, currentEligibility, Date.now(), busyFor(sessionID))
+    let selection = selectModel(candidates, currentRegistry, currentEligibility, now, busyFor(sessionID))
     if (selection.status === "selected" && pin && modelKey(selection.model) === modelKey(pin)) selection = { ...selection, reason: { code: "manual-pin" } }
     return { ...explainSelection(selection), plan: { id: resolution.planID, source: resolution.source, reasonCode: resolution.reason.code } }
   }
@@ -998,7 +1041,7 @@ export async function registerAgentRouting(
       failures.apply(baseSnapshot(), registry, now),
       now,
       (model) => leases.taken(model),
-      planOrder,
+      planOrderFor({ planID }, now),
     )
     if (selection.status === "no-plan") {
       return {

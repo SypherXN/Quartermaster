@@ -139,8 +139,16 @@ All settings belong in `quartermaster.jsonc` next to the OpenCode config that re
   then by `pick.path` (provider IDs, most preferred first), then by the file's
   order. Windows are read from `usageSources`; a provider with no fresh window
   sorts last. Without `pick` the file's order is used. `pick.by: "pace"` ranks
-  instead by remaining room per minute of the tightest window, so no window runs
-  dry before its own reset; ties and unknowns behave the same way. Automatic
+  instead by remaining room per minute of the tightest window, highest first;
+  it is a ranking, not a traffic split or a guarantee against exhaustion.
+  `pick.by: "weighted-pace"` distributes independent session assignments in
+  proportion to that pace, counting each provider once. Its draw is reproducible
+  per session, agent, plan and hour; calls without a session share that context's
+  draw rather than taking a new draw per call. `pick.by: "window-protection"`
+  reduces pace when fresh observed consumption would exhaust a window before
+  its reported reset. Both new strategies require authenticated, error-free
+  quota observations no older than five minutes; missing evidence sorts last.
+  Automatic
   routing keeps the exact model (and variant) it last assigned or confirmed at
   admission inside its category for up to an hour of idle time; earlier plan
   slots still win, and a recovered earlier category is used before the sticky
@@ -160,7 +168,8 @@ All settings belong in `quartermaster.jsonc` next to the OpenCode config that re
    or earlier if the provider reports a limit. There is no reserved 10% buffer.
    The Quota page's Estimates tab forecasts time to 100% usage from fresh percentage
    observations spanning at least 15 minutes, using up to one hour of recent readings.
-  Forecasts are informational, separate from reported resets, and never affect routing;
+    Forecasts stay separate from reported resets. Only the opt-in
+    `window-protection` strategy uses them to adjust ranking, never eligibility;
    stale readings, changing windows and insufficient history suppress projections.
    A separate archive keeps observed window readings and their forecasts for 90 days;
    older readings roll into cumulative statistics per usage source and window.

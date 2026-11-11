@@ -1,6 +1,11 @@
-import { QUOTA_BLOCK_PERCENT } from "./eligibility.ts"
 import type { UsageReadResult, UsageSource, UsageSourceID, UsageWindow } from "./usage.ts"
 
+// The ceiling lives here so eligibility can import the forecast helpers without a
+// runtime cycle; eligibility re-exports it for its existing callers.
+// ponytail: one fixed ceiling for every provider; make it configurable if a
+// provider ever needs its own line. At 100 only a filled window blocks, so a
+// near-cap window keeps its remaining headroom usable.
+export const QUOTA_BLOCK_PERCENT = 100
 export const QUOTA_ESTIMATE_STORAGE_KEY = "routing/quota-estimates-v1"
 export const QUOTA_ESTIMATE_HISTORY_MS = 60 * 60_000
 export const QUOTA_OBSERVATION_FRESH_MS = 5 * 60_000
@@ -124,13 +129,15 @@ export class QuotaEstimates {
     return changed || before !== this.seriesSignature()
   }
 
-  /** Status-facing estimate for one visible window. */
+  /** Read-only status-facing estimate for one visible window; never prunes history. */
   estimate(sourceID: UsageSourceID, window: UsageWindow, now = Date.now()): QuotaEstimate | undefined {
     const percent = window.usedPercent
     if (typeof percent !== "number" || !Number.isFinite(percent)) return undefined
-    this.prune(now)
+    // Read-only: filter the recorded history to the retention window instead of
+    // pruning it in place, so a diagnostic or a routing read never writes state.
+    const retentionFrom = now - QUOTA_ESTIMATE_HISTORY_MS
     const record = this.series.get(keyFor(sourceID, window.name))
-    const samples = record?.samples ?? []
+    const samples = (record?.samples ?? []).filter((sample) => sample.at >= retentionFrom && sample.at <= now)
     const spanMs = samples.length > 1 ? samples[samples.length - 1].at - samples[0].at : 0
     const base = { cutoffPercent: QUOTA_BLOCK_PERCENT, sampleCount: samples.length, spanMs }
     // A reset that has already happened ends the recorded cycle: the old
