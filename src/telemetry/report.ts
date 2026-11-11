@@ -1,15 +1,15 @@
 import { setImmediate as yieldToHost } from "node:timers/promises"
 import type { ModelRef, TokenBudgetConfig, TokenRateConfig } from "../config.ts"
 import { evaluateTokenBudgets, type TokenBudgetReading } from "./budgets.ts"
-import { estimateComponentCosts, estimateTokenCosts, type ComponentCost } from "./costs.ts"
+import { estimateComponentCosts, estimateTokenCosts, estimateRecordedApiCosts, frozenApiCost, type ApiComponentCost, type ApiEquivalentCosts, type ComponentCost } from "./costs.ts"
 import type { CatalogSnapshot } from "./prices.ts"
 import type { ProviderErrorLedger, ProviderErrorRecord } from "./errors.ts"
 import type { TokenLedger, TokenLifetime, TokenRollup, TokenRollupSlice } from "./ledger.ts"
 import type { PluginAttributionClaim, PluginAttributionLedger } from "./attribution.ts"
 import type { CompactionLedger, CompactionRecord } from "./compaction.ts"
-import type { DirectUsageLedger, DirectUsageLifetime, DirectUsageRecord, DirectUsageRollup, DirectUsageRollupSlice } from "./direct-usage.ts"
+import { directUsageApiCost, type DirectUsageLedger, type DirectUsageLifetime, type DirectUsageRecord, type DirectUsageRollup, type DirectUsageRollupSlice } from "./direct-usage.ts"
 import type { WindowLedger, WindowRecord } from "./window.ts"
-import type { TokenTelemetryRecord } from "./types.ts"
+import type { TokenTelemetryRecord, FrozenApiCost } from "./types.ts"
 import { sessionKey } from "./session-key.ts"
 
 export const REPORT_MAX_PAGE_SIZE = 100
@@ -43,6 +43,8 @@ export interface UsageDimension {
   cacheHitRate: number | null
   // Per-component cost for a model row; null when nothing could be priced.
   costs: ComponentCost | null
+  // Frozen API cost for this provider; null when no record was priceable.
+  apiCosts?: ApiComponentCost | null
 }
 
 export interface PluginUsageDimension {
@@ -62,6 +64,7 @@ export interface PluginUsageDimension {
   hostCostUSD: number | null
   hostCostMissing: number
   cacheHitRate: number | null
+  apiCosts?: ApiComponentCost | null
 }
 
 export interface DirectUsageDimension {
@@ -81,6 +84,7 @@ export interface DirectUsageDimension {
   reasoning: number
   unknownCacheRecords: number
   cacheHitRate: number | null
+  apiCosts?: ApiComponentCost | null
 }
 
 // The model that ran the summary. Context is that model's catalog window, not the chat session's.
@@ -122,6 +126,7 @@ export interface AgentUsageDimension {
   sessions: number
   lastObservedAt: number | null
   models: ProjectModelUsage[]
+  apiCosts?: ApiComponentCost | null
 }
 
 export interface PlanUsageDimension {
@@ -173,6 +178,7 @@ export interface ProjectUsageDimension {
   // Top models by observed tokens, so a project row can name what did the work.
   models: ProjectModelUsage[]
   modelCount: number
+  apiCosts?: ApiComponentCost | null
 }
 
 export interface SessionUsageDimension {
@@ -279,6 +285,8 @@ export interface QuartermasterReport {
   projects: {
     complete: false
     total: number
+    // Every project group, not the capped per-project model rows.
+    apiCosts?: ApiComponentCost | null
     items: ProjectUsageDimension[]
   }
   dimensions: { total: number; offset: number; limit: number; nextOffset: number | null; items: UsageDimension[] }
@@ -330,6 +338,7 @@ export interface QuartermasterReport {
       unknownTokenRecords: number
       partialRecords: number
     }
+    apiCosts?: ApiComponentCost | null
     dimensions: { total: number; offset: number; limit: number; nextOffset: number | null; items: DirectUsageDimension[] }
   }
   agentAttribution: {
@@ -337,6 +346,8 @@ export interface QuartermasterReport {
     complete: false
     totalRecords: number
     unknownRecords: number
+    // Every agent row plus the unattributed remainder, not the paginated page.
+    apiCosts?: ApiComponentCost | null
     dimensions: { total: number; offset: number; limit: number; nextOffset: number | null; items: AgentUsageDimension[] }
   }
   planAttribution: {
@@ -350,6 +361,8 @@ export interface QuartermasterReport {
   }
   budgets: TokenBudgetReading[]
   costs: ReturnType<typeof estimateTokenCosts>
+  // Frozen-at-recording API equivalent with older cumulative totals.
+  apiEquivalent?: ApiEquivalentCosts
   errors: {
     attribution: "session-project"
     unattributedExcluded: true
@@ -406,6 +419,56 @@ function tokenValue(record: TokenTelemetryRecord): number | undefined {
     Number.isSafeInteger(counts.output) && counts.output >= 0 && Number.isSafeInteger(total)
     ? total
     : undefined
+}
+
+type ApiCostAggregate = { cost: ApiComponentCost | null; legacy: number }
+
+const blankApiCostAggregate = (): ApiCostAggregate => ({ cost: null, legacy: 0 })
+const emptyApiCost = (): ApiComponentCost => ({
+  currency: "USD", input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0,
+  pricedRecords: 0, unpricedRecords: 0, cacheUnpricedRecords: 0, partialRecords: 0,
+})
+const addFinite = (sum: number, value: number) => Number.isFinite(sum + value) ? sum + value : sum
+
+function addKnownApiCost(target: ApiCostAggregate, cost: FrozenApiCost): void {
+  const total = target.cost ?? emptyApiCost()
+  total.input = addFinite(total.input, cost.input)
+  total.output = addFinite(total.output, cost.output)
+  total.cacheRead = addFinite(total.cacheRead, cost.cacheRead)
+  total.cacheWrite = addFinite(total.cacheWrite, cost.cacheWrite)
+  total.total = addFinite(total.total, cost.total)
+  total.pricedRecords += cost.pricedRecords
+  total.unpricedRecords += cost.unpricedRecords
+  total.cacheUnpricedRecords += cost.cacheUnpricedRecords
+  total.partialRecords += cost.partialRecords
+  target.cost = total
+}
+
+function finalizeApiCost(target: ApiCostAggregate): ApiComponentCost | null {
+  if (!target.cost || target.cost.pricedRecords === 0) return null
+  target.cost.unpricedRecords += target.legacy
+  return target.cost
+}
+
+// Combine raw aggregates before either is finalized, so legacy coverage is
+// folded into unpricedRecords exactly once.
+function combineApiCost(target: ApiCostAggregate, source: ApiCostAggregate): void {
+  if (source.cost) addKnownApiCost(target, source.cost)
+  target.legacy += source.legacy
+}
+
+type ApiCostSlice = {
+  apiCost?: FrozenApiCost
+  apiRecords?: number
+  apiUnknownRecords?: number
+  records: number
+}
+
+function addSliceApiCost(target: ApiCostAggregate, slice: { records: number } & ApiCostSlice): void {
+  const value = slice as TokenRollupSlice & ApiCostSlice
+  if (value.apiCost) addKnownApiCost(target, value.apiCost)
+  if (value.apiRecords === undefined) target.legacy += slice.records
+  else target.legacy += value.apiUnknownRecords ?? 0
 }
 
 function inRange(timestamp: number, query: ReportQuery): boolean {
@@ -562,6 +625,7 @@ function summarizePluginUsage(
   const claimsBySession = pluginClaimsBySession(projectID, claims)
 
   const usageByPlugin = new Map<string, PluginUsageDimension>()
+  const apiByPlugin = new Map<string, ApiCostAggregate>()
   let unknownRecords = 0
   let ambiguousRecords = 0
   for (const record of records) {
@@ -582,12 +646,21 @@ function summarizePluginUsage(
     }
     absorbRecord(item, record)
     usageByPlugin.set(key, item)
+    const api = apiByPlugin.get(key) ?? blankApiCostAggregate()
+    const frozen = frozenApiCost(record)
+    if (frozen) addKnownApiCost(api, frozen)
+    else api.legacy += 1
+    apiByPlugin.set(key, api)
   }
   // A pruned step has no plugin claim. It stays unknown, not a named plugin.
   const prunedRecords = hostSlices(rollups).reduce((sum, slice) => addNumbers(sum, slice.records), 0)
   unknownRecords += prunedRecords
 
-  const all = [...usageByPlugin.values()].map((item) => ({ ...item, cacheHitRate: hitRate(item) })).sort((a, b) =>
+  const all = [...usageByPlugin.values()].map((item) => ({
+    ...item,
+    cacheHitRate: hitRate(item),
+    apiCosts: finalizeApiCost(apiByPlugin.get(JSON.stringify([item.pluginID, item.pluginName])) ?? blankApiCostAggregate()),
+  })).sort((a, b) =>
     a.pluginID.localeCompare(b.pluginID) || a.pluginName.localeCompare(b.pluginName),
   )
   const page = all.slice(query.offset, query.offset + query.limit)
@@ -610,6 +683,8 @@ function summarizePluginUsage(
 
 function summarizeAgentUsage(records: readonly TokenTelemetryRecord[], query: ReportQuery, rollups: readonly TokenRollup[]) {
   const usageByAgent = new Map<string, AgentUsageDimension>()
+  const apiByAgent = new Map<string, ApiCostAggregate>()
+  const apiUnattributed = blankApiCostAggregate()
   type AgentDetail = { models: Map<string, ProjectModelUsage>; sessions: Set<string>; lastObservedAt: number | null }
   const details = new Map<string, AgentDetail>()
   const detailOf = (agentID: string) => {
@@ -646,6 +721,9 @@ function summarizeAgentUsage(records: readonly TokenTelemetryRecord[], query: Re
   for (const record of records) {
     if (!record.hostAgentID) {
       unknownRecords += 1
+      const frozen = frozenApiCost(record)
+      if (frozen) addKnownApiCost(apiUnattributed, frozen)
+      else apiUnattributed.legacy += 1
       absorbRecord(unattributed, record)
       unattributedDetail.sessions.add(record.hostSessionID)
       addModel(unattributedDetail, record.providerID, record.modelID, 1, tokenValue(record) ?? 0)
@@ -655,6 +733,11 @@ function summarizeAgentUsage(records: readonly TokenTelemetryRecord[], query: Re
       continue
     }
     addAgent(record.hostAgentID, (total) => absorbRecord(total, record))
+    const agentApi = apiByAgent.get(record.hostAgentID) ?? blankApiCostAggregate()
+    const frozen = frozenApiCost(record)
+    if (frozen) addKnownApiCost(agentApi, frozen)
+    else agentApi.legacy += 1
+    apiByAgent.set(record.hostAgentID, agentApi)
     // Per-agent detail, so an agent row can be expanded the way a project row is.
     const detail = detailOf(record.hostAgentID)
     detail.sessions.add(record.hostSessionID)
@@ -666,6 +749,7 @@ function summarizeAgentUsage(records: readonly TokenTelemetryRecord[], query: Re
     prunedRecords = addNumbers(prunedRecords, slice.records)
     if (!slice.agentID) {
       unknownRecords += slice.records
+      addSliceApiCost(apiUnattributed, slice)
       absorbSlice(unattributed, slice)
       addModel(unattributedDetail, slice.providerID, slice.modelID, slice.records, slice.observedTokens)
       continue
@@ -680,9 +764,22 @@ function summarizeAgentUsage(records: readonly TokenTelemetryRecord[], query: Re
       models: [],
     }
     absorbSlice(item, slice)
+    const sliceApi = apiByAgent.get(slice.agentID) ?? blankApiCostAggregate()
+    addSliceApiCost(sliceApi, slice)
+    apiByAgent.set(slice.agentID, sliceApi)
     addModel(detailOf(slice.agentID), slice.providerID, slice.modelID, slice.records, slice.observedTokens)
     usageByAgent.set(slice.agentID, item)
   }
+  // Unsplit legacy rollup records have no agent slice; they stay unknown rather
+  // than disappearing from the API coverage.
+  for (const rollup of rollups) {
+    const covered = rollup.slices.reduce((sum, slice) => sum + slice.records, 0)
+    const residual = Math.max(0, rollup.records - covered)
+    if (residual > 0) apiUnattributed.legacy = addNumbers(apiUnattributed.legacy, residual)
+  }
+  const apiTotal = blankApiCostAggregate()
+  for (const api of apiByAgent.values()) combineApiCost(apiTotal, api)
+  combineApiCost(apiTotal, apiUnattributed)
   const all = [...usageByAgent.values()].map((item) => {
     const detail = details.get(item.agentID)
     return {
@@ -691,6 +788,7 @@ function summarizeAgentUsage(records: readonly TokenTelemetryRecord[], query: Re
       sessions: detail?.sessions.size ?? 0,
       lastObservedAt: detail?.lastObservedAt ?? null,
       models: detail ? [...detail.models.values()].sort((a, b) => b.observedTokens - a.observedTokens).slice(0, 50) : [],
+      apiCosts: finalizeApiCost(apiByAgent.get(item.agentID) ?? blankApiCostAggregate()),
     }
   }).sort((a, b) => b.observedTokens - a.observedTokens)
   const page = all.slice(query.offset, query.offset + query.limit)
@@ -699,6 +797,7 @@ function summarizeAgentUsage(records: readonly TokenTelemetryRecord[], query: Re
     complete: false as const,
     totalRecords: records.length + prunedRecords,
     unknownRecords,
+    apiCosts: finalizeApiCost(apiTotal),
     unattributed: {
       ...unattributed,
       records: unknownRecords,
@@ -706,6 +805,7 @@ function summarizeAgentUsage(records: readonly TokenTelemetryRecord[], query: Re
       sessions: unattributedDetail.sessions.size,
       lastObservedAt: unattributedDetail.lastObservedAt,
       models: [...unattributedDetail.models.values()].sort((a, b) => b.observedTokens - a.observedTokens).slice(0, 50),
+      apiCosts: finalizeApiCost(apiUnattributed),
     },
     dimensions: {
       total: all.length,
@@ -1386,6 +1486,8 @@ function summarizeDirectUsage(
   })
   const add = (sum: number, value: number) => Number.isSafeInteger(sum + value) && sum + value >= 0 ? sum + value : sum
   const groups = new Map<string, DirectUsageDimension>()
+  const apiByGroup = new Map<string, ApiCostAggregate>()
+  const directApi = blankApiCostAggregate()
   let observedTokens = 0
   let unknownTokenRecords = 0
   let partialRecords = 0
@@ -1425,6 +1527,13 @@ function summarizeDirectUsage(
     item.cacheWrite = add(item.cacheWrite, record.counts.cacheWrite)
     item.reasoning = add(item.reasoning, record.counts.reasoning)
     groups.set(key, item)
+    const frozen = directUsageApiCost(record)
+    const api = apiByGroup.get(key) ?? blankApiCostAggregate()
+    if (frozen) addKnownApiCost(api, frozen)
+    else api.legacy += 1
+    apiByGroup.set(key, api)
+    if (frozen) addKnownApiCost(directApi, frozen)
+    else directApi.legacy += 1
   }
   const addSlice = (slice: DirectUsageRollupSlice) => {
     const key = JSON.stringify([slice.pluginID, slice.pluginName, slice.providerID, slice.modelID, slice.variant])
@@ -1447,6 +1556,10 @@ function summarizeDirectUsage(
     item.cacheWrite = add(item.cacheWrite, slice.cacheWrite)
     item.reasoning = add(item.reasoning, slice.reasoning)
     groups.set(key, item)
+    const api = apiByGroup.get(key) ?? blankApiCostAggregate()
+    addSliceApiCost(api, slice)
+    apiByGroup.set(key, api)
+    addSliceApiCost(directApi, slice)
   }
   // A since/until filter does not apply: host totals include every rollup too.
   // Slices carry the plugin and model. A day written before slices has none.
@@ -1465,10 +1578,16 @@ function summarizeDirectUsage(
     cacheWrite = add(cacheWrite, rollup.cacheWrite)
     reasoning = add(reasoning, rollup.reasoning)
     for (const slice of rollup.slices ?? []) addSlice(slice)
+    // Records a legacy rollup counted before slices existed have no plugin or
+    // model left to name; keep them as unknown coverage in the grand total.
+    const covered = (rollup.slices ?? []).reduce((sum, slice) => sum + slice.records, 0)
+    const residual = Math.max(0, rollup.records - covered)
+    if (residual > 0) directApi.legacy = add(directApi.legacy, residual)
   }
   const items = [...groups.values()].map((item) => ({
     ...item,
     cacheHitRate: item.unknownCacheRecords > 0 ? null : ratio(item.cacheRead, item.cacheRead + item.cacheWrite),
+    apiCosts: finalizeApiCost(apiByGroup.get(JSON.stringify([item.pluginID, item.pluginName, item.providerID, item.modelID, item.variant])) ?? blankApiCostAggregate()),
   })).sort((a, b) =>
     b.observedTokens - a.observedTokens || a.pluginID.localeCompare(b.pluginID) || a.modelID.localeCompare(b.modelID))
   const page = items.slice(query.offset, query.offset + query.limit)
@@ -1487,6 +1606,7 @@ function summarizeDirectUsage(
       unknownTokenRecords: archivedUnknown,
       partialRecords: archivedPartial,
     },
+    apiCosts: finalizeApiCost(directApi),
     dimensions: {
       total: items.length,
       offset: query.offset,
@@ -1514,10 +1634,16 @@ export interface ProjectView {
 export async function buildQuartermasterReport(
   deps: {
     projectID: string
-    tokenLedger: Pick<TokenLedger, "list" | "listRollups"> & { listLifetime?: TokenLedger["listLifetime"] }
+    tokenLedger: Pick<TokenLedger, "list" | "listRollups"> & {
+      listLifetime?: TokenLedger["listLifetime"]
+      snapshot?: TokenLedger["snapshot"]
+    }
     errorLedger: Pick<ProviderErrorLedger, "list">
     attributionLedger: Pick<PluginAttributionLedger, "list">
     directUsageLedger?: Pick<DirectUsageLedger, "list"> & {
+      // Production reads one coherent raw/rollup/lifetime snapshot; older test
+      // fixtures keep the separate read methods.
+      snapshot?: DirectUsageLedger["snapshot"]
       listRollups?: DirectUsageLedger["listRollups"]
       listLifetime?: DirectUsageLedger["listLifetime"]
     }
@@ -1549,25 +1675,29 @@ export async function buildQuartermasterReport(
   // History is older than the raw window, so a since/until view leaves it out.
   // Only an unfiltered view is all-time.
   const allTime = query.since === undefined && query.until === undefined
-  const [allTokens, allErrors, allClaims, catalog, legacyRollups, legacyLifetime, directUsageRows, allCompaction, allWindows] = await Promise.all([
-    // Every project: the page reads one ledger across all checkouts, so a fresh
-    // host project id cannot hide the history recorded under an older one.
-    deps.tokenLedger.list({}),
+  const ledgerRows = deps.tokenLedger.snapshot
+    ? await deps.tokenLedger.snapshot({})
+    : {
+        records: await deps.tokenLedger.list({}),
+        rollups: await (deps.tokenLedger.listRollups?.({}) ?? []),
+        lifetime: await (deps.tokenLedger.listLifetime?.({}) ?? []),
+      }
+  const [allErrors, allClaims, catalog, directUsageRows, allCompaction, allWindows] = await Promise.all([
     // Errors follow the token view: every project, so a provider line can carry
     // the retries that belong to it.
     deps.errorLedger.list({ limit: 10_000 }),
     deps.attributionLedger.list(deps.projectID),
     deps.catalog ? deps.catalog() : Promise.resolve(undefined),
-    deps.tokenLedger.listRollups ? deps.tokenLedger.listRollups({}) : Promise.resolve([]),
-    deps.tokenLedger.listLifetime ? deps.tokenLedger.listLifetime({}) : Promise.resolve([]),
-    // list prunes before it returns. History is read after that so a call
-    // folded during this build is still in the direct-usage total.
+    // Snapshot recovers, folds and prunes under one lock, so raw and lifetime
+    // rows cannot disagree across a fold. Older fixtures fall back to separate reads.
     deps.directUsageLedger
-      ? deps.directUsageLedger.list().then(async (records) => ({
-          records,
-          rollups: await (deps.directUsageLedger?.listRollups?.() ?? []),
-          lifetime: await (deps.directUsageLedger?.listLifetime?.() ?? []),
-        }))
+      ? deps.directUsageLedger.snapshot
+        ? deps.directUsageLedger.snapshot()
+        : deps.directUsageLedger.list().then(async (records) => ({
+            records,
+            rollups: await (deps.directUsageLedger?.listRollups?.() ?? []),
+            lifetime: await (deps.directUsageLedger?.listLifetime?.() ?? []),
+          }))
       : Promise.resolve({
           records: [] as DirectUsageRecord[],
           rollups: [] as DirectUsageRollup[],
@@ -1576,6 +1706,9 @@ export async function buildQuartermasterReport(
     deps.compactionLedger ? deps.compactionLedger.list() : Promise.resolve([]),
     deps.windowLedger ? deps.windowLedger.list(deps.projectID) : Promise.resolve([]),
   ])
+  const allTokens = ledgerRows.records
+  const legacyRollups = ledgerRows.rollups
+  const legacyLifetime = ledgerRows.lifetime
   const prices = catalog?.prices
   // A lifetime row is one combination. Presenting it as a day rollup with a
   // single slice lets every existing fold treat both history shapes alike.
@@ -1590,7 +1723,7 @@ export async function buildQuartermasterReport(
       slices: [row],
     })),
   ] : []).filter((rollup) => !excluded(rollup.projectID))
-  const directRollups: DirectUsageRollup[] = allTime ? [
+  const directRollups: DirectUsageRollup[] = (allTime ? [
     ...directUsageRows.rollups,
     ...directUsageRows.lifetime.map((row: DirectUsageLifetime) => ({
       projectID: row.projectID,
@@ -1606,15 +1739,16 @@ export async function buildQuartermasterReport(
       reasoning: row.reasoning,
       slices: [row],
     })),
-  ] : []
+  ] : []).filter((rollup) => !excluded(rollup.projectID))
   const archivedRecords = rollups.reduce((sum, rollup) => sum + rollup.records, 0)
   const archivedTokens = rollups.reduce((sum, rollup) => sum + rollup.observedTokens, 0)
   const archivedUnknown = rollups.reduce((sum, rollup) => sum + rollup.unknownTokenRecords, 0)
   const tokens = allTokens.filter((record) => inRange(record.completedAt, query) && !excluded(record.hostProjectID))
   const errors = allErrors.filter((record) => inRange(record.observedAt, query))
-  const direct = directUsageRows.records.filter((record) => inRange(record.reportedAt, query))
+  const direct = directUsageRows.records.filter((record) => inRange(record.reportedAt, query) && !excluded(record.projectID))
   const compaction = allCompaction.filter((record) => inRange(record.completedAt, query) && !excluded(record.projectID))
   const dimensions = new Map<string, UsageDimension>()
+  const providerApi = new Map<string, ApiCostAggregate>()
   let observedTokens = 0
   let unknownTokenRecords = 0
   let partialTokenRecords = 0
@@ -1642,12 +1776,13 @@ export async function buildQuartermasterReport(
     sessions: Set<string>
     lastObservedAt: number | null
     models: Map<string, ProjectModelUsage>
+    apiCost: ApiCostAggregate
   }>()
   const projectOf = (projectID: string | null) => {
     const id = bucketOf(projectID)
     const key = id ?? ""
     const item = projectGroups.get(key) ?? {
-      projectID: id, projectName: nameOf(id), records: 0, observedTokens: 0, unknownTokenRecords: 0, sessions: new Set<string>(), lastObservedAt: null, models: new Map<string, ProjectModelUsage>(),
+      projectID: id, projectName: nameOf(id), records: 0, observedTokens: 0, unknownTokenRecords: 0, sessions: new Set<string>(), lastObservedAt: null, models: new Map<string, ProjectModelUsage>(), apiCost: blankApiCostAggregate(),
     }
     projectGroups.set(key, item)
     return item
@@ -1677,6 +1812,9 @@ export async function buildQuartermasterReport(
     if (!knownCache(record)) unknownCacheRecords += 1
     const projectItem = projectOf(record.hostProjectID)
     projectItem.records += 1
+    const frozen = frozenApiCost(record)
+    if (frozen) addKnownApiCost(projectItem.apiCost, frozen)
+    else projectItem.apiCost.legacy += 1
     if (value === undefined) projectItem.unknownTokenRecords += 1
     else projectItem.observedTokens += value
     projectItem.sessions.add(record.hostSessionID)
@@ -1686,6 +1824,12 @@ export async function buildQuartermasterReport(
       ["provider", record.providerID],
       ["model", record.providerID && record.modelID ? `${record.providerID}/${record.modelID}` : null],
     ]
+    const providerKey = record.providerID ?? "\u0000"
+    const providerCost = providerApi.get(providerKey) ?? blankApiCostAggregate()
+    const providerFrozen = frozenApiCost(record)
+    if (providerFrozen) addKnownApiCost(providerCost, providerFrozen)
+    else providerCost.legacy += 1
+    providerApi.set(providerKey, providerCost)
     for (const [dimension, target] of targets) absorbDimension(place(dimension, target), (total) => absorbRecord(total, record))
   }
   const archivedSlices = hostSlices(rollups)
@@ -1696,6 +1840,10 @@ export async function buildQuartermasterReport(
       ["provider", slice.providerID],
       ["model", slice.providerID && slice.modelID ? `${slice.providerID}/${slice.modelID}` : null],
     ]
+    const providerKey = slice.providerID ?? "\u0000"
+    const providerCost = providerApi.get(providerKey) ?? blankApiCostAggregate()
+    addSliceApiCost(providerCost, slice)
+    providerApi.set(providerKey, providerCost)
     for (const [dimension, target] of targets) absorbDimension(place(dimension, target), (total) => absorbSlice(total, slice))
   }
   inputTokens = addNumbers(inputTokens, archivedSplit.input)
@@ -1708,10 +1856,144 @@ export async function buildQuartermasterReport(
   const legacyUnsplit = Math.max(0, archivedRecords - archivedSplit.records)
   const cacheQualityComplete = unknownCacheRecords === 0 && legacyUnsplit === 0
   const componentCosts = estimateComponentCosts(tokens, deps.tokenRates, prices)
+  const recorded = estimateRecordedApiCosts(tokens)
+  const apiComponentCosts = new Map(recorded.components)
+  const legacyByModel = new Map<string, number>()
+  for (const record of tokens) {
+    if (!record.apiPrice && record.providerID && record.modelID) {
+      const key = `${record.providerID}/${record.modelID}`
+      legacyByModel.set(key, (legacyByModel.get(key) ?? 0) + 1)
+    }
+  }
+  const archived = {
+    usd: 0, pricedRecords: 0, unpricedRecords: 0, partialRecords: 0,
+    cacheUnpricedRecords: 0, pricedTokens: 0, unpricedTokens: 0,
+    unknownTokenRecords: 0, records: 0, legacyUnknown: 0,
+  }
+  const addNumber = (sum: number, value: number) => Number.isFinite(sum + value) ? sum + value : sum
+  if (allTime) {
+    for (const row of legacyLifetime) {
+      if (excluded(row.projectID)) continue
+      archived.records += row.records
+      const unknown = row.apiUnknownRecords ?? (row.apiRecords === undefined ? row.records : 0)
+      archived.legacyUnknown += unknown
+      archived.unpricedRecords += unknown
+      if (row.providerID && row.modelID) {
+        const key = `${row.providerID}/${row.modelID}`
+        legacyByModel.set(key, (legacyByModel.get(key) ?? 0) + unknown)
+      }
+      if (row.apiRecords === undefined) {
+        archived.unpricedTokens = addNumber(archived.unpricedTokens, row.observedTokens)
+        archived.unknownTokenRecords = addNumber(archived.unknownTokenRecords, row.unknownTokenRecords)
+      } else if (unknown > 0) {
+        archived.unknownTokenRecords = addNumber(archived.unknownTokenRecords, unknown)
+      }
+      if (!row.apiCost) continue
+      archived.pricedRecords += row.apiCost.pricedRecords
+      archived.unpricedRecords += row.apiCost.unpricedRecords
+      archived.partialRecords += row.apiCost.partialRecords
+      archived.cacheUnpricedRecords += row.apiCost.cacheUnpricedRecords
+      archived.pricedTokens = addNumber(archived.pricedTokens, row.apiCost.pricedTokens ?? 0)
+      archived.unpricedTokens = addNumber(archived.unpricedTokens, row.apiCost.unpricedTokens ?? 0)
+      archived.unknownTokenRecords = addNumber(archived.unknownTokenRecords, row.apiCost.unknownTokenRecords ?? 0)
+      if (Number.isFinite(archived.usd + row.apiCost.total)) archived.usd += row.apiCost.total
+      if (row.providerID && row.modelID) {
+        const key = `${row.providerID}/${row.modelID}`
+        const total = apiComponentCosts.get(key) ?? {
+          currency: "USD", input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0,
+          pricedRecords: 0, unpricedRecords: 0, cacheUnpricedRecords: 0, partialRecords: 0,
+        }
+        total.input = addNumber(total.input, row.apiCost.input)
+        total.output = addNumber(total.output, row.apiCost.output)
+        total.cacheRead = addNumber(total.cacheRead, row.apiCost.cacheRead)
+        total.cacheWrite = addNumber(total.cacheWrite, row.apiCost.cacheWrite)
+        total.total = addNumber(total.total, row.apiCost.total)
+        total.pricedRecords += row.apiCost.pricedRecords
+        total.unpricedRecords += row.apiCost.unpricedRecords
+        total.cacheUnpricedRecords += row.apiCost.cacheUnpricedRecords
+        total.partialRecords += row.apiCost.partialRecords
+        apiComponentCosts.set(key, total)
+      }
+    }
+    for (const rollup of legacyRollups) {
+      if (excluded(rollup.projectID)) continue
+      archived.records += rollup.records
+      archived.legacyUnknown += rollup.records
+      archived.unpricedRecords += rollup.records
+      archived.unpricedTokens = addNumber(archived.unpricedTokens, rollup.observedTokens)
+      archived.unknownTokenRecords = addNumber(archived.unknownTokenRecords, rollup.unknownTokenRecords)
+      for (const slice of rollup.slices) {
+        if (!slice.providerID || !slice.modelID) continue
+        const key = `${slice.providerID}/${slice.modelID}`
+        legacyByModel.set(key, (legacyByModel.get(key) ?? 0) + slice.records)
+      }
+    }
+  }
+  for (const [key, total] of apiComponentCosts) {
+    if (total.pricedRecords > 0) total.unpricedRecords += legacyByModel.get(key) ?? 0
+  }
+  const archivedApiUSD = archived.pricedRecords > 0 && Number.isFinite(archived.usd) ? archived.usd : null
+  const legacyUnknownRecords = recorded.legacyUnknownRecords + (allTime ? archived.legacyUnknown : 0)
+  const pricedRecords = recorded.pricedRecords + (allTime ? archived.pricedRecords : 0)
+  const unpricedRecords = recorded.unpricedRecords + recorded.legacyUnknownRecords +
+    (allTime ? archived.unpricedRecords : 0)
+  const pricedTokens = recorded.pricedTokens + (allTime ? archived.pricedTokens : 0)
+  const unpricedTokens = recorded.unpricedTokens + recorded.legacyUnknownTokens +
+    (allTime ? archived.unpricedTokens : 0)
+  const apiUnknownTokenRecords = recorded.unknownTokenRecords + recorded.legacyUnknownTokenRecords +
+    (allTime ? archived.unknownTokenRecords : 0)
+  const partialRecords = recorded.partialRecords + (allTime ? archived.partialRecords : 0)
+  const cacheUnpricedRecords = recorded.cacheUnpricedRecords + (allTime ? archived.cacheUnpricedRecords : 0)
+  const totalUSD = pricedRecords > 0
+    ? (recorded.retainedUSD ?? 0) + (allTime ? archivedApiUSD ?? 0 : 0)
+    : null
+  const currencies = totalUSD === null ? [] : [{
+    currency: "USD",
+    estimatedAmount: totalUSD,
+    estimatedCacheReadSavings: 0,
+    cacheSavingsRecords: 0,
+    pricedRecords,
+    pricedTokens,
+    source: "catalog" as const,
+    rates: [],
+  }]
+  const hasArchive = allTime && (legacyLifetime.some((row) => !excluded(row.projectID)) ||
+    legacyRollups.some((rollup) => !excluded(rollup.projectID)))
+  const showApiEquivalent = tokens.length > 0 || hasArchive
+  const apiScope: ApiEquivalentCosts["scope"] = allTime
+    ? "selected-range-with-older-cumulative" : "retained-raw-records"
+  const apiEquivalent: ApiEquivalentCosts | undefined = showApiEquivalent ? {
+    status: "estimated-not-billed",
+    basis: "input-output-cache-per-million",
+    complete: false,
+    pricedRecords,
+    pricedTokens,
+    unpricedRecords,
+    unpricedTokens,
+    unpricedTokenPercentage: pricedTokens + unpricedTokens > 0
+      ? 100 * (unpricedTokens / (pricedTokens + unpricedTokens)) : null,
+    unknownTokenRecords: apiUnknownTokenRecords,
+    cacheUnpricedRecords,
+    currencies,
+    hostReported: { currency: "USD", amount: null, records: 0, missingRecords: 0 },
+    pricing: "recorded-api-price",
+    scope: apiScope,
+    partialRecords,
+    retainedUSD: recorded.retainedUSD,
+    archivedUSD: allTime ? archivedApiUSD : null,
+    archivedRecords: allTime ? archived.records : 0,
+    legacyUnknownRecords,
+  } : undefined
   for (const item of dimensions.values()) {
     item.cacheHitRate = hitRate(item)
     // Component costs for a model row, so the page can price each part of the split.
-    if (item.dimension === "model" && item.value) item.costs = componentCosts.get(item.value) ?? null
+    if (item.dimension === "model" && item.value) {
+      item.costs = componentCosts.get(item.value) ?? null
+      const apiCost = apiComponentCosts.get(item.value)
+      item.apiCosts = apiCost && apiCost.pricedRecords > 0 ? apiCost : null
+    } else if (item.dimension === "provider") {
+      item.apiCosts = finalizeApiCost(providerApi.get(item.value ?? "\u0000") ?? blankApiCostAggregate())
+    }
   }
   const items = [...dimensions.values()].sort((a, b) =>
     a.dimension.localeCompare(b.dimension) || (a.value ?? "").localeCompare(b.value ?? ""),
@@ -1726,14 +2008,25 @@ export async function buildQuartermasterReport(
     item.records += rollup.records
     item.observedTokens += rollup.observedTokens
     item.unknownTokenRecords += rollup.unknownTokenRecords
-    for (const slice of rollup.slices) projectModel(item, slice.providerID, slice.modelID, slice.records, slice.observedTokens)
+    for (const slice of rollup.slices) {
+      addSliceApiCost(item.apiCost, slice)
+      projectModel(item, slice.providerID, slice.modelID, slice.records, slice.observedTokens)
+    }
+    // Records counted before slices existed keep their unknown coverage on the
+    // project aggregate instead of vanishing behind the priced slices.
+    const covered = rollup.slices.reduce((sum, slice) => sum + slice.records, 0)
+    const residual = Math.max(0, rollup.records - covered)
+    if (residual > 0) item.apiCost.legacy = addNumbers(item.apiCost.legacy, residual)
   }
+  const projectApiTotal = blankApiCostAggregate()
+  for (const item of projectGroups.values()) combineApiCost(projectApiTotal, item.apiCost)
   const projects = [...projectGroups.values()]
-    .map(({ sessions: seen, models, ...item }) => ({
+    .map(({ sessions: seen, models, apiCost, ...item }) => ({
       ...item,
       sessions: seen.size,
       models: [...models.values()].sort((a, b) => b.observedTokens - a.observedTokens).slice(0, 50),
       modelCount: models.size,
+      apiCosts: finalizeApiCost(apiCost),
     }))
     .sort((a, b) => b.observedTokens - a.observedTokens)
   return {
@@ -1762,7 +2055,7 @@ export async function buildQuartermasterReport(
     // decides which later write is the cache rebuild. The summary counts only
     // steps inside the range.
     sessions: summarizeSessions(allTokens, query, catalog, allWindows, allCompaction, allTime ? legacyLifetime : [], bucketOf),
-    projects: { complete: false, total: projects.length, items: projects },
+    projects: { complete: false, total: projects.length, apiCosts: finalizeApiCost(projectApiTotal), items: projects },
     dimensions: {
       total: items.length,
       offset: query.offset,
@@ -1777,6 +2070,7 @@ export async function buildQuartermasterReport(
     planAttribution: summarizePlanUsage(deps.plans, tokens, query, rollups),
     budgets: evaluateTokenBudgets(deps.budgets, allTokens, now, deps.projectID, { rates: deps.tokenRates, prices }),
     costs: estimateTokenCosts(tokens, deps.tokenRates, prices),
+    ...(apiEquivalent === undefined ? {} : { apiEquivalent }),
     errors: summarizeErrors(errors),
     breakdown: summarizeUsageBreakdown(deps.projectID, tokens, allClaims, rollups),
     archived: {

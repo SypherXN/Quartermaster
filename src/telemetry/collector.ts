@@ -3,6 +3,7 @@ import { CompactionLedger, projectCompactionEvent } from "./compaction.ts"
 import { TokenLedger } from "./ledger.ts"
 import { StepModelClaims } from "./step-model.ts"
 import { projectTokenEvents } from "./types.ts"
+import type { TokenTelemetryRecord } from "./types.ts"
 import { projectWindow, windowHasText, WindowLedger } from "./window.ts"
 
 type CollectorContext = Pick<Context, "event" | "storage"> & {
@@ -16,11 +17,12 @@ export function startTokenCollector(
   compactionLedger = new CompactionLedger(ctx.storage),
   windowLedger = new WindowLedger(ctx.storage),
   fallbackProjectID?: string,
+  onPersist?: (record: TokenTelemetryRecord) => void,
 ) {
   const controller = new AbortController()
   const task = (async () => {
     try {
-      await consumeTokenEvents(ctx, ledger, ctx.event.subscribe({ signal: controller.signal }), controller.signal, onRecord, compactionLedger, windowLedger, new StepModelClaims(), fallbackProjectID)
+      await consumeTokenEvents(ctx, ledger, ctx.event.subscribe({ signal: controller.signal }), controller.signal, onRecord, compactionLedger, windowLedger, new StepModelClaims(), fallbackProjectID, onPersist)
     } catch {
       if (!controller.signal.aborted) console.warn("[quartermaster] token event subscription failed")
     }
@@ -43,6 +45,7 @@ export async function consumeTokenEvents(
   windowLedger?: WindowLedger,
   claims = new StepModelClaims(),
   fallbackProjectID?: string,
+  onPersist?: (record: TokenTelemetryRecord) => void,
 ): Promise<void> {
   try {
     for await (const event of events) {
@@ -140,6 +143,11 @@ export async function consumeTokenEvents(
           console.warn("[quartermaster] token ledger write failed")
           continue
         }
+      }
+      try {
+        onPersist?.(record)
+      } catch {
+        // Valuation is advisory; a buffer problem must not stop ingestion.
       }
       try {
         await onRecord?.()

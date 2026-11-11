@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import type { ModelRef } from "../src/config.ts"
-import { buildQuotaEligibility, quotaPaces } from "../src/eligibility.ts"
+import { buildQuotaEligibility, moduleUsageDecision, quotaPaces } from "../src/eligibility.ts"
 import { modelKey, selectModel } from "../src/select.ts"
 import type { UsageReadResult, UsageSource, UsageSourceID } from "../src/usage.ts"
 import { normalizeUsageSnapshot } from "../src/usage.ts"
@@ -79,16 +79,35 @@ test("pace is limited by the tightest window, and finished ones stop constrainin
   assert.equal(pace({ providerID: "ollama", modelID: "local-model" }), undefined)
 })
 
-test("a fresh window near its cap blocks a model before the provider says limited", () => {
+test("a usable window keeps its headroom; only a full window or a reported limit blocks", () => {
   const eligible = (windows: UsageSource["windows"], stale = false) =>
     buildQuotaEligibility(registry, { "opencode-go": "go", openai: "codex" }, ["opencode-go/free-model"], withGoWindows(windows, stale))
       .get(modelKey(registry[0]))?.status
 
-  assert.equal(eligible([{ name: "weekly", usedPercent: 95, state: "ok", resetsAt: null }]), "limited")
+  // Near the cap is still usable: the remaining percentage points are spendable.
+  assert.equal(eligible([{ name: "weekly", usedPercent: 90, state: "ok", resetsAt: null }]), "available")
+  assert.equal(eligible([{ name: "weekly", usedPercent: 95, state: "ok", resetsAt: null }]), "available")
+  assert.equal(eligible([{ name: "weekly", usedPercent: 99.9, state: "ok", resetsAt: null }]), "available")
   assert.equal(eligible([{ name: "weekly", usedPercent: 40, state: "ok", resetsAt: null }]), "available")
+  assert.equal(eligible([{ name: "weekly", usedPercent: 100, state: "ok", resetsAt: null }]), "limited")
+  assert.equal(eligible([{ name: "weekly", usedPercent: 100.5, state: "ok", resetsAt: null }]), "limited")
+  // A provider that reports a limit or a rate-limited window blocks at any percentage.
   assert.equal(eligible([{ name: "weekly", usedPercent: 5, state: "rate-limited", resetsAt: null }]), "limited")
+  const providerLimited = withGoWindows([{ name: "weekly", usedPercent: 20, state: "ok", resetsAt: null }])
+  providerLimited.snapshot.sources.go.availability = "limited"
+  assert.equal(
+    buildQuotaEligibility(registry, { "opencode-go": "go", openai: "codex" }, [], providerLimited)
+      .get(modelKey(registry[0]))?.status,
+    "limited",
+  )
   // Old evidence must never block, whatever the window says.
   assert.equal(eligible([{ name: "weekly", usedPercent: 100, state: "rate-limited", resetsAt: null }], true), "available")
+
+  // The module gate reads the same ceiling.
+  const decision = (windows: UsageSource["windows"]) =>
+    moduleUsageDecision(registry[0], { "opencode-go": "go" }, [], withGoWindows(windows))
+  assert.deepEqual(decision([{ name: "weekly", usedPercent: 99.9, state: "ok", resetsAt: null }]), { quota: "available" })
+  assert.deepEqual(decision([{ name: "weekly", usedPercent: 100, state: "ok", resetsAt: null }]), { quota: "limited", skip: "limited" })
 })
 
 test("a limited shared source excludes every mapped model except explicit exemptions", () => {

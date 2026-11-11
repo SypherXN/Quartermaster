@@ -170,7 +170,7 @@ test("allows no bindings and accepts custom durations", () => {
   assert.deepEqual(parseConfig({}), {
     plans: {}, categories: {}, agents: {}, workTypes: {}, usageSources: {}, quotaExemptModels: [], exclusiveModels: [], sharedRateLimits: [],
     probeRateLimits: [], probeIntervalMs: 300_000, probeMaxBackoffMs: 1_800_000,
-    providerCooldownMs: 300_000, localHealthTimeoutMs: 2_000, localEndpoints: {},
+    providerCooldownMs: 300_000, localHealthTimeoutMs: 2_000, localEndpoints: {}, fetchApiPrices: true,
   })
   assert.equal(parseConfig({ providerCooldownMs: 30, localHealthTimeoutMs: 50 }).providerCooldownMs, 30)
 })
@@ -326,4 +326,11 @@ test("parses an optional exclusive model list", () => {
   assert.throws(() => parseConfig({ exclusiveModels: [" p/m"] }), /without surrounding whitespace/)
   assert.throws(() => parseConfig({ exclusiveModels: ["p/m", "p/m"] }), /duplicate exclusive model/)
   assert.throws(() => parseConfig({ exclusiveModels: "p/m" }), /exclusiveModels: expected an array/)
+})
+
+test("fetches first-party API prices by default and can be disabled", () => {
+  assert.equal(parseConfig({}).fetchApiPrices, true)
+  assert.equal(parseConfig({ fetchApiPrices: false }).fetchApiPrices, false)
+  assert.equal(parseConfig({ fetchApiPrices: true }).fetchApiPrices, true)
+  assert.throws(() => parseConfig({ fetchApiPrices: "no" }), /fetchApiPrices: expected a boolean/)
 })

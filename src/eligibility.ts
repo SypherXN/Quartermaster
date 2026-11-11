@@ -6,10 +6,12 @@ import type { UsageReadResult, UsageSource, UsageSourceID } from "./usage.ts"
 export type ModuleQuota = "unknown" | "available" | "limited"
 
 // ponytail: one fixed ceiling for every provider; make it configurable if a
-// provider ever needs its own line.
-const QUOTA_BLOCK_PERCENT = 90
+// provider ever needs its own line. At 100 only a filled window blocks, so a
+// near-cap window keeps its remaining headroom usable. A provider that reports
+// itself limited still blocks at any percentage (see quotaExhausted).
+export const QUOTA_BLOCK_PERCENT = 100
 
-/** A fresh source blocks a model when it is already limited or any window is near its cap. */
+/** A fresh source blocks a model when it is already limited or any window is full. */
 function quotaExhausted(source: UsageSource | undefined): boolean {
   if (!source || source.stale) return false
   if (source.availability === "limited") return true

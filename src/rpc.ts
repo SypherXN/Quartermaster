@@ -15,6 +15,7 @@ import { type DirectUsageLedger } from "./telemetry/direct-usage.ts"
 import { buildQuartermasterReport, REPORT_MAX_OFFSET, REPORT_MAX_PAGE_SIZE, type QuartermasterReport, type ReportQuery } from "./telemetry/report.ts"
 import { writeReportCache } from "./telemetry/report-cache.ts"
 import { readCatalogSnapshot, type CatalogSnapshot } from "./telemetry/prices.ts"
+import { QUOTA_HISTORY_MAX_PAGE, quotaHistoryQueryFromInput } from "./quota-history.ts"
 import { applyProjectQuartermasterOptions, readProjectQuartermasterOptions, readNativeConfiguration, type ConfigurationReader } from "./project-options.ts"
 
 type AgentRouting = NonNullable<Awaited<ReturnType<typeof registerAgentRouting>>>
@@ -59,6 +60,19 @@ export const QUARTERMASTER_RPC = Rpc.define({
     selectPlan: { input: object({ plan: string }, ["plan"]), output, errors: { invalid_input: errors.invalid_input } },
     explain: { input: object({ agent: string }, ["agent"]), output, errors: { invalid_input: errors.invalid_input } },
     status: { input: object({}), output },
+    quotaHistory: {
+      input: object({
+        sourceID: string,
+        windowName: string,
+        from: { type: "integer", minimum: 0 },
+        to: { type: "integer", minimum: 0 },
+        limit: { type: "integer", minimum: 1, maximum: QUOTA_HISTORY_MAX_PAGE },
+        cursor: string,
+        catalogCursor: string,
+      }),
+      output,
+      errors,
+    },
     diagnoseSession: { input: object({ sessionID: string }, ["sessionID"]), output, errors },
     report: {
       input: object({
@@ -526,6 +540,19 @@ export async function registerQuartermasterRpc(
         ...status,
         modules: await modules.selections(),
       } : status
+    },
+    async quotaHistory(input, call) {
+      const parsed = quotaHistoryQueryFromInput(input)
+      if (!parsed.ok) {
+        throw call.error("invalid_input", "Invalid quota history query.", { path: parsed.path, message: parsed.message })
+      }
+      call.signal.throwIfAborted()
+      if (!routing || typeof routing.quotaHistory !== "function") {
+        return { apiVersion: QUARTERMASTER_API_VERSION, status: "unavailable", reason: "not-configured" }
+      }
+      const result = await routing.quotaHistory(parsed.query)
+      call.signal.throwIfAborted()
+      return { apiVersion: QUARTERMASTER_API_VERSION, ...result }
     },
     async diagnoseSession(input, call) {
       if (!isRecord(input) || Object.keys(input).some((key) => key !== "sessionID") ||

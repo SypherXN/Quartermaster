@@ -92,6 +92,73 @@ function checkedOrigin(openCodeURL) {
   return upstream
 }
 
+const estimateStatuses = new Set(["estimated", "insufficient-history", "no-recent-usage", "stale", "cutoff-reached"])
+const MIN_ESTIMATE_SPAN_MS = 15 * 60_000
+// An advisory forecast crosses the gateway only in its documented shape. A
+// malformed estimate is dropped; the quota snapshot it rode in on is kept.
+function quotaEstimate(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
+  const { status, cutoffPercent, sampleCount, spanMs, ratePerMinute, cutoffAt } = value
+  if (!estimateStatuses.has(status) ||
+    !Number.isFinite(cutoffPercent) || cutoffPercent < 0 || cutoffPercent > 100 ||
+    !Number.isInteger(sampleCount) || sampleCount < 0 ||
+    !Number.isFinite(spanMs) || spanMs < 0) return undefined
+  if (ratePerMinute !== undefined && (!Number.isFinite(ratePerMinute) || ratePerMinute <= 0)) return undefined
+  if (cutoffAt !== undefined && (!Number.isFinite(cutoffAt) || cutoffAt < 0)) return undefined
+  if (status === "estimated" && (sampleCount < 2 || spanMs < MIN_ESTIMATE_SPAN_MS ||
+    !Number.isFinite(ratePerMinute) || ratePerMinute <= 0 || !Number.isFinite(cutoffAt))) return undefined
+  return {
+    status, cutoffPercent, sampleCount, spanMs,
+    ...(Number.isFinite(ratePerMinute) && ratePerMinute > 0 ? { ratePerMinute } : {}),
+    ...(Number.isFinite(cutoffAt) ? { cutoffAt } : {}),
+  }
+}
+
+const projectionStatuses = new Set(["estimated", "unavailable"])
+// API-equivalent values cross the gateway only in the frozen UI shape. A
+// malformed value is dropped; the quota window it rode in on is kept.
+function quotaApiValue(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
+  const nonnegative = (item) => Number.isFinite(item) && item >= 0
+  const whole = (item) => Number.isSafeInteger(item) && item >= 0
+  if (value.currency !== "USD" || value.basis !== "api-equivalent-not-billed" || value.complete !== false ||
+    !projectionStatuses.has(value.projectionStatus) ||
+    !(value.reason === null || (typeof value.reason === "string" && value.reason.length > 0 && value.reason.length <= 160 && value.reason.trim() === value.reason && !/[\u0000-\u001f\u007f]/.test(value.reason))) ||
+    !(value.trackingSince === null || whole(value.trackingSince)) ||
+    !whole(value.observedAt) || !whole(value.spanMs) ||
+    !(value.quotaDeltaPercent === null || nonnegative(value.quotaDeltaPercent)) ||
+    !whole(value.records) || !whole(value.pricedRecords) || !whole(value.unpricedRecords) || !whole(value.partialRecords) ||
+    value.pricedRecords + value.unpricedRecords !== value.records || value.partialRecords > value.records ||
+    (value.observedUSD === null) !== (value.pricedRecords === 0) ||
+    !(value.observedUSD === null || nonnegative(value.observedUSD)) ||
+    !(value.projectedFullUSD === null || nonnegative(value.projectedFullUSD))) return undefined
+  if (value.trackingSince !== null && (value.trackingSince > value.observedAt || value.observedAt - value.trackingSince !== value.spanMs)) return undefined
+  if (value.trackingSince === null && value.spanMs !== 0) return undefined
+  if (value.quotaDeltaPercent !== null && value.quotaDeltaPercent > 100) return undefined
+  if (value.projectionStatus === "estimated") {
+    if (value.projectedFullUSD === null || value.reason !== null || value.observedUSD === null ||
+      value.pricedRecords < 1 || value.unpricedRecords !== 0 || value.partialRecords !== 0 ||
+      value.spanMs < 15 * 60_000 || value.quotaDeltaPercent === null || value.quotaDeltaPercent < 1) return undefined
+  } else if (value.projectedFullUSD !== null || value.reason === null) return undefined
+  return {
+    currency: "USD",
+    basis: "api-equivalent-not-billed",
+    observedUSD: value.observedUSD,
+    projectedFullUSD: value.projectedFullUSD,
+    projectionStatus: value.projectionStatus,
+    reason: value.reason,
+    trackingSince: value.trackingSince,
+    observedAt: value.observedAt,
+    spanMs: value.spanMs,
+    quotaDeltaPercent: value.quotaDeltaPercent,
+    records: value.records,
+    pricedRecords: value.pricedRecords,
+    unpricedRecords: value.unpricedRecords,
+    partialRecords: value.partialRecords,
+    complete: false,
+  }
+}
+
 export function createLocalUiServer({ openCodeURL, token, resolveEndpoint, projectDirectory, port = 4175 }) {
   const upstream = checkedOrigin(openCodeURL ?? "http://127.0.0.1")
   if ((!resolveEndpoint && !token?.trim()) || !projectDirectory?.trim()) throw new Error("OpenCode token and project directory are required")
@@ -307,8 +374,11 @@ export function createLocalUiServer({ openCodeURL, token, resolveEndpoint, proje
               !(window.usedPercent === null || Number.isFinite(window.usedPercent)) ||
               !["ok", "rate-limited", "unknown"].includes(window.state) ||
               !(window.resetsAt === undefined || window.resetsAt === null || Number.isFinite(window.resetsAt))) throw new Error("status")
+            const estimate = quotaEstimate(window.estimate)
+            const apiValue = quotaApiValue(window.apiValue)
             return { name: window.name, usedPercent: window.usedPercent, state: window.state,
-              resetsAt: window.resetsAt, ...(typeof window.resetEstimated === "boolean" ? { resetEstimated: window.resetEstimated } : {}) }
+              resetsAt: window.resetsAt, ...(typeof window.resetEstimated === "boolean" ? { resetEstimated: window.resetEstimated } : {}),
+              ...(estimate ? { estimate } : {}), ...(apiValue ? { apiValue } : {}) }
           })
           return { providerID, ...(source.sourceID ? { sourceID: source.sourceID } : {}),
             ...(typeof source.authenticated === "boolean" ? { authenticated: source.authenticated } : {}),

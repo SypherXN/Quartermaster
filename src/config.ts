@@ -92,6 +92,8 @@ export interface QuartermasterConfig {
   providerCooldownMs: number
   localHealthTimeoutMs: number
   localEndpoints: Record<string, string>
+  /** Allow the quota valuation to fetch first-party API prices from models.dev (default true). */
+  fetchApiPrices: boolean
 }
 
 const DEFAULTS = {
@@ -339,6 +341,12 @@ function duration(value: unknown, path: string, fallback: number): number {
   return value
 }
 
+function flag(value: unknown, path: string, fallback: boolean): boolean {
+  if (value === undefined) return fallback
+  if (typeof value !== "boolean") throw new Error(`${path}: expected a boolean`)
+  return value
+}
+
 function modulesFrom(value: unknown, fallback: number): Record<string, ModuleProfile> {
   return Object.fromEntries(Object.entries(record(value, "modules")).map(([id, value]) => {
     const path = `modules.${id}`
@@ -529,7 +537,7 @@ export function parseConfig(input: unknown = {}): QuartermasterConfig {
   const fields = new Set([
     "plans", "categories", "agents", "workTypes", "usageSources", "quotaExemptModels", "exclusiveModels", "sharedRateLimits", "providerCooldownMs",
     "localHealthTimeoutMs", "localEndpoints", "budgets", "tokenRates", "modules", "probeRateLimits", "probeIntervalMs",
-    "probeMaxBackoffMs",
+    "probeMaxBackoffMs", "fetchApiPrices",
   ])
   for (const key of Object.keys(options)) {
     if (!fields.has(key)) throw new Error(`options.${key}: unknown field`)
@@ -556,6 +564,7 @@ export function parseConfig(input: unknown = {}): QuartermasterConfig {
   const probeIntervalMs = duration(options.probeIntervalMs, "probeIntervalMs", DEFAULTS.probeIntervalMs)
   const probeMaxBackoffMs = duration(options.probeMaxBackoffMs, "probeMaxBackoffMs", DEFAULTS.probeMaxBackoffMs)
   const local = options.localEndpoints === undefined ? {} : localEndpoints(options.localEndpoints)
+  const fetchApiPrices = flag(options.fetchApiPrices, "fetchApiPrices", true)
 
   for (const [agent, plan] of Object.entries(agents)) {
     if (!Object.hasOwn(plans, plan)) throw new Error(`agents.${agent}: unknown plan "${plan}"`)
@@ -582,5 +591,6 @@ export function parseConfig(input: unknown = {}): QuartermasterConfig {
     providerCooldownMs,
     localHealthTimeoutMs: duration(options.localHealthTimeoutMs, "localHealthTimeoutMs", DEFAULTS.localHealthTimeoutMs),
     localEndpoints: local,
+    fetchApiPrices,
   }
 }

@@ -1,5 +1,5 @@
 import type { TokenRateConfig } from "../config.ts"
-import { selectPrice, type PriceTable } from "./prices.ts"
+import { selectPrice, type CatalogPrice, type PriceTable } from "./prices.ts"
 import type { TokenTelemetryRecord } from "./types.ts"
 
 export interface TokenCostCurrencySummary {
@@ -221,5 +221,182 @@ export function estimateTokenCosts(
     currencies: [...byCurrency.values()].sort((a, b) => a.currency.localeCompare(b.currency)),
     // The host's own USD total. Not added to the catalog estimate or to budgets.
     hostReported,
+  }
+}
+
+export interface ApiComponentCost extends ComponentCost {
+  cacheUnpricedRecords: number
+  partialRecords: number
+}
+
+export type ApiEquivalentCosts = ReturnType<typeof estimateTokenCosts> & {
+  pricing: "recorded-api-price"
+  scope: "retained-raw-records" | "selected-range-with-older-cumulative"
+  partialRecords: number
+  retainedUSD: number | null
+  archivedUSD: number | null
+  archivedRecords: number
+  legacyUnknownRecords: number
+}
+
+export interface RecordedApiCostSnapshot {
+  currencies: TokenCostCurrencySummary[]
+  pricedRecords: number
+  unpricedRecords: number
+  pricedTokens: number
+  unpricedTokens: number
+  unknownTokenRecords: number
+  partialRecords: number
+  cacheUnpricedRecords: number
+  retainedUSD: number | null
+  legacyUnknownRecords: number
+  legacyUnknownTokens: number
+  legacyUnknownTokenRecords: number
+  components: Map<string, ApiComponentCost>
+}
+
+export interface FrozenApiCost extends ApiComponentCost {
+  pricedRecords: number
+  unpricedRecords: number
+  partialRecords: number
+  cacheUnpricedRecords: number
+  pricedTokens?: number
+  unpricedTokens?: number
+  unknownTokenRecords?: number
+}
+
+/** All-zero catalog rows are subscription metadata, not a $0 API price. */
+export function positiveCatalogPrices(prices?: PriceTable): PriceTable {
+  const table = new Map<string, CatalogPrice[]>()
+  if (!prices) return table
+  for (const [key, rows] of prices) {
+    const positive = rows.filter((row) =>
+      row.input > 0 || row.output > 0 || row.cacheRead > 0 || row.cacheWrite > 0)
+    if (positive.length) table.set(key, positive)
+  }
+  return table
+}
+
+function unknownCache(record: TokenTelemetryRecord, prices: PriceTable): boolean {
+  const counts = record.counts
+  if (!counts || !record.providerID || !record.modelID) return false
+  const row = selectPrice(prices.get(`${record.providerID}/${record.modelID}`), counts.input + counts.cacheRead)
+  if (!row) return false
+  return (counts.cacheRead > 0 && row.cacheReadKnown === false) ||
+    (counts.cacheWrite > 0 && row.cacheWriteKnown === false)
+}
+
+const incompleteCount = (record: TokenTelemetryRecord): boolean =>
+  record.partial || record.usageStatus !== "reported" || record.counts === null
+
+const blankApiComponent = (): ApiComponentCost => ({
+  currency: "USD", input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0,
+  pricedRecords: 0, unpricedRecords: 0, cacheUnpricedRecords: 0, partialRecords: 0,
+})
+
+/** Per-record frozen API cost; undefined only when the row predates snapshots. */
+export function frozenApiCost(record: TokenTelemetryRecord): FrozenApiCost | undefined {
+  const snapshot = record.apiPrice
+  if (!snapshot) return undefined
+  const key = record.providerID && record.modelID ? `${record.providerID}/${record.modelID}` : undefined
+  const table = new Map<string, CatalogPrice[]>()
+  if (key) {
+    const rows = positiveCatalogPrices(new Map([[key, snapshot.prices]])).get(key)
+    if (rows) table.set(key, [...rows])
+  }
+  const base = key ? estimateComponentCosts([record], [], table).get(key) : undefined
+  const priced = (base?.pricedRecords ?? 0) > 0
+  const counts = record.counts
+  const tokens = counts && Number.isSafeInteger(counts.input + counts.output) ? counts.input + counts.output : undefined
+  return {
+    ...(base ?? blankApiComponent()),
+    pricedRecords: priced ? 1 : 0,
+    unpricedRecords: priced ? 0 : 1,
+    partialRecords: incompleteCount(record) ? 1 : 0,
+    cacheUnpricedRecords: key !== undefined && unknownCache(record, table) ? 1 : 0,
+    ...(tokens === undefined ? { unknownTokenRecords: 1 } : {
+      pricedTokens: priced ? tokens : 0,
+      unpricedTokens: priced ? 0 : tokens,
+      unknownTokenRecords: 0,
+    }),
+  }
+}
+
+/** Selected raw records only; legacy rows without a snapshot stay unknown. */
+export function estimateRecordedApiCosts(records: readonly TokenTelemetryRecord[]): RecordedApiCostSnapshot {
+  const components = new Map<string, ApiComponentCost>()
+  let pricedRecords = 0
+  let unpricedRecords = 0
+  let pricedTokens = 0
+  let unpricedTokens = 0
+  let unknownTokenRecords = 0
+  let partialRecords = 0
+  let cacheUnpricedRecords = 0
+  let legacyUnknownRecords = 0
+  let legacyUnknownTokens = 0
+  let legacyUnknownTokenRecords = 0
+  let usd = 0
+  for (const record of records) {
+    const cost = frozenApiCost(record)
+    if (!cost) {
+      legacyUnknownRecords += 1
+      const counts = record.counts
+      if (counts && Number.isSafeInteger(counts.input + counts.output)) legacyUnknownTokens += counts.input + counts.output
+      else legacyUnknownTokenRecords += 1
+      continue
+    }
+    const counts = record.counts
+    const tokens = counts && Number.isSafeInteger(counts.input + counts.output) ? counts.input + counts.output : undefined
+    if (tokens === undefined) unknownTokenRecords += 1
+    if (cost.pricedRecords > 0) {
+      pricedRecords += 1
+      if (tokens !== undefined) pricedTokens += tokens
+      if (Number.isFinite(usd + cost.total)) usd += cost.total
+    } else {
+      unpricedRecords += 1
+      if (tokens !== undefined) unpricedTokens += tokens
+    }
+    partialRecords += cost.partialRecords
+    cacheUnpricedRecords += cost.cacheUnpricedRecords
+    if (record.providerID && record.modelID) {
+      const key = `${record.providerID}/${record.modelID}`
+      const total = components.get(key) ?? blankApiComponent()
+      const addMoney = (sum: number, value: number) => Number.isFinite(sum + value) ? sum + value : sum
+      total.input = addMoney(total.input, cost.input)
+      total.output = addMoney(total.output, cost.output)
+      total.cacheRead = addMoney(total.cacheRead, cost.cacheRead)
+      total.cacheWrite = addMoney(total.cacheWrite, cost.cacheWrite)
+      total.total = addMoney(total.total, cost.total)
+      total.pricedRecords += cost.pricedRecords
+      total.unpricedRecords += cost.unpricedRecords
+      total.partialRecords += cost.partialRecords
+      total.cacheUnpricedRecords += cost.cacheUnpricedRecords
+      components.set(key, total)
+    }
+  }
+  const pricedTotal = pricedRecords > 0 ? [{
+    currency: "USD",
+    estimatedAmount: usd,
+    estimatedCacheReadSavings: 0,
+    cacheSavingsRecords: 0,
+    pricedRecords,
+    pricedTokens,
+    source: "catalog" as const,
+    rates: [],
+  }] : []
+  return {
+    currencies: pricedTotal,
+    pricedRecords,
+    unpricedRecords,
+    pricedTokens,
+    unpricedTokens,
+    unknownTokenRecords,
+    partialRecords,
+    cacheUnpricedRecords,
+    retainedUSD: pricedRecords > 0 ? usd : null,
+    legacyUnknownRecords,
+    legacyUnknownTokens,
+    legacyUnknownTokenRecords,
+    components,
   }
 }

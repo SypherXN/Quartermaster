@@ -145,8 +145,8 @@ test("retries failed writes, keeps every row inside the window, and folds an exp
   assert.deepEqual(rows.map((row) => row.hostEventID), ["event-new-1", "event-new-2", "event-new-3"])
   assert.deepEqual((await ledger.list({ projectID: "project-a" })).map((row) => row.hostEventID), ["event-new-1", "event-new-3"])
   assert.deepEqual((await ledger.list({ projectID: "project-b" })).map((row) => row.hostEventID), ["event-new-2"])
-  // No row cap: only the expired row left, so three raw rows plus its lifetime total.
-  assert.equal(storage.values.size, 4)
+  // No row cap: three raw rows, one lifetime total, and the folded id's tombstone.
+  assert.equal(storage.values.size, 5)
   assert.deepEqual(await ledger.listRollups({ projectID: "project-a" }), [])
   const lifetime = await ledger.listLifetime({ projectID: "project-a" })
   assert.equal(lifetime.length, 1)

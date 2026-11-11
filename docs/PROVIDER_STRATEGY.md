@@ -63,9 +63,9 @@ cached `opencode-usage` snapshot, so ordering never polls a provider.
   binding long window that is the wrong direction: it spends the tight account
   before the roomy one.
 - It only sees models the eligibility gate left standing. A window at or above
-  `QUOTA_BLOCK_PERCENT` (90) skips its models before ordering happens, so a
-  "drain the last 10%" intent never reaches the picker. The gate is the right
-  guard against 429s; just do not expect ordering to work above it.
+  `QUOTA_BLOCK_PERCENT` (100), or an earlier provider-reported limit, skips its
+  models before ordering happens. The last 10% stays usable; ordering cannot
+  override a provider's limit.
 
 ## The rule that uses every window: pace
 
@@ -212,6 +212,3 @@ Rules worth keeping:
    (`pick.ignore: ["monthly"]`) so a cheap tier can spend short windows hard
    while a premium tier protects the long one.
 2. A category dimension for budgets, so spend can be capped by intent.
-3. Make `QUOTA_BLOCK_PERCENT` configurable per provider, so a strictly-paced
-   category can keep using a window between 90% and 100% instead of being
-   skipped by the gate before ordering ever runs.

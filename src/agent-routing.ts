@@ -18,6 +18,10 @@ import { RequestEvidenceHistory } from "./request-evidence.ts"
 import { adoptProjectQuartermasterOptions, readNativeConfiguration, type ConfigurationReader } from "./project-options.ts"
 import { modelKey, resolvePlan, selectAgentModel, selectModel, selectNamedPlan, type ModelEligibility } from "./select.ts"
 import { readUsageStatus, type UsageReadResult, type UsageSourceID } from "./usage.ts"
+import { QuotaEstimates, freshObservationAt } from "./quota-estimates.ts"
+import { QuotaHistory, type QuotaHistoryQuery } from "./quota-history.ts"
+import { QuotaValueTracker, type QuotaValuePlan } from "./quota-values.ts"
+import { readQuotaPriceTable } from "./telemetry/prices.ts"
 import type { TokenBudgetGate, TokenBudgetReason } from "./telemetry/budget-gate.ts"
 
 const COOLDOWN_STORAGE_KEY = "availability/cooldowns-v1"
@@ -140,6 +144,8 @@ export async function registerAgentRouting(
   usage?: UsageReadResult,
   budgetGate?: TokenBudgetGate,
   readConfiguration: ConfigurationReader = readNativeConfiguration,
+  quotaValues?: QuotaValueTracker,
+  priceFetch?: typeof fetch,
 ) {
   if (
     config.exclusiveModels.length === 0 &&
@@ -147,8 +153,42 @@ export async function registerAgentRouting(
     Object.keys(config.plans).length === 0 &&
     Object.keys(config.agents).length === 0 &&
     Object.keys(config.workTypes).length === 0 &&
+    Object.keys(config.usageSources).length === 0 &&
     !(ctx.command && ctx.session)
   ) return undefined
+
+  // Quota forecasts are informational: they persist a percentage trend but never
+  // participate in eligibility, selection or cooldowns.
+  const estimates = await QuotaEstimates.load(ctx.storage)
+  const history = new QuotaHistory(ctx.storage)
+  const recordUsage = async (result: UsageReadResult | undefined) => {
+    const now = Date.now()
+    try {
+      if (result && estimates.observe(result, now)) await estimates.save(ctx.storage)
+    } catch {
+      console.warn("[quartermaster] quota estimate history unavailable")
+    }
+    // The archive is separate: losing it must not disturb estimates or routing.
+    // Resolve usageSources per read so a reloaded mapping is not stale.
+    try {
+      const sources = new Set(Object.values(config.usageSources) as UsageSourceID[])
+      let plan: QuotaValuePlan | undefined
+      if (quotaValues && result) {
+        try {
+          plan = await quotaValues.prepare(result, now, await readQuotaPriceTable(
+            () => ctx.model.list(), Date.now,
+            { fetchApiPrices: config.fetchApiPrices, wait: false, ...(priceFetch === undefined ? {} : { fetch: priceFetch }) },
+          ))
+        } catch {
+          plan = undefined
+        }
+      }
+      await history.record(result, estimates, now, sources, plan)
+    } catch {
+      console.warn("[quartermaster] quota observation archive unavailable")
+    }
+  }
+  await recordUsage(usage)
 
   let registry = (await ctx.model.list()).data.filter((model) => model.enabled).map(modelRef)
   let localHealth = new LocalHealth(config.localEndpoints, config.localHealthTimeoutMs)
@@ -262,6 +302,7 @@ export async function registerAgentRouting(
         if (refreshAvailability || registryChanged) {
           injectedEligibility = undefined
           if (Object.keys(config.usageSources).length > 0) usage = await readUsageStatus(ctx)
+          await recordUsage(usage)
           health = await localHealth.checkAll(registry.map((model) => model.providerID))
           quotaEligibility = buildQuotaEligibility(registry, config.usageSources, config.quotaExemptModels, usage)
         }
@@ -987,7 +1028,16 @@ export async function registerAgentRouting(
       sources: Object.fromEntries(Object.entries(config.usageSources).map(([providerID, sourceID]) => {
         const source = currentUsage.snapshot.sources[sourceID as UsageSourceID]
         if (!source) return [providerID, { sourceID, authenticated: false, checkedAt: null, stale: true, availability: "unknown", nextAvailableAt: null, windows: [] }]
-        return [providerID, { sourceID, authenticated: source.authenticated, checkedAt: source.checkedAt, stale: source.stale, availability: source.availability, nextAvailableAt: source.nextAvailableAt, windows: source.windows.map(({ name, usedPercent, state, resetsAt, resetEstimated }) => ({ name, usedPercent, state, resetsAt, ...(resetEstimated === undefined ? {} : { resetEstimated }) })) }]
+        const stale = freshObservationAt(source, Date.now()) === undefined
+        return [providerID, { sourceID, authenticated: source.authenticated, checkedAt: source.checkedAt, stale: source.stale, availability: source.availability, nextAvailableAt: source.nextAvailableAt, windows: source.windows.map((window) => {
+          const { name, usedPercent, state, resetsAt, resetEstimated } = window
+          const estimate = typeof usedPercent === "number"
+            ? stale ? estimates.stale() : estimates.estimate(sourceID as UsageSourceID, window)
+            : undefined
+          const apiValue = !stale && quotaValues ? quotaValues.latestValue(sourceID, name) : undefined
+          const frozenValue = apiValue !== undefined && apiValue.observedAt === source.checkedAt ? apiValue : undefined
+          return { name, usedPercent, state, resetsAt, ...(resetEstimated === undefined ? {} : { resetEstimated }), ...(estimate ? { estimate } : {}), ...(frozenValue ? { apiValue: frozenValue } : {}) }
+        }) }]
       })),
     }
   }
@@ -1021,6 +1071,9 @@ export async function registerAgentRouting(
     select,
     selectPlan,
     status,
+    quotaHistory(query: QuotaHistoryQuery) {
+      return history.query(query)
+    },
     diagnoseSession,
     refresh(nextEligibility?: ReadonlyMap<string, ModelEligibility>) {
       return refresh(nextEligibility)

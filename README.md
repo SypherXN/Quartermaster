@@ -155,7 +155,17 @@ All settings belong in `quartermaster.jsonc` next to the OpenCode config that re
   qualified IDs, all variants). Only fresh, confirmed `limited` usage skips a
   model; absent, stale, or unusable usage reads as available and stays a
   candidate. Estimated resets alone do not restore eligibility. Unmapped
-  providers are unaffected by quota status.
+   providers are unaffected by quota status.
+   Automatic routing can use the full quota: numeric usage blocks at 100%,
+   or earlier if the provider reports a limit. There is no reserved 10% buffer.
+   The Quota page's Estimates tab forecasts time to 100% usage from fresh percentage
+   observations spanning at least 15 minutes, using up to one hour of recent readings.
+  Forecasts are informational, separate from reported resets, and never affect routing;
+   stale readings, changing windows and insufficient history suppress projections.
+   A separate archive keeps observed window readings and their forecasts for 90 days;
+   older readings roll into cumulative statistics per usage source and window.
+   This records observations while Quartermaster is running, not continuous provider
+   history: missing observations and unknown resets are not reconstructed.
 - **Health:** `localEndpoints` opts local providers into credential-free,
   bodyless loopback HTTP(S) GET checks, cached for five seconds. Failure skips
   only that provider; remote providers are not health-probed.
@@ -334,6 +344,123 @@ RPC responses carry `apiVersion: 1`; selection returns the model reference and s
 Direct-call modules use the same subpath. `requestModuleSelection` and `reportModuleCooldown` recommend and remember cooldowns; they do not call a provider or decide allow or deny. See the [module contract](docs/PLUGIN_INTEGRATION.md#direct-call-module-profiles).
 
 `requestReport` reads bounded usage, budget, and observed retry-error summaries for the plugin's active project context. It never accepts caller-supplied ownership; requesting another project returns `unsupported` because this plugin API exposes no caller identity/authorization mechanism. Reports label unknown attribution and incomplete live-event coverage, and `refresh` only rereads the durable ledgers—it does not poll providers or replay events. See [telemetry reporting limits](docs/TOKEN_TELEMETRY.md).
+
+### Quota observation archive
+
+`quotaHistory` reads the archive separately from the lightweight `status` snapshot.
+It records each distinct fresh reading for configured quota sources, including
+usage percentage, reported reset metadata, observed cycle-boundary hints, and the
+forecast generated with that reading. Cached timestamps are not new readings;
+later forecasts do not replace older ones. Unknown resets stay unknown, and a
+moving rolling-window deadline alone is not counted as a new cycle.
+
+Raw readings and forecasts remain individually available for 90 days. Older
+points fold into a cumulative summary per source and window: observation and
+boundary counts, percentage extrema, forecast-status counts, and rate/forecast
+lead-time statistics. Those summaries survive indefinitely, but cannot recreate
+an old time series or answer a date-filtered query. Maintenance runs on archive
+activity, including reads; no provider requests are added. Forecasting still uses
+only the separate recent one-hour trend, not the archive.
+
+```ts
+const archive = ctx.rpc(QUARTERMASTER_RPC)
+const catalog = await archive.quotaHistory({})
+// Continue catalog pages with catalogCursor: catalog.nextCatalogCursor when non-null.
+const page = await archive.quotaHistory({
+  sourceID: "codex", windowName: "primary_5h", limit: 200,
+})
+// Continue the same series/range with cursor: page.nextCursor when non-null.
+```
+
+Catalog pages list source/window pairs without raw points; series pages return
+points without repeating the catalog. Use the catalog's actual `sourceID` and
+`windowName` together when requesting points. `from` and `to` are inclusive epoch-millisecond bounds for raw points
+only; cumulative totals are explicitly unfiltered. A point page contains at most
+1,000 observations (200 by default), ordered by observation time. This API is
+data for future plots, not a chart; collection starts with observed readings and
+does not backfill times when Quartermaster was not running.
+
+### Usage API equivalents
+
+Usage shows recorded API equivalents by model, provider, agent, and project,
+including whole-range totals rather than sums of the visible table page.
+Existing host-reported costs remain separate. New token records freeze their model's available
+API price table when first saved, including context tiers and known cache rates.
+Later price changes do not reprice those steps; revised token counts reuse the
+same frozen rates. Prices are the cached catalog rates available at recording,
+not a guarantee of the provider's exact historical billing rate.
+
+Records without a saved price remain historically unknown: today's rates are
+never backfilled as their original price. Missing prices, cache rates, and
+partial counters remain explicit coverage gaps, not known zero-dollar usage.
+This can reduce a previously displayed current-price comparison.
+
+Raw steps are kept for 90 days. As they expire, their recorded API value and
+coverage fold into permanent per-model cumulative totals. **All** includes both
+retained and older totals and shows each subtotal separately; dated ranges use
+only retained steps because cumulative history cannot be date-filtered. Frozen
+quota-window values are separate and are not added to Usage totals.
+
+The Plugins tab prices self-reported direct calls separately, with its own total.
+New direct calls also freeze prices on first save and preserve their cumulative
+value after 90 days; older calls without saved prices remain unknown. These calls
+are not added to host provider, agent, or project totals, so they are not counted
+twice. Plugin reports remain unverified.
+
+Folding uses a recoverable journal and durable event-ID markers to prevent
+interrupted writes or replayed events from double-counting. The markers contain
+no event contents and remain after raw records expire. This assumes one active
+ledger writer per storage domain.
+
+There is no quota forecast warm-up for recorded Usage values. They are API-price
+equivalents, not bills; configured estimates, host-reported amounts, and budget
+decisions are unchanged. Older offline reports without recorded-price fields
+show them as unavailable.
+
+### API-equivalent quota value
+
+Quota → Estimates also shows the known USD API-equivalent subtotal of tracked
+token usage and, when enough evidence exists, an estimated value of a full
+allowance: `known USD × 100 / observed percentage-point increase`. Projection
+requires at least 15 minutes, a one-point increase, priced work, and no known
+pricing, token-count, cache-price, or attribution gaps. Exact configured USD
+token rates take precedence over catalog prices for quota valuation. Quota
+valuation and Usage's first-write price snapshots share the API price catalog at
+`https://models.dev/api.json`: an OpenAI model matches the `openai` entry with
+the same ID. Claude Agent's rolling `opus`, `sonnet`, `haiku`, and `fable` aliases
+follow the newest stable version of their family in the API price catalog,
+even if the host's display name still names an older version. Explicitly
+versioned Claude models keep exact matches. A known newest version with missing
+or ambiguous prices stays unpriced rather than borrowing an older version's
+rate. Host-catalog counterparts provide a fallback when no fetched family data
+is available; a direct positive host price always wins. No dollar rates are
+hardcoded, and alias upgrades never change prices already frozen on Usage records.
+
+The plugin makes one plain `GET` to that URL (5-second timeout, 10 MB cap, no
+headers, query, or project, usage, or account data), caches the result for 6
+hours, keeps the last good copy for up to 7 days if it fails, and retries a
+failure no more than every 10 minutes. It never delays startup or routing: the
+first valuation uses the fallback until the fetch lands. Set
+`"fetchApiPrices": false` to disable the request entirely. Context tiers and
+cache rates apply; cache-write durations cannot be distinguished, so these remain
+approximate equivalents. These values are not provider bills or published
+allowance budgets. Overlapping windows include the same work: do not
+sum them.
+
+Tracking begins at the first fresh reading after startup, using newly persisted
+token records only; it does not reprice old history. Catalog-price changes start
+a new span rather than rewriting earlier values. Restarts, observation gaps
+longer than 15 minutes, invalid readings, pricing/mapping changes, or overflow of
+the 10,000-record memory buffer start a new tracking span. A reset saves the
+previous frozen value without allocating work across its uncertain boundary;
+an observed 100% or rate-limited window saves a maxed snapshot. Unknown or missed
+boundaries are not reconstructed.
+
+`quotaHistory` retains these values and reset/maxed snapshots with the raw
+90-day history. Older cumulative USD totals add only closed reset segments'
+known subtotals and remain marked incomplete; maxed snapshots and full-allowance
+projections are non-additive statistics. The Estimates pane shows current values,
+not the archive. Valuation never changes routing or requests inference.
 
 ## Native routing boundaries
 

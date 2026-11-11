@@ -13,11 +13,12 @@ import { ProviderErrorLedger, startProviderErrorCollector } from "./telemetry/er
 import { TokenLedger } from "./telemetry/ledger.ts"
 import { TokenBudgetGate } from "./telemetry/budget-gate.ts"
 import type { TokenBudgetPricing } from "./telemetry/budgets.ts"
-import { readPriceTable } from "./telemetry/prices.ts"
+import { readCatalogSnapshot, readPriceTable, readQuotaPriceTable } from "./telemetry/prices.ts"
 import { PluginAttributionLedger } from "./telemetry/attribution.ts"
 import { CompactionLedger } from "./telemetry/compaction.ts"
 import { DirectUsageLedger } from "./telemetry/direct-usage.ts"
 import { WindowLedger } from "./telemetry/window.ts"
+import { QuotaValueTracker } from "./quota-values.ts"
 
 function startupConfigurationReader(ctx: object): ConfigurationReader | undefined {
   const reader = (ctx as { quartermasterConfigurationReader?: unknown }).quartermasterConfigurationReader
@@ -207,10 +208,23 @@ export default Plugin.define({
           console.warn(`[quartermaster] project configuration unavailable: ${error instanceof Error ? error.message : String(error)}`)
         }
       }
-      const ledger = new TokenLedger(ctx.storage)
+      const quotaValues = new QuotaValueTracker(config)
+      const quotaPriceFor = async (providerID: string, modelID: string) => {
+        const list = ctx.model.list.bind(ctx.model) as CatalogModelList
+        const table = await readQuotaPriceTable(list, Date.now, {
+          fetchApiPrices: config.fetchApiPrices,
+          wait: false,
+          fetch: globalThis.fetch,
+        })
+        return table.get(`${providerID}/${modelID}`)
+      }
+      const ledger = new TokenLedger(ctx.storage, {
+        onRemove: (records) => quotaValues.removeTokenRecords(records),
+        apiPrice: quotaPriceFor,
+      })
       const errorLedger = new ProviderErrorLedger(ctx.storage)
       const attributionLedger = new PluginAttributionLedger(ctx.storage)
-      const directUsageLedger = new DirectUsageLedger(ctx.storage)
+      const directUsageLedger = new DirectUsageLedger(ctx.storage, { apiPrice: quotaPriceFor })
       const compactionLedger = new CompactionLedger(ctx.storage)
       const windowLedger = new WindowLedger(ctx.storage)
       const projectID = ctx.location.project.id
@@ -233,7 +247,7 @@ export default Plugin.define({
           console.warn(`[quartermaster] opencode-usage status unavailable: ${usage.reason}`)
         }
       }
-      const routing = await registerAgentRouting(ctx, config, usage, budgetGate, readConfiguration)
+      const routing = await registerAgentRouting(ctx, config, usage, budgetGate, readConfiguration, quotaValues, globalThis.fetch)
       try {
         const rpc = await registerQuartermasterRpc(ctx, config, routing, usage, {
           projectID,
@@ -245,6 +259,16 @@ export default Plugin.define({
           windowLedger,
           budgets: config.budgets,
           tokenRates: config.tokenRates,
+          catalog: async () => {
+            const list = ctx.model.list.bind(ctx.model) as CatalogModelList
+            const snapshot = await readCatalogSnapshot(list)
+            const quotaPrices = await readQuotaPriceTable(list, Date.now, {
+              fetchApiPrices: config.fetchApiPrices,
+              wait: false,
+              fetch: globalThis.fetch,
+            })
+            return { ...snapshot, quotaPrices }
+          },
         }, ctx.location.directory, undefined, modules)
         const collector = startTokenCollector(ctx, ledger, async () => {
           if (!budgetGate) return
@@ -253,7 +277,7 @@ export default Plugin.define({
             await readBudgetPricing(config.tokenRates ?? [], ctx),
           )
           if (changed) await routing?.refreshBudgets()
-        }, compactionLedger, windowLedger, projectID)
+        }, compactionLedger, windowLedger, projectID, (record) => quotaValues.addTokenRecord(record))
         let errorCollector
         try {
           errorCollector = typeof ctx.session?.hook === "function"

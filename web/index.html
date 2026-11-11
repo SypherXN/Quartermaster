@@ -111,7 +111,7 @@ p+p{margin-top:8px}
 .tab{display:inline-flex;align-items:center;padding:9px 15px;background:transparent;border:1px solid var(--line);border-radius:var(--radius);box-shadow:none;color:var(--muted);font:11px/1.5 var(--mono);letter-spacing:1.4px;text-transform:uppercase}
 .tab:hover:not(:disabled){background:var(--accent-soft);color:var(--ink)}
 .tab[aria-selected=true]{background:var(--surface);color:var(--ink);border-color:var(--accent);border-top:3px solid var(--green);padding-top:7px;font-weight:700;box-shadow:3px 3px 0 var(--green-soft)}
-.tab-panel{min-width:0}
+.tab-panel{min-width:0}#quota-providers,#quota-estimates{margin-top:24px}#quota-panel-estimates .note{margin-top:26px}
 .plan{margin:12px 0;padding:20px;border:1px solid var(--line);border-left:4px solid #657653;border-radius:0;background:var(--surface)}
 .plan>strong{font-size:17px}
 .plan>span{color:var(--muted);font-size:12px}
@@ -526,8 +526,9 @@ details.plan[open]>summary{margin-bottom:18px}
 </section>
 <section data-page="quota" hidden class="fade-in" aria-labelledby="quota-heading">
    <div class="page-head"><div><div class="eyebrow"><span class="register-index" aria-hidden="true">06</span>Provider quota</div><h1 id="quota-heading">Quota.</h1><p>Provider windows from the latest snapshot. A missing percent or reset stays unknown.</p></div><button id="refresh-quota" type="button" class="head-action">↻ &nbsp; Refresh quota</button></div>
-  <div id="quota-providers" class="usage-grid"></div>
-  <p id="quota-status" class="status-line" role="status" aria-live="polite">Quota loads with this page.</p>
+  <div class="tab-strip" role="tablist" aria-label="Quota views"><button type="button" class="tab" role="tab" id="quota-tab-usage" aria-selected="true" aria-controls="quota-panel-usage" tabindex="0"><span class="register-index" aria-hidden="true">01</span>Usage</button><button type="button" class="tab" role="tab" id="quota-tab-estimates" aria-selected="false" aria-controls="quota-panel-estimates" tabindex="-1"><span class="register-index" aria-hidden="true">02</span>Estimates</button></div>
+  <div class="tab-panel" id="quota-panel-usage" role="tabpanel" aria-labelledby="quota-tab-usage" tabindex="0"><div id="quota-providers" class="usage-grid"></div><p id="quota-status" class="status-line" role="status" aria-live="polite">Quota loads with this page.</p></div>
+  <div class="tab-panel" id="quota-panel-estimates" role="tabpanel" aria-labelledby="quota-tab-estimates" tabindex="-1" hidden><div class="note"><strong id="quota-estimates-heading">Read estimates as hints, not decisions.</strong> An estimate assumes the recent observed pace continues and is informational only; nothing here reroutes traffic or saves settings. Automatic routing draws on a provider's available quota until 100%, or until the provider reports a limit earlier. That is not a guarantee that all remaining quota is usable, and nothing here bypasses a reported limit. The reset time is reported by the quota source, never guessed. A forecast needs at least 15 minutes of fresh authenticated history (at least two samples) and holds only while the recent rate does. Unconfigured, free and local providers with no numeric quota percent get no estimate.</div><div class="note"><strong>About API values.</strong> Dollar figures here are current API-price equivalents seen in telemetry — not subscription bills or the whole account. A window's dollar value snapshots when it resets or maxes; snapshots are retained for 90 days, and still older data becomes a cumulative summary. This pane shows each window's current value only, never that history, and nested quota windows overlap, so their values must not be summed. Collection starts with tracking and may miss other clients, compaction and gaps, with no historical backfill. Missing or partial model pricing leaves a known subtotal but blocks the full-allowance projection (aliases often go unpriced). The full allowance otherwise extrapolates the recent USD cost per percentage point — not a fixed provider budget.</div><div id="quota-estimates" class="usage-grid"></div></div>
 </section>
 <footer class="footer"><span>QUARTERMASTER <span aria-hidden="true">/</span> MODEL SUPPLY OFFICE</span><span>Local data. Explicit actions. No background inference.</span></footer>
 </main></div></div>
@@ -636,7 +637,7 @@ function paintOverview(){
       stat('Observed tokens',report?number(total):'—',`Input + output · ${RANGES[activeRange].label}`),
       stat('Top model',top?modelLabel(top):'—',top&&share(top)!==null?`${share(top)}% of observed tokens`:'Share unknown'))
     if(!rows.length){mount('#models-table',empty('No model data yet.','Refresh the workspace to read the ledger.'));return}
-    const cols=[['Model',''],['Steps','num'],['Tokens','num'],['Share','num'],['Cache hit','num'],['Cost','num']]
+    const cols=[['Model',''],['Steps','num'],['Tokens','num'],['Share','num'],['Cache hit','num'],['Host cost','num'],['API equiv.','num']]
     const body=rows.flatMap(item=>{
       const key=String(item.value), name=modelLabel(item), open=expandedModels.has(key)
       const toggle=()=>{if(expandedModels.has(key))expandedModels.delete(key);else expandedModels.add(key);paintModels()}
@@ -646,7 +647,8 @@ function paintOverview(){
         h('td',{class:'num',text:number(item.observedTokens)}),
         h('td',{class:'num',text:share(item)===null?'—':`${share(item)}%`}),
         h('td',{class:'num',text:known(item.cacheHitRate)?`${Math.round(item.cacheHitRate*100)}%`:'—'}),
-        h('td',{class:'num',text:typeof item.hostCostUSD==='number'?`${item.hostCostUSD.toFixed(2)} USD`:'—'}))
+        h('td',{class:'num',text:typeof item.hostCostUSD==='number'?`${item.hostCostUSD.toFixed(2)} USD`:'—'}),
+        h('td',{class:'num',text:apiCostText(item)}))
       if(!open)return [line]
       // The split the ledger recorded for this model: what was read, what was written,
       // and what was spent thinking. Missing counters stay '—' rather than becoming 0.
@@ -670,12 +672,12 @@ function paintOverview(){
               h('td',{class:'num',text:key&&costs?money(costs[key]):'—'}))),
             h('tr',{},h('td',{text:'Total'}),h('td',{class:'num',text:'—'}),h('td',{class:'num',text:'—'}),h('td',{class:'num',text:priced})))),
         costs&&unpriced>0?h('p',{class:'hint',text:`${number(unpriced)} steps had no usable rate and are not in the estimate. Reasoning is billed as output by providers but no rate states it, so it carries no line.`}):h('p',{class:'hint',text:'Reasoning is billed as output by providers but no rate states it, so it carries no line.'}))
-      return [line,h('tr',{class:'project-detail-row'},h('td',{colspan:String(cols.length)},detail))]
+       return [line,h('tr',{class:'project-detail-row'},h('td',{colspan:String(cols.length)},detail,...(apiCostCoverage(item)?[h('p',{class:'hint',text:apiCostCoverage(item)})]:[])))]
     })
-    mount('#models-table',h('table',{class:'ledger'},
-      h('caption',{class:'hint',text:`Observed tokens by provider and model over ${RANGES[activeRange].label}, highest first. Expand a row for its input, output, cache and reasoning split. A share of observed tokens is not a share of provider quota.`}),
+    mount('#models-table',h('div',{class:'ledger-wrap'},h('table',{class:'ledger'},
+      h('caption',{class:'hint',text:`Observed tokens by provider and model over ${RANGES[activeRange].label}, highest first. Expand a row for its input, output, cache and reasoning split. A share of observed tokens is not a share of provider quota. API equivalent prices each recorded step at the API price recorded for it — new records freeze their price when recorded and a missing price stays unknown; no historical backfill. Informational, not a bill, distinct from the host cost.`}),
       h('thead',{},h('tr',{},...cols.map(([label,cls])=>h('th',{scope:'col',class:cls,text:label})))),
-      h('tbody',{},...body)))
+      h('tbody',{},...body))))
     const attention=document.querySelector('#models-attention')
     if(attention)attention.textContent=`Showing ${number(rows.length)} of ${number(all.length)} provider/model combinations across ${number(total)} observed tokens over ${RANGES[activeRange].label}.${unknown>0?` ${number(unknown)} tokens have no recorded model and are not listed.`:''} Rows are recorded per step, so one session can appear under several models. ${coverageNote()}`
   }
@@ -700,7 +702,11 @@ function paintOverview(){
       ['Priced steps',`${priced} of ${number(costs.pricedRecords+costs.unpricedRecords)}`],
       ['Unpriced tokens',known(costs.unpricedTokenPercentage)?`${Math.round(costs.unpricedTokenPercentage)}% · ${number(costs.unpricedTokens)} tokens`:'—'],
       ['Config-rate steps',`${number(costs.cacheUnpricedRecords)} priced without cache rates`],
-      ['Rate source',sources.length?sources.join(' + '):'—']
+      ['Rate source',sources.length?sources.join(' + '):'—'],
+      ['API-equivalent total',(()=>{const api=apiEquivalentOf(currentReport);return api?(api.amount===null?'price not recorded':`≈ ${api.amount.toFixed(2)} USD`):'—'})()],
+      ['API equivalent · newest 90 days',(()=>{const api=apiEquivalentOf(currentReport);return api?(api.retained===null?'price not recorded':`≈ ${api.retained.toFixed(2)} USD`):'—'})()],
+      ['Older than 90 days — cumulative',(()=>{const api=apiEquivalentOf(currentReport);if(!api)return '—';if(api.scope!=='selected-range-with-older-cumulative')return '—';return api.archived===null?'price not recorded':`≈ ${api.archived.toFixed(2)} USD${api.archived?` · ${number(api.archivedRecords)} records aggregated`:''}`})()],
+      ['API-equivalent coverage',(()=>{const api=apiEquivalentOf(currentReport);if(!api)return '—';const scope=api.scope==='selected-range-with-older-cumulative'?'recorded API prices across the whole selected range, including older-than-90-day totals':'recorded API prices over the range\'s retained steps';const bits=[`${scope} · ${number(api.priced)} of ${number(api.priced+api.unpriced)} steps priced`];if(api.legacyUnknown>0)bits.push(`${number(api.legacyUnknown)} with historical price not recorded`);if(api.partial>0)bits.push(`${number(api.partial)} partial`);if(api.cacheUnpriced>0)bits.push(`${number(api.cacheUnpriced)} steps without cache rates`);return bits.join(' · ')})()]
     ]
     const table=h('table',{class:'ledger'},
       h('caption',{class:'hint',text:'Every number below comes from catalog or config rates applied to recorded counters. The host total is what the provider itself reported; they are not the same measure.'}),
@@ -768,7 +774,8 @@ function paintOverview(){
       stat('Plugins',rows.length?number(rows.length):'—','Plugins that reported their own calls',true),
       stat('Reported calls',known(usage?.records)?number(usage.records):'—','Submitted outside a host step'),
       stat('Reported tokens',known(usage?.observedTokens)?number(usage.observedTokens):'—',`Input + output · ${RANGES[activeRange].label}`),
-      stat('Top plugin',top?top.name:'—',top&&total>0?`${Math.round(top.observedTokens/total*100)}% of reported tokens`:'Share unknown'))
+      stat('Top plugin',top?top.name:'—',top&&total>0?`${Math.round(top.observedTokens/total*100)}% of reported tokens`:'Share unknown'),
+      stat('API equivalent',apiComponentTotal(usage),'Self-reported plugin calls · recorded API prices · not part of the host total'))
   }
   function paintDirect(){
    const usage=currentReport?.directUsage
@@ -781,16 +788,16 @@ function paintOverview(){
     if(known(usage?.records)&&usage.records>0){mount('#overview-direct',h('p',{class:'chart-foot',text:summary}));return}
     mount('#overview-direct',empty(currentReport?'No plugin-reported calls in this range.':'No plugin-reported calls yet.',currentReport?'A plugin can submit counts for a call that never became a host step.':'Refresh the workspace after a plugin reports a direct call.'));return
    }
-   const cols=[['Plugin',''],['Model',''],['Calls','num'],['Tokens (observed)','num'],['Cached share','num']]
+   const cols=[['Plugin',''],['Model',''],['Calls','num'],['Tokens (observed)','num'],['Cached share','num'],['API equiv.','num']]
    const body=items.slice(0,25).map(item=>{
     const name=typeof item.pluginName==='string'&&item.pluginName?item.pluginName:(typeof item.pluginID==='string'?item.pluginID:'unknown')
     const model=[item.providerID,item.modelID].filter(value=>typeof value==='string'&&value).join('/')
     const unknownCache=item.unknownCacheRecords>0
     const share=unknownCache?null:cachedShare(item)
     const hit=unknownCache?'A reported call left a cache count unknown.':known(item.cacheHitRate)?`Cache hit rate ${Math.round(item.cacheHitRate*100)}%.`:''
-    return h('tr',{},h('td',{title:typeof item.pluginID==='string'?item.pluginID:'',text:name}),h('td',{class:'mono',text:model||'—'}),h('td',{class:'num',text:number(item.records)}),h('td',{class:'num',text:number(item.observedTokens)}),h('td',{class:'num',title:hit,text:unknownCache?'unknown':share===null?'—':`${Math.round(share)}%`}))
+    return h('tr',{},h('td',{title:typeof item.pluginID==='string'?item.pluginID:'',text:name}),h('td',{class:'mono',text:model||'—'}),h('td',{class:'num',text:number(item.records)}),h('td',{class:'num',text:number(item.observedTokens)}),h('td',{class:'num',title:hit,text:unknownCache?'unknown':share===null?'—':`${Math.round(share)}%`}),h('td',{class:'num',text:apiCostText(item)}))
    })
-   const table=h('table',{class:'ledger'},h('caption',{class:'hint',text:'Plugin-reported calls, highest observed tokens first. Not part of the session total.'}),h('thead',{},h('tr',{},...cols.map(([label,cls])=>h('th',{scope:'col',class:cls,text:label})))),h('tbody',{},...body))
+   const table=h('table',{class:'ledger'},h('caption',{class:'hint',text:'Plugin-reported calls, highest observed tokens first. Not part of the session total. API equivalent prices each call at the API price recorded for it; a missing price stays —, never 0.'}),h('thead',{},h('tr',{},...cols.map(([label,cls])=>h('th',{scope:'col',class:cls,text:label})))),h('tbody',{},...body))
    mount('#overview-direct',h('div',{class:'ledger-wrap'},table),h('p',{class:'chart-foot',text:summary}))
   }
  // Provider view: same dimension rows the chart draws, with the numbers spelled out.
@@ -808,7 +815,8 @@ function paintOverview(){
     stat('Providers in use',rows.length?number(rows.length):'—','Distinct providers in the ledger',true),
     stat('Observed tokens',number(total),`Input + output · ${RANGES[activeRange].label}`),
     stat('Top provider',top?providerName(top):'—',top&&share(top)!==null?`${share(top)}% of observed tokens`:'Share unknown'),
-    stat('Reported errors',errorTotal?number(errorTotal):'—',`${number(errors.length)} provider${errors.length===1?'':'s'} · retries the host logged`))
+    stat('Reported errors',errorTotal?number(errorTotal):'—',`${number(errors.length)} provider${errors.length===1?'':'s'} · retries the host logged`),
+    stat('API equivalent',apiEquivalentTotal(apiEquivalentOf(currentReport)),'Whole ledger · recorded API prices incl. unattributed · not a bill'))
   // Only providers with tokens: an error with no steps belongs to a compatibility
   // probe or a fixture, not to a provider this ledger ever ran work through.
   const all=rows
@@ -819,7 +827,7 @@ function paintOverview(){
    if(!prefix)return []
    return (currentReport?.dimensions?.items||[]).filter(entry=>entry.dimension==='model'&&typeof entry.value==='string'&&entry.value.startsWith(prefix))
   }
-  const cols=[['Provider',''],['Steps','num'],['Tokens','num'],['Share','num'],['Cache hit','num'],['Cost','num'],['Errors','num'],['Error types',''],['Statuses','']]
+  const cols=[['Provider',''],['Steps','num'],['Tokens','num'],['Share','num'],['Cache hit','num'],['Host cost','num'],['API equiv.','num'],['Errors','num'],['Error types',''],['Statuses','']]
   const body=all.flatMap(item=>{
     const summary=errorOf.get(item.value||''), key=item.value||'', open=expandedProviders.has(key)
     const types=rowsOf(item,'byClassification'), statuses=rowsOf(item,'byStatus')
@@ -831,6 +839,7 @@ function paintOverview(){
       h('td',{class:'num',text:share(item)===null?'—':`${share(item)}%`}),
       h('td',{class:'num',text:known(item.cacheHitRate)?`${Math.round(item.cacheHitRate*100)}%`:'—'}),
       h('td',{class:'num',text:typeof item.hostCostUSD==='number'?`${item.hostCostUSD.toFixed(2)} USD`:'—'}),
+      h('td',{class:'num',text:apiCostText(item)}),
       h('td',{class:'num',text:summary?number(summary.total):'—'}),
       h('td',{class:'mono',text:types.length?`${number(types.length)} type${types.length===1?'':'s'}`:'—'}),
       h('td',{class:'mono',text:statuses.length?`${number(statuses.length)} status${statuses.length===1?'':''}es`:'—'}))
@@ -841,16 +850,17 @@ function paintOverview(){
     const modelTable=models.length?h('table',{class:'ledger'},h('thead',{},h('tr',{},h('th',{scope:'col',text:'Model'}),h('th',{scope:'col',class:'num',text:'Steps'}),h('th',{scope:'col',class:'num',text:'Tokens'}),h('th',{scope:'col',class:'num',text:'Share of provider'}))),h('tbody',{},...models.map(entry=>h('tr',{},h('td',{class:'mono',text:entry.value}),h('td',{class:'num',text:number(entry.records)}),h('td',{class:'num',text:number(entry.observedTokens)}),h('td',{class:'num',text:known(item.observedTokens)&&item.observedTokens>0?`${Math.round((entry.observedTokens||0)/item.observedTokens*100)}%`:'—'}))))):empty('No model detail for this provider.','Its tokens predate per-model attribution, so there is nothing truthful to list.')
     const panel=h('div',{class:'project-detail'},
       h('p',{class:'hint',text:`${number(item.records)} steps · ${number(item.observedTokens)} tokens · ${share(item)===null?'—':`${share(item)}% of observed tokens`}${known(item.hostCostMissing)&&item.hostCostMissing>0?` · ${number(item.hostCostMissing)} steps unpriced`:''}.`}),
+      ...(apiCostCoverage(item)?[h('p',{class:'hint',text:apiCostCoverage(item)})]:[]),
       h('p',{class:'hint',text:'Errors the host logged, by classification and HTTP status'}),
       errorTable,
       h('p',{class:'hint',text:'Models this provider ran, with their share of it'}),
       modelTable)
     return [line,h('tr',{class:'project-detail-row'},h('td',{colspan:String(cols.length)},panel))]
   })
-  mount('#providers-table',h('table',{class:'ledger'},
-    h('caption',{class:'hint',text:`Observed tokens by provider over ${RANGES[activeRange].label}, highest first. A share of observed tokens is not a share of provider quota. Errors are host retries, classified by HTTP status: 429 is a rate limit, 4xx a request error, 5xx a provider error, and no status stays unknown.`}),
+  mount('#providers-table',h('div',{class:'ledger-wrap'},h('table',{class:'ledger'},
+    h('caption',{class:'hint',text:`Observed tokens by provider over ${RANGES[activeRange].label}, highest first. A share of observed tokens is not a share of provider quota. Errors are host retries, classified by HTTP status: 429 is a rate limit, 4xx a request error, 5xx a provider error, and no status stays unknown. API equivalent prices each step at its recorded API price; a missing price stays —, never 0.`}),
     h('thead',{},h('tr',{},...cols.map(([label,cls])=>h('th',{scope:'col',class:cls,text:label})))),
-    h('tbody',{},...body)),h('p',{class:'chart-foot',text:coverageNote()}))
+    h('tbody',{},...body))),h('p',{class:'chart-foot',text:coverageNote()}))
  }
 function usd(value){return known(value)?`$${value.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:value<1?4:2})}`:'unknown'}
 function paintBudgets(){
@@ -941,15 +951,17 @@ function paintProjects(){
  paintRange()
  const projects=currentReport?.projects, all=[...(projects?.items||[])], rows=all.slice(0,50)
  shownProjects=rows
- if(!rows.length){mount('#projects-table',empty(currentReport?'No projects in this range.':'No project data yet.',currentReport?'Pick a wider range, or refresh once the host has observed work.':'Refresh the workspace or import a report to see projects.'));return}
+ if(!rows.length){mount('#projects-table',empty(currentReport?'No projects in this range.':'No project data yet.',currentReport?'Pick a wider range, or refresh once the host has observed work.':'Refresh the workspace or import a report to see projects.'));mount('#projects-stats');return}
  const total=all.reduce((sum,item)=>sum+(known(item.observedTokens)?item.observedTokens:0),0)
  const label=item=>typeof item.projectName==='string'&&item.projectName?item.projectName:(typeof item.projectID==='string'&&item.projectID?`${item.projectID.slice(0,8)}…`:'Unattributed')
  const top=rows[0], topShare=top&&total>0?Math.round((top.observedTokens||0)/total*100):null
+ const projApi=apiCostOf(projects)
  mount('#projects-stats',
   stat('Projects',number(all.length),'Distinct host projects in the ledger',true),
   stat('Observed tokens',number(total),`Input + output · ${RANGES[activeRange].label}`),
-  stat('Top project',top?label(top):'—',topShare===null?'Share unknown':`${topShare}% of observed tokens`))
- const cols=[['Project',''],['Sessions','num'],['Steps','num'],['Tokens (observed)','num'],['Models',''],['Last seen','']]
+  stat('Top project',top?label(top):'—',topShare===null?'Share unknown':`${topShare}% of observed tokens`),
+  stat('API equivalent',apiComponentTotal(projects),projApi?`Host usage only · ${number(projApi.priced)} of ${number(projApi.priced+projApi.unpriced)} steps priced at recorded API prices · not a bill`:'Host usage only · recorded API prices not reported for this range · not a bill'))
+ const cols=[['Project',''],['Sessions','num'],['Steps','num'],['Tokens (observed)','num'],['API equiv.','num'],['Models',''],['Last seen','']]
  const body=rows.flatMap(item=>{
   const id=typeof item.projectID==='string'&&item.projectID?item.projectID:'unknown'
   const name=label(item)
@@ -962,36 +974,42 @@ function paintProjects(){
   const toggle=()=>{if(expandedProjects.has(id))expandedProjects.delete(id);else expandedProjects.add(id);paintProjects()}
   const line=h('tr',{class:'project-row'+(open?' row-open':''),tabindex:'0',role:'button','aria-expanded':String(open),onclick:toggle,onkeydown:event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();toggle()}}},
    h('td',{class:item.projectName?'':'mono',title:`${name} · ${id}`},h('span',{class:'caret','aria-hidden':'true',text:open?'▾':'▸'}),h('span',{text:name})),
-   h('td',{class:'num',text:number(item.sessions)}),h('td',{class:'num',text:number(item.records)}),h('td',{class:'num',text:number(item.observedTokens)}),
+   h('td',{class:'num',text:number(item.sessions)}),h('td',{class:'num',text:number(item.records)}),h('td',{class:'num',text:number(item.observedTokens)}),h('td',{class:'num',text:apiCostText(item)}),
    h('td',{class:'mono models-cell',text:chips}),h('td',{text:known(item.lastObservedAt)&&item.lastObservedAt>0?new Date(item.lastObservedAt).toLocaleString():'—'}))
   if(!open)return [line]
   const full=models.map(model=>h('tr',{},h('td',{class:'mono',text:`${model.providerID}/${model.modelID}`}),h('td',{class:'num',text:number(model.records)}),h('td',{class:'num',text:number(model.observedTokens)}),h('td',{class:'num',text:shareOf(model)===null?'—':`${shareOf(model)}%`})))
   const projectShare=total>0&&known(item.observedTokens)?Math.round(item.observedTokens/total*100):null
   const summary=[`${number(item.sessions)} session${item.sessions===1?'':'s'}`,`${number(item.records)} steps`,`${number(item.observedTokens)} tokens${projectShare===null?'':` · ${projectShare}% of all projects`}`,item.unknownTokenRecords?`${number(item.unknownTokenRecords)} steps with unknown tokens`:null,known(item.lastObservedAt)&&item.lastObservedAt>0?`last seen ${new Date(item.lastObservedAt).toLocaleString()}`:null].filter(Boolean).join(' · ')
   const panel=h('div',{class:'project-detail'},h('p',{class:'hint',text:summary}),
+   ...(apiCostCoverage(item)?[h('p',{class:'hint',text:apiCostCoverage(item)})]:[]),
    models.length?h('table',{class:'ledger'},h('thead',{},h('tr',{},h('th',{scope:'col',text:'Model'}),h('th',{scope:'col',class:'num',text:'Steps'}),h('th',{scope:'col',class:'num',text:'Tokens'}),h('th',{scope:'col',class:'num',text:'Share of project'}))),h('tbody',{},...full)):empty('No model detail for this project.','Its tokens predate per-model attribution, so there is nothing truthful to list.'),
    sessionBlock('project',item.projectID))
   return [line,h('tr',{class:'project-detail-row'},h('td',{colspan:String(cols.length)},panel))]
  })
- const table=h('table',{class:'ledger'},h('caption',{class:'hint',text:'Observed tokens by host project, highest first. A checkout registered again after a restart is a separate project id. Expand a row for that project\'s models.'}),h('thead',{},h('tr',{},...cols.map(([label,cls])=>h('th',{scope:'col',class:cls,text:label})))),h('tbody',{},...body))
+ const table=h('table',{class:'ledger'},h('caption',{class:'hint',text:'Observed tokens by host project, highest first. A checkout registered again after a restart is a separate project id. Expand a row for that project\'s models. API equivalent prices each step at its recorded API price; a missing price stays —, never 0.'}),h('thead',{},h('tr',{},...cols.map(([label,cls])=>h('th',{scope:'col',class:cls,text:label})))),h('tbody',{},...body))
  const partial=(Number(currentReport?.archived?.observedTokens)>0?` ${number(currentReport.archived.observedTokens)} archived tokens predate per-project attribution.`:'')
  const foot=all.length>rows.length?`Showing the top ${rows.length} of ${number(all.length)} projects by observed tokens.`:`Showing all ${rows.length} project${rows.length===1?'':'s'}.`
- mount('#projects-table',h('div',{class:'ledger-wrap'},table),h('p',{class:'chart-foot',text:`${foot} Steps the host never named a project for stay under Unattributed; ids it no longer lists are grouped under Unlisted projects.${partial} ${coverageNote()}`}))
+ mount('#projects-table',h('div',{class:'ledger-wrap'},table),h('p',{class:'chart-foot',text:`${foot} Steps the host never named a project for stay under Unattributed; ids it no longer lists are grouped under Unlisted projects.${partial} The API equivalent total is the host-usage recorded-price subtotal for this whole range, not a bill. ${coverageNote()}`}))
 }
 const expandedAgents=new Set()
 const expandedProviders=new Set()
 function paintAgents(){
  paintRange()
  const usage=currentReport?.agentAttribution, all=[...(usage?.dimensions?.items||[])], rows=all.slice(0,50)
- if(!rows.length){mount('#agents-table',empty(currentReport?'No agents in this range.':'No agent data yet.',currentReport?'Pick a wider range, or refresh once the host has observed work.':'Refresh the workspace or import a report to see agents.'));return}
+ // Steps that named no agent still spent tokens: when they are all this range has, they render
+ // alone with the API total; a fully empty range clears the stats so no stale API dollars linger.
+ const unattributed=usage?.unattributed
+ const hasUnattributed=!!(unattributed&&Number(unattributed.records)>0)
+ if(!rows.length&&!hasUnattributed){mount('#agents-table',empty(currentReport?'No agents in this range.':'No agent data yet.',currentReport?'Pick a wider range, or refresh once the host has observed work.':'Refresh the workspace or import a report to see agents.'));mount('#agents-stats');return}
  const total=all.reduce((sum,item)=>sum+(known(item.observedTokens)?item.observedTokens:0),0)
  const label=item=>typeof item.agentID==='string'&&item.agentID?item.agentID:'Unnamed agent'
  const top=rows[0], topShare=top&&total>0?Math.round((top.observedTokens||0)/total*100):null
  mount('#agents-stats',
   stat('Agents',number(all.length),'Distinct agents in the ledger',true),
   stat('Observed tokens',number(total),`Input + output · ${RANGES[activeRange].label}`),
-  stat('Top agent',top?label(top):'—',topShare===null?'Share unknown':`${topShare}% of observed tokens`))
- const cols=[['Agent',''],['Sessions','num'],['Steps','num'],['Tokens (observed)','num'],['Models',''],['Last seen','']]
+  stat('Top agent',top?label(top):'—',topShare===null?'Share unknown':`${topShare}% of observed tokens`),
+  stat('API equivalent',apiComponentTotal(usage),'All agents incl. unattributed · recorded API prices · not a bill'))
+ const cols=[['Agent',''],['Sessions','num'],['Steps','num'],['Tokens (observed)','num'],['API equiv.','num'],['Models',''],['Last seen','']]
  const body=rows.flatMap(item=>{
   const id=typeof item.agentID==='string'&&item.agentID?item.agentID:'unknown'
   const name=label(item)
@@ -1003,7 +1021,7 @@ function paintAgents(){
   const toggle=()=>{if(expandedAgents.has(id))expandedAgents.delete(id);else expandedAgents.add(id);paintAgents()}
   const line=h('tr',{class:'project-row'+(open?' row-open':''),tabindex:'0',role:'button','aria-expanded':String(open),onclick:toggle,onkeydown:event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();toggle()}}},
    h('td',{class:'mono',title:id},h('span',{class:'caret','aria-hidden':'true',text:open?'▾':'▸'}),h('span',{text:name})),
-   h('td',{class:'num',text:number(item.sessions)}),h('td',{class:'num',text:number(item.records)}),h('td',{class:'num',text:number(item.observedTokens)}),
+   h('td',{class:'num',text:number(item.sessions)}),h('td',{class:'num',text:number(item.records)}),h('td',{class:'num',text:number(item.observedTokens)}),h('td',{class:'num',text:apiCostText(item)}),
    h('td',{class:'mono models-cell',text:chips}),h('td',{text:known(item.lastObservedAt)&&item.lastObservedAt>0?new Date(item.lastObservedAt).toLocaleString():'—'}))
   if(!open)return [line]
   const full=models.map(model=>h('tr',{},h('td',{class:'mono',text:`${model.providerID}/${model.modelID}`}),h('td',{class:'num',text:number(model.records)}),h('td',{class:'num',text:number(model.observedTokens)}),h('td',{class:'num',text:shareOf(model)===null?'—':`${shareOf(model)}%`})))
@@ -1011,23 +1029,23 @@ function paintAgents(){
   const share=known(item.cacheHitRate)?`${Math.round(item.cacheHitRate*100)}% cached`:null
   const summary=[`${number(item.sessions)} session${item.sessions===1?'':'s'}`,`${number(item.records)} steps`,`${number(item.observedTokens)} tokens${agentShare===null?'':` · ${agentShare}% of all agents`}`,share,item.unknownTokenRecords?`${number(item.unknownTokenRecords)} steps with unknown tokens`:null,known(item.lastObservedAt)&&item.lastObservedAt>0?`last seen ${new Date(item.lastObservedAt).toLocaleString()}`:null].filter(Boolean).join(' · ')
   const panel=h('div',{class:'project-detail'},h('p',{class:'hint',text:summary}),
+   ...(apiCostCoverage(item)?[h('p',{class:'hint',text:apiCostCoverage(item)})]:[]),
    models.length?h('table',{class:'ledger'},h('thead',{},h('tr',{},h('th',{scope:'col',text:'Model'}),h('th',{scope:'col',class:'num',text:'Steps'}),h('th',{scope:'col',class:'num',text:'Tokens'}),h('th',{scope:'col',class:'num',text:'Share of agent'}))),h('tbody',{},...full)):empty('No model detail for this agent.','Its tokens predate per-model attribution, so there is nothing truthful to list.'),
    sessionBlock('agent',item.agentID))
   return [line,h('tr',{class:'project-detail-row'},h('td',{colspan:String(cols.length)},panel))]
  })
  // Steps that named no agent still spent tokens, so they get a row of their own
  // instead of only a footnote. There is no session to expand, so it never opens.
- const unattributed=usage?.unattributed
  if(unattributed&&Number(unattributed.records)>0){
   const models=Array.isArray(unattributed.models)?unattributed.models:[]
   const first=models[0], firstShare=first&&unattributed.observedTokens>0?Math.round((first.observedTokens||0)/unattributed.observedTokens*100):null
   const chips=first?`${first.providerID}/${first.modelID}${firstShare===null?'':` ${firstShare}%`}${models.length>1?` +${models.length-1}`:''}`:'—'
   body.push(h('tr',{class:'project-row'},h('td',{class:'mono',title:'The assistant message named no agent'},h('span',{text:'unattributed'})),
-   h('td',{class:'num',text:number(unattributed.sessions)}),h('td',{class:'num',text:number(unattributed.records)}),h('td',{class:'num',text:number(unattributed.observedTokens)}),
+   h('td',{class:'num',text:number(unattributed.sessions)}),h('td',{class:'num',text:number(unattributed.records)}),h('td',{class:'num',text:number(unattributed.observedTokens)}),h('td',{class:'num',text:apiCostText(unattributed)}),
    h('td',{class:'mono models-cell',text:chips}),h('td',{text:known(unattributed.lastObservedAt)&&unattributed.lastObservedAt>0?new Date(unattributed.lastObservedAt).toLocaleString():'—'})))
  }
- const table=h('table',{class:'ledger'},h('caption',{class:'hint',text:'Observed tokens by agent, highest first. A dispatched subagent is named by its own session; a root session is named by the assistant message that spent the tokens, so it can span several agents. Expand a row for its models.'}),h('thead',{},h('tr',{},...cols.map(([label,cls])=>h('th',{scope:'col',class:cls,text:label})))),h('tbody',{},...body))
- const foot=all.length>rows.length?`Showing the top ${rows.length} of ${number(all.length)} agents by observed tokens.`:`Showing all ${rows.length} agent${rows.length===1?'':'s'}.`
+ const table=h('table',{class:'ledger'},h('caption',{class:'hint',text:'Observed tokens by agent, highest first. A dispatched subagent is named by its own session; a root session is named by the assistant message that spent the tokens, so it can span several agents. Expand a row for its models. API equivalent prices each step at its recorded API price; a missing price stays —, never 0.'}),h('thead',{},h('tr',{},...cols.map(([label,cls])=>h('th',{scope:'col',class:cls,text:label})))),h('tbody',{},...body))
+ const foot=all.length>rows.length?`Showing the top ${rows.length} of ${number(all.length)} agents by observed tokens.`:all.length?`Showing all ${rows.length} agent${rows.length===1?'':'s'}.`:'No named agents in this range; steps that named no agent are listed as unattributed.'
  mount('#agents-table',h('div',{class:'ledger-wrap'},table),h('p',{class:'chart-foot',text:`${foot} ${coverageNote()}`}))
 }
 function csvCell(value){
@@ -1140,6 +1158,105 @@ function chooseProvider(id){
  document.querySelector('#catalog-heading')?.focus?.()
 }
 function tokenLimit(value){return Number.isSafeInteger(value)&&value>=0?value:undefined}
+function apiCostOf(item){
+  // Optional model.apiCosts, all-or-nothing mirror of ApiComponentCost: every money component and
+  // counter is required; anything missing/malformed/fractional/unsafe rejects the whole block.
+  // Ordinary costs stay untouched. The gateway priced these; the page never recomputes them.
+  const raw=item?.apiCosts
+  if(!raw||typeof raw!=='object'||Array.isArray(raw))return null
+  if(raw.currency!=='USD')return null
+  const money=value=>{const n=finite(value);return n!==undefined&&n>=0?n:undefined}
+  const int=value=>{const n=finite(value);return n!==undefined&&n>=0&&Number.isInteger(n)&&n<=Number.MAX_SAFE_INTEGER?n:undefined}
+  const input=money(raw.input),output=money(raw.output),cacheRead=money(raw.cacheRead),cacheWrite=money(raw.cacheWrite),total=money(raw.total)
+  const priced=int(raw.pricedRecords),unpriced=int(raw.unpricedRecords),cacheUnpriced=int(raw.cacheUnpricedRecords),partial=int(raw.partialRecords)
+  if(input===undefined||output===undefined||cacheRead===undefined||cacheWrite===undefined||total===undefined)return undefined
+  if(priced===undefined||unpriced===undefined||cacheUnpriced===undefined||partial===undefined)return undefined
+  const counted=priced+unpriced
+  if(counted>Number.MAX_SAFE_INTEGER||cacheUnpriced>counted||partial>counted)return undefined
+  return {currency:'USD',input,output,cacheRead,cacheWrite,total,priced,unpriced,cacheUnpriced,partial}
+}
+function apiCostText(item){
+  const api=apiCostOf(item)
+  if(!api||!(api.priced>0)||api.total===undefined)return '—' // zero priced work stays unavailable, not 0 USD
+  return `${api.total.toFixed(2)} USD`
+}
+function apiCostCoverage(item){
+  const api=apiCostOf(item)
+  if(!api)return ''
+  const parts=[`${number(api.priced)} of ${number(api.priced+api.unpriced)} steps priced at recorded API prices`]
+  if(api.partial>0)parts.push(`${number(api.partial)} partial`)
+   if(api.cacheUnpriced>0)parts.push(`${number(api.cacheUnpriced)} step${api.cacheUnpriced===1?'':'s'} without cache rates`)
+  if(!(api.priced>0))parts.push('known subtotal unavailable')
+  return `API equivalent · ${parts.join(' · ')} · prices recorded with the steps, not a bill and not the provider-reported host cost`
+}
+function apiEquivalentOf(report){
+  // Optional range-wide apiEquivalent summary, all-or-nothing mirror of ApiEquivalentCosts:
+  // exact literals, safe counters, exactly one USD currency entry when priced>0 (empty when none),
+  // and the recorded-price clock breakdown: retained/archived amounts null = price not recorded
+  // (never 0). Dated ranges must omit the cumulative part. Printed verbatim; never recomputed here.
+  const raw=report?.apiEquivalent
+  if(!raw||typeof raw!=='object'||Array.isArray(raw))return null
+  if(raw.pricing!=='recorded-api-price'||raw.complete!==false)return null
+  const cumulativeScope=raw.scope==='selected-range-with-older-cumulative'
+  if(!cumulativeScope&&raw.scope!=='retained-raw-records')return null
+  const currencies=Array.isArray(raw.currencies)?raw.currencies:undefined
+  if(currencies===undefined)return null
+  const int=value=>{const n=finite(value);return n!==undefined&&n>=0&&Number.isInteger(n)&&n<=Number.MAX_SAFE_INTEGER?n:undefined}
+  const cash=value=>{if(value===null)return null;const n=finite(value);return n>=0?n:undefined}
+  const priced=int(raw.pricedRecords),unpriced=int(raw.unpricedRecords),cacheUnpriced=int(raw.cacheUnpricedRecords),partial=int(raw.partialRecords)
+  const unknownTokens=int(raw.unknownTokenRecords)
+  if(priced===undefined||unpriced===undefined||cacheUnpriced===undefined||partial===undefined||unknownTokens===undefined)return undefined
+  const counted=priced+unpriced
+  if(counted>Number.MAX_SAFE_INTEGER||cacheUnpriced>counted||partial>counted)return undefined
+  if(!cumulativeScope&&(raw.archivedUSD!==null&&raw.archivedUSD!==undefined||raw.archivedRecords!==0))return undefined
+  const retained=cash(raw.retainedUSD),archived=cash(raw.archivedUSD)
+  if(retained===undefined||archived===undefined)return undefined
+  if(priced===0){if(retained!==null||archived!==null)return undefined}
+  else{
+    if(retained===null&&archived===null)return undefined // with priced work at least one known subtotal is required
+    const knownSum=retained===null?archived:archived===null?retained:retained+archived
+    if(!Number.isFinite(knownSum))return undefined
+  }
+  const archivedRecords=int(raw.archivedRecords)
+  if(archivedRecords===undefined||archivedRecords>counted)return undefined
+  const legacyUnknown=int(raw.legacyUnknownRecords)
+  if(legacyUnknown===undefined||legacyUnknown>unpriced)return undefined
+  let amount=null
+  if(priced>0){
+    if(currencies.length!==1)return undefined
+    const entry=currencies[0]
+    if(!entry||typeof entry!=='object'||entry.currency!=='USD')return undefined
+    const value=finite(entry.estimatedAmount)
+    if(value===undefined||value<0)return undefined
+    // The gateway's aggregate must equal its own known parts (floating tolerance); the page
+    // displays that total and never sums up new values.
+    const knownSum=retained===null?archived:archived===null?retained:retained+archived
+    if(Math.abs(value-knownSum)>1e-9*Math.max(1,Math.abs(value)))return undefined
+    amount=value
+  }else if(currencies.length!==0)return undefined
+  return {currency:'USD',amount,priced,unpriced,cacheUnpriced,partial,retained,archived,archivedRecords,legacyUnknown,unknownTokens,scope:raw.scope}
+}
+function apiEquivalentTotal(api){
+  if(!api)return '—'
+  return api.amount===null?'price not recorded':`≈ ${api.amount.toFixed(2)} USD`
+}
+function apiComponentTotal(item){
+  // Section aggregate in the component shape (e.g. directUsage.apiCosts); unknown prices never read as 0.
+  const api=apiCostOf(item)
+  if(!api)return '—'
+  if(!(api.priced>0)||api.total===undefined)return 'price not recorded'
+  return `≈ ${api.total.toFixed(2)} USD`
+}
+function apiEquivalentScope(api){
+  // Whole-ledger coverage for tab totals; the backend aggregate already includes everything shown here.
+  if(!api)return '—'
+  const bits=[`${number(api.priced)} of ${number(api.priced+api.unpriced)} steps priced`]
+  if(api.unknownTokens>0)bits.push(`${number(api.unknownTokens)} steps with unknown tokens`)
+  if(api.legacyUnknown>0)bits.push(`${number(api.legacyUnknown)} with historical price not recorded`)
+  if(api.partial>0)bits.push(`${number(api.partial)} partial`)
+  if(api.cacheUnpriced>0)bits.push(`${number(api.cacheUnpriced)} steps without cache rates`)
+  return bits.join(' · ')
+}
 function catalogRate(value){return known(value)&&value>=0?value:undefined}
 function catalogPrice(value){return catalogRate(value)===undefined?'Not provided':`$${String(value)}`}
 function capabilityText(value){return value===true?'Yes':value===false?'No':'Not provided'}
@@ -1385,6 +1502,38 @@ function assistVariant(idInput,variantInput,key){
  const update=()=>{const model=catalogModels().find(item=>`${item.providerID}/${item.id}`===idInput.value);choices.replaceChildren(...(model?.variants||[]).map(value=>h('option',{value})));variantInput.setAttribute('list',`variants-${key}`)}
  idInput.addEventListener('input',update);variantRefreshers.push(update);update();return choices
 }
+function estimateSpan(ms){
+  const minutes=Math.round(ms/60000)
+  if(minutes<1)return 'less than a minute'
+  if(minutes<90)return `${number(minutes)} min`
+  const hours=Math.floor(minutes/60),rest=minutes-hours*60
+  return rest?`${number(hours)} h ${number(rest)} min`:`${number(hours)} h`
+}
+function estimateFresh(source){
+  const observedAt=source?epoch(source.observedAt)??epoch(source.checkedAt):undefined
+  const now=Date.now()
+  return source?.stale!==true&&source?.authenticated!==false&&observedAt!==undefined&&observedAt<=now&&now-observedAt<=5*60000
+}
+function estimateLine(window,source){
+  // Display only: the gateway computes the forecast; the page just words it.
+  // Every estimate is a claim about fresh observations, so freshness gates ALL states.
+  if(!known(window.percent))return ''
+  const estimate=window.estimate
+  if(!estimate||!known(estimate.cutoffPercent))return estimateFresh(source)?'Estimate · insufficient history (needs at least 15 min of fresh observations)':'Estimate unavailable · stale quota'
+  if(!estimateFresh(source))return 'Estimate unavailable · stale quota'
+  const cutoff=Math.round(estimate.cutoffPercent)
+  if(estimate.status==='cutoff-reached')return known(window.percent)&&window.percent<cutoff?'Estimate out of date':`Routing cutoff reached (${cutoff}%)`
+  if(estimate.status==='no-recent-usage')return 'No recent quota increase; estimate unavailable'
+  if(estimate.status==='stale')return 'Estimate unavailable · stale quota'
+  if(estimate.status!=='estimated'||estimate.ratePerMinute===undefined||estimate.cutoffAt===undefined)return 'Estimate · insufficient history (needs at least 15 min of fresh observations)'
+  const cutoffAt=epoch(estimate.cutoffAt),reset=epoch(window.resetsAt)
+  if(cutoffAt<=Date.now())return known(window.percent)&&window.percent>=cutoff?`Routing cutoff reached (${cutoff}%)`:'Estimate out of date'
+  if(reset!==undefined&&reset<=Date.now())return 'Estimate out of date' // the reset passed, so this forecast is from before it; wait for a fresh quota read
+  if(reset!==undefined&&reset<=cutoffAt)return `Estimate · reset expected before ${cutoff}% cutoff at recent usage rate`
+  const span=estimate.spanMs!==undefined?` over ${estimateSpan(estimate.spanMs)}`:''
+  const rate=estimate.ratePerMinute<0.01?`rate less than 0.01 percentage points/min${span}`:`about ${number(estimate.ratePerMinute)} percentage points/min${span}`
+  return `Estimate · ${cutoff}% cutoff ≈ ${timeText(cutoffAt)} · if the recent rate holds (${rate})`
+}
 function paintUsage(){
  const sources=(usageData||[]).filter(item=>typeof item?.providerID==='string'&&item.providerID)
  const cards=[]
@@ -1416,6 +1565,77 @@ function paintUsage(){
   cards.push(card)
  }
  mount('#quota-providers',...(cards.length?cards:[empty('No quota snapshot yet.','Open this page through the local gateway, or refresh quota. Missing windows stay unknown.')]))
+
+ paintUsageEstimates()
+}
+
+function estimateBasis(window){
+  const e=window.estimate
+  if(!e)return ''
+  const parts=[]
+  if(known(e.sampleCount)&&e.sampleCount>0)parts.push(`${number(e.sampleCount)} sample${e.sampleCount===1?'':'s'}`)
+  if(known(e.spanMs)&&e.spanMs>0)parts.push(`${estimateSpan(e.spanMs)} span`)
+  return parts.length?`estimate basis · ${parts.join(' · ')}`:''
+}
+function apiValueStale(window,source){
+  // Backend proves currency-dollar freshness by exact clock equality with the quota observation;
+  // anything unequal — older or future — is suppressed, never presented as current.
+  const value=window?.apiValue
+  if(!value)return false
+  const valueAt=epoch(value.observedAt)
+  const sourceAt=source?epoch(source.observedAt)??epoch(source.checkedAt):undefined
+  return valueAt===undefined||sourceAt===undefined||valueAt!==sourceAt
+}
+function apiValueText(window,source){
+  // Observed API-equivalent cash for this window; stale observations show nothing current.
+  const value=window.apiValue
+  if(!value)return estimateFresh(source)?'Observed API value · not tracked yet':'Observed API value unavailable · stale quota'
+  if(!estimateFresh(source))return 'Observed API value unavailable · stale quota'
+  if(apiValueStale(window,source))return 'Observed API value unavailable · stale value observation'
+  if(value.observedUSD==null)return 'Observed API value · unpriced (no priced work recorded yet)'
+  const parts=[]
+  if(value.observedUSD===0)parts.push('zero priced work so far')
+  if(known(value.pricedRecords))parts.push(known(value.records)?`${number(value.pricedRecords)} of ${number(value.records)} records priced`:`${number(value.pricedRecords)} records priced`)
+  if(known(value.partialRecords)&&value.partialRecords>0)parts.push(`${number(value.partialRecords)} partial`)
+  if(known(value.spanMs)&&value.spanMs>0)parts.push(`${estimateSpan(value.spanMs)} track span`)
+  return `Observed API value ≈ ${value.currency} ${number(value.observedUSD)}`+(parts.length?` · ${parts.join(' · ')}`:'')
+}
+function apiValueForecastText(window,source){
+  const value=window.apiValue
+  if(!value||!estimateFresh(source)||apiValueStale(window,source))return ''
+  if(value.projectionStatus==='estimated')return `Estimated full allowance ≈ ${value.currency} ${number(value.projectedFullUSD)} · approximate; recent USD per percentage point, not a provider budget`
+  return `Estimated full allowance unavailable${value.reason?` — ${value.reason}`:''}`
+}
+function paintUsageEstimates(){
+ const sources=(usageData||[]).filter(item=>typeof item?.providerID==='string'&&item.providerID)
+ const cards=[]
+ for(const source of sources){
+  const id=source.providerID
+  const provider=catalogData?.providers.find(item=>item.id===id)
+  const windows=(source.windows||[]).filter(window=>known(window.percent))
+  if(!windows.length)continue
+  const card=h('section',{class:'panel'},h('div',{class:'panel-head'},h('div',{},h('h2',{text:provider?.name||id}),h('p',{class:'mono',text:id})),h('span',{class:`badge ${source.stale?'amber':'neutral'}`,text:source.stale?'Stale quota':'Estimates'})))
+  const quota=h('div',{class:'quota'})
+  for(const window of windows){
+   const row=h('div',{class:'quota-window'},h('div',{class:'bar-label'},h('strong',{text:window.label||'Quota window'}),h('span',{class:'mono',text:`${number(window.percent)}% used`})))
+   const fill=h('div',{class:'bar-fill'});fill.setAttribute('style',`width:${Math.max(0,Math.min(100,window.percent))}%`)
+   row.append(h('div',{class:'bar-track','aria-hidden':'true'},fill))
+   const estimate=estimateLine(window,source)
+   if(estimate)row.append(h('p',{class:'time',text:estimate}))
+   const basis=estimateBasis(window)
+   if(basis)row.append(h('p',{class:'hint',text:basis}))
+   row.append(h('p',{class:'hint',text:apiValueText(window,source)}))
+   const allowance=apiValueForecastText(window,source)
+   if(allowance)row.append(h('p',{class:'hint',text:allowance}))
+   row.append(h('p',{class:'hint',text:known(window.resetsAt)?`Provider reset reported for ${timeText(window.resetsAt)}${window.resetEstimated?' (estimated by the source)':''}`:'Provider reset reported time unknown'}))
+   if(source.observedAt)row.append(h('p',{class:'hint',text:source.authenticated===false?`Quota observed ${timeText(source.observedAt)} · not authenticated, no forecast`:`Quota observed ${timeText(source.observedAt)}${estimateFresh(source)?' · fresh observation':' · too stale to forecast (needs an observation within the last 5 minutes)'}`}))
+   quota.append(row)
+  }
+  card.append(quota)
+  cards.push(card)
+ }
+ mount('#quota-estimates',...(cards.length?cards:[empty('No quota estimates yet.','Estimates appear once a provider reports numeric quota windows. Unconfigured, free and local providers without a numeric percent never get one.')]))
+
 }
 // Routing reads what the next request would do: categories ordered by their pick
 // policy against the live quota snapshot, and plans expanded in place.
@@ -1482,7 +1702,7 @@ function routingStrategyCard(title,description,badge,rows,weighted){
   const share=weighted&&total>0&&row.clock.pace?Math.round(row.clock.pace.value/total*100):undefined
   const notes=[]
   if(row.clock.stale)notes.push('stale quota')
-  if(known(row.clock.soonest?.percent)&&row.clock.soonest.percent>=90)notes.push('over the 90% gate')
+  if(known(row.clock.soonest?.percent)&&row.clock.soonest.percent>=100)notes.push('quota fully used')
   const line=[window?.label||'',known(window?.percent)?`${number(window.percent)}% used`:'',...notes].filter(Boolean).join(' · ')
   return h('tr',{},
    h('td',{class:'num',text:String(position+1)}),
@@ -1514,7 +1734,7 @@ function routingCategoryCard(name,category){
   const notes=[]
   if(!row.clock.known)notes.push('no quota source')
   else if(row.clock.stale)notes.push('stale quota')
-  if(known(window?.percent)&&window.percent>=90)notes.push('over the 90% gate')
+  if(known(window?.percent)&&window.percent>=100)notes.push('quota fully used')
   if(position===0)notes.unshift('next pick')
   const line=[window?.label||'',known(window?.percent)?`${number(window.percent)}% used`:'',...notes].filter(Boolean).join(' · ')
   const label=row.variant?`${row.id} · ${row.variant}`:row.id
@@ -1576,18 +1796,77 @@ function normalizeCatalogProvider(provider){
   const models=Array.isArray(provider?.models)?provider.models.map(model=>normalizeCatalogModel(model)):provider?.models&&typeof provider.models==='object'?Object.entries(provider.models).map(([key,model])=>normalizeCatalogModel(model,key)):[]
   return {id:typeof provider?.id==='string'?provider.id:'',name:typeof provider?.name==='string'?provider.name:typeof provider?.id==='string'?provider.id:'Provider',models}
 }
+function usageEstimate(item){
+  // Optional estimate from the gateway; repeated fields keep the good quota even when the estimate is malformed.
+  // Bounds mirror the backend contract: cutoffPercent 0..100, sampleCount a non-negative integer,
+  // spanMs non-negative; 'estimated' additionally needs sampleCount>=2, spanMs>=15min, a positive
+  // finite rate and cutoffAt>=0. Anything else drops the whole estimate.
+  const raw=item?.estimate
+  if(!raw||typeof raw!=='object')return undefined
+  const status=typeof raw.status==='string'?raw.status:''
+  if(status!=='estimated'&&status!=='insufficient-history'&&status!=='no-recent-usage'&&status!=='stale'&&status!=='cutoff-reached')return undefined
+  const cutoffPercent=finite(raw.cutoffPercent),sampleCount=finite(raw.sampleCount),spanMs=finite(raw.spanMs)
+  if(cutoffPercent===undefined||cutoffPercent<0||cutoffPercent>100)return undefined
+  if(sampleCount===undefined||sampleCount<0||!Number.isInteger(sampleCount))return undefined
+  if(spanMs===undefined||spanMs<0)return undefined
+  let ratePerMinute,cutoffAt
+  if(status==='estimated'){
+    const rate=finite(raw.ratePerMinute),at=epoch(raw.cutoffAt)
+    if(!(rate>0)||at===undefined||at<0||sampleCount<2||spanMs<15*60000)return undefined
+    ratePerMinute=rate;cutoffAt=at
+  }
+  return {status,cutoffPercent,sampleCount,spanMs,...(ratePerMinute!==undefined?{ratePerMinute}:{}),...(cutoffAt!==undefined?{cutoffAt}:{})}
+}
+function usageApiValue(item){
+  // Frozen mirror of the gateway apiValue contract: exact literals, integer-safe counters, derived
+  // span. Any mismatch drops the whole block; other window fields survive. observedUSD:null is
+  // UNPRICED, never 0. Projection math stays in the gateway; the page only prints it.
+  const raw=item?.apiValue
+  if(!raw||typeof raw!=='object')return undefined
+  if(raw.currency!=='USD'||raw.basis!=='api-equivalent-not-billed'||raw.complete!==false)return undefined
+  const status=raw.projectionStatus==='estimated'||raw.projectionStatus==='unavailable'?raw.projectionStatus:undefined
+  if(status===undefined)return undefined
+  const int=value=>{const n=finite(value);return n!==undefined&&n>=0&&Number.isInteger(n)&&n<=Number.MAX_SAFE_INTEGER?n:undefined}
+  const observedAt=int(raw.observedAt),spanMs=int(raw.spanMs),records=int(raw.records),priced=int(raw.pricedRecords),unpriced=int(raw.unpricedRecords),partial=int(raw.partialRecords)
+  if(observedAt===undefined||spanMs===undefined||records===undefined||priced===undefined||unpriced===undefined||partial===undefined)return undefined
+  if(raw.trackingSince===null?spanMs!==0:int(raw.trackingSince)===undefined||observedAt-int(raw.trackingSince)!==spanMs)return undefined
+  const trackingSince=raw.trackingSince===null?null:int(raw.trackingSince)
+  if(priced+unpriced!==records||partial>records)return undefined
+  let delta
+  if(raw.quotaDeltaPercent===null)delta=null
+  else{delta=finite(raw.quotaDeltaPercent);if(delta===undefined||delta<0||delta>100)return undefined}
+  if(raw.observedUSD===null?priced!==0:(priced===0||finite(raw.observedUSD)===undefined||raw.observedUSD<0))return undefined
+  let projectedFullUSD=null,reason=null
+  if(status==='estimated'){
+    if(!(spanMs>=15*60000&&delta!==null&&delta>=1&&priced>=1&&unpriced===0&&partial===0&&raw.reason===null&&raw.observedUSD!==null))return undefined
+    const projected=finite(raw.projectedFullUSD)
+    if(projected===undefined||projected<0)return undefined
+    projectedFullUSD=projected
+  }else{
+    if(raw.projectedFullUSD!==null)return undefined
+    if(typeof raw.reason!=='string')return undefined
+    // Mirror the backend reason contract: trimmed nonempty, <=160, no control chars. Malformed reasons
+    // are rejected, never sanitized or coerced; valid ones pass through untouched.
+    const trimmed=raw.reason.trim()
+    if(!trimmed||trimmed.length>160||/[\u0000-\u001f\u007f]/.test(raw.reason))return undefined
+    reason=raw.reason
+  }
+  return {currency:'USD',basis:'api-equivalent-not-billed',complete:false,projectionStatus:status,trackingSince,observedAt,spanMs,observedUSD:raw.observedUSD===null?null:raw.observedUSD,projectedFullUSD,quotaDeltaPercent:delta,reason,records,pricedRecords:priced,unpricedRecords:unpriced,partialRecords:partial}
+}
 function usageWindows(windows){
   if(!Array.isArray(windows))return []
   return windows.map(item=>{
     const percent=finite(item?.percent)??finite(item?.usedPercent)
     const resetsAt=epoch(item?.resetsAt)
-    return {label:typeof item?.label==='string'?item.label:typeof item?.name==='string'?item.name:'Quota window',...(percent===undefined?{}:{percent}),...(resetsAt===undefined?{}:{resetsAt}),...(item?.resetEstimated===true?{resetEstimated:true}:{}),...(finite(item?.used)!==undefined?{used:item.used}:{}),...(finite(item?.remaining)!==undefined?{remaining:item.remaining}:{}),...(finite(item?.limit)!==undefined?{limit:item.limit}:{}),...(typeof item?.unit==='string'?{unit:item.unit}:{}),...(typeof item?.state==='string'?{state:item.state}:{})}
+    const estimate=usageEstimate(item)
+    const apiValue=usageApiValue(item)
+    return {label:typeof item?.label==='string'?item.label:typeof item?.name==='string'?item.name:'Quota window',...(percent===undefined?{}:{percent}),...(resetsAt===undefined?{}:{resetsAt}),...(item?.resetEstimated===true?{resetEstimated:true}:{}),...(finite(item?.used)!==undefined?{used:item.used}:{}),...(finite(item?.remaining)!==undefined?{remaining:item.remaining}:{}),...(finite(item?.limit)!==undefined?{limit:item.limit}:{}),...(typeof item?.unit==='string'?{unit:item.unit}:{}),...(typeof item?.state==='string'?{state:item.state}:{}),...(estimate?{estimate}:{}),...(apiValue?{apiValue}:{})}
   })
 }
 function usageEntry(providerID, source){
   const cooldowns=Array.isArray(source?.cooldowns)?source.cooldowns.flatMap(item=>{const until=epoch(item?.until);return until===undefined?[]:[{modelID:typeof item?.modelID==='string'?item.modelID:typeof item?.id==='string'?item.id:providerID||'Provider',until}]}):undefined
   const observedAt=epoch(source?.observedAt)??epoch(source?.checkedAt)
-  return {providerID,status:typeof source?.status==='string'?source.status:typeof source?.availability==='string'?source.availability:'unknown',stale:source?.stale===true,...(observedAt===undefined?{}:{observedAt}),...(typeof source?.reason==='string'?{reason:source.reason}:typeof source?.error==='string'?{reason:source.error}:{}),...(typeof source?.sourceID==='string'?{sourceID:source.sourceID}:{}),windows:usageWindows(source?.windows),...(cooldowns?{cooldownsKnown:true,cooldowns}:{})}
+  return {providerID,status:typeof source?.status==='string'?source.status:typeof source?.availability==='string'?source.availability:'unknown',stale:source?.stale===true,...(observedAt===undefined?{}:{observedAt}),...(typeof source?.reason==='string'?{reason:source.reason}:typeof source?.error==='string'?{reason:source.error}:{}),...(typeof source?.sourceID==='string'?{sourceID:source.sourceID}:{}),...(typeof source?.authenticated==='boolean'?{authenticated:source.authenticated}:{}),windows:usageWindows(source?.windows),...(cooldowns?{cooldownsKnown:true,cooldowns}:{})}
 }
 function usageFromSources(sources, fallback){
   if(!sources||typeof sources!=='object'||Array.isArray(sources))return null
@@ -2952,6 +3231,28 @@ function selectUsageView(name){
   }
 }
 for(const view of usageViews){const tab=document.getElementById(`tab-${view}`);if(tab)tab.addEventListener('click',()=>selectUsageView(view))}
+const quotaViews=['usage','estimates']
+function selectQuotaView(name){
+  for(const [index,view] of quotaViews.entries()){
+    const panel=document.getElementById(`quota-panel-${view}`),tab=document.getElementById(`quota-tab-${view}`)
+    if(panel){panel.hidden=view!==name;panel.tabIndex=view===name?0:-1}
+    if(tab){tab.setAttribute('aria-selected',String(view===name));tab.tabIndex=view===name?0:-1}
+  }
+}
+for(const [index,view] of quotaViews.entries()){
+  const tab=document.getElementById(`quota-tab-${view}`)
+  if(!tab||typeof tab.addEventListener!=='function')continue
+  tab.addEventListener('click',()=>selectQuotaView(view))
+  tab.addEventListener('keydown',event=>{let next=index
+    if(event.key==='ArrowRight')next=(index+1)%quotaViews.length
+    else if(event.key==='ArrowLeft')next=(index+quotaViews.length-1)%quotaViews.length
+    else if(event.key==='Home')next=0
+    else if(event.key==='End')next=quotaViews.length-1
+    else return
+    event.preventDefault()
+    selectQuotaView(quotaViews[next])
+    document.getElementById(`quota-tab-${quotaViews[next]}`)?.focus?.()})
+}
  const AUTO_REFRESH_MS=30000
 function autoRefresh(){
   if(document.visibilityState!=='visible')return

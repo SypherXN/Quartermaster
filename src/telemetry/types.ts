@@ -1,9 +1,34 @@
+import type { CatalogPrice } from "./prices.ts"
+
 export interface TokenCounts {
   input: number
   output: number
   reasoning: number
   cacheRead: number
   cacheWrite: number
+}
+
+// Frozen at the first durable write. Empty prices means explicitly unpriced at
+// that time; an absent snapshot on an old row means historical-unknown.
+export interface ApiPriceSnapshot {
+  recordedAt: number
+  source: "catalog" | "unavailable"
+  prices: CatalogPrice[]
+}
+
+export interface FrozenApiCost {
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
+  total: number
+  pricedRecords: number
+  unpricedRecords: number
+  partialRecords: number
+  cacheUnpricedRecords: number
+  pricedTokens?: number
+  unpricedTokens?: number
+  unknownTokenRecords?: number
 }
 
 export interface TokenEventContext {
@@ -35,6 +60,8 @@ export interface TokenTelemetryRecord {
   partial: boolean
   // Host USD for this step. Absent on rows stored before the field existed.
   hostCostUSD?: number | null
+  // Frozen API-market price for this model at first write. Never backfilled.
+  apiPrice?: ApiPriceSnapshot
 }
 
 export type TokenEventContextResolver = (
