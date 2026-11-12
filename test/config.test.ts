@@ -1,7 +1,34 @@
 import assert from "node:assert/strict"
 import { readFile } from "node:fs/promises"
 import test from "node:test"
-import { expandPlan, parseConfig } from "../src/config.ts"
+import { expandPlan, isIgnoredProjectDirectory, parseConfig } from "../src/config.ts"
+
+test("ignored directories are validated, default empty, and preserve the typed paths", () => {
+  assert.deepEqual(parseConfig({}).ignoredProjectDirectories, [])
+  const paths = ["C:\\Work\\Ignored\\", "//Server/Share/Folder/", "/home/Me/project//"]
+  assert.deepEqual(parseConfig({ ignoredProjectDirectories: paths }).ignoredProjectDirectories, paths)
+  assert.equal(parseConfig({ ignoredProjectDirectories: Array(200).fill("/" + "a".repeat(1023)) }).ignoredProjectDirectories.length, 200)
+  const adopted = parseConfig({ ignoredProjectDirectories: paths })
+  Object.assign(adopted, parseConfig({}))
+  assert.deepEqual(adopted.ignoredProjectDirectories, [], "removing the option resets adopted configuration")
+  for (const value of [null, "relative", Array(201).fill("/work/project"), [1], [""],
+    ["relative/path"], ["C:relative"], ["\\rooted"], ["/"], ["C:/"], ["//server/share/"],
+    ["//server"], ["/work/../project"], ["/work/./project"], ["/work/*"], ["/work/?"],
+    ["/work/\nproject"], ["/work/\u007fproject"], [" /work/project"], ["/" + "a".repeat(1024)]]) {
+    assert.throws(() => parseConfig({ ignoredProjectDirectories: value }), /ignoredProjectDirectories/)
+  }
+})
+
+test("directory matching is boundary-aware, cross-platform, and reversible", () => {
+  const ignored = ["C:\\Work\\Ignored\\", "\\\\SERVER\\Share\\Folder", "/home/Me/project/"]
+  for (const path of ["c:/work/IGNORED", "C:/work//ignored/child/", "//server/share/folder/child", "/home/Me/project/child"]) {
+    assert.equal(isIgnoredProjectDirectory(path, ignored), true, path)
+    assert.equal(isIgnoredProjectDirectory(path, []), false, path)
+  }
+  for (const path of ["C:/work/ignored-sibling", "//server/share/folder-other", "/home/me/project", "/home/Me/project-other", "/", "relative/path"]) {
+    assert.equal(isIgnoredProjectDirectory(path, ignored), false, path)
+  }
+})
 
 test("example config parses", async () => {
   const input = JSON.parse(await readFile(new URL("../examples/quartermaster.json", import.meta.url), "utf8"))
@@ -177,6 +204,7 @@ test("allows no bindings and accepts custom durations", () => {
     plans: {}, categories: {}, agents: {}, workTypes: {}, usageSources: {}, quotaExemptModels: [], exclusiveModels: [], sharedRateLimits: [],
     probeRateLimits: [], probeIntervalMs: 300_000, probeMaxBackoffMs: 1_800_000,
     providerCooldownMs: 300_000, localHealthTimeoutMs: 2_000, localEndpoints: {}, fetchApiPrices: true,
+    ignoredProjectDirectories: [],
   })
   assert.equal(parseConfig({ providerCooldownMs: 30, localHealthTimeoutMs: 50 }).providerCooldownMs, 30)
 })

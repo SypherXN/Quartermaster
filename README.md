@@ -261,6 +261,22 @@ Pins are validated against the agent's configured plan and enabled model registr
 An agent pin is a preference within automatic routing, not a session opt-out.
 Use `/qm-manual` when the host should control the session's model instead.
 
+### Hide project directories from local usage reports
+
+In **Plans → Settings → Ignored project directories**, enter one absolute
+directory per line, then **Apply changes**. The `ignoredProjectDirectories`
+option defaults to `[]`. Each entry matches that directory and its descendants,
+not similarly named siblings. Windows drive/UNC paths ignore case; POSIX paths
+match case. Globs, relative paths and filesystem roots are not accepted.
+
+This is a reversible local-UI report filter, including Sessions. Collection and
+stored history continue; removing an entry restores visibility. Budgets,
+routing and error counts are unchanged. Direct report RPC callers retain their
+existing caller-supplied project view. Only projects currently listed by the
+host can be matched; use their canonical directory spelling (no symlink
+resolution). User ignores never change the projects retained by **prune unlisted**.
+If settings cannot be read, user exclusions are not applied.
+
 ### Direct-call module profiles
 
 The optional `modules` map defines independent profiles for third-party plugins

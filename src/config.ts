@@ -96,6 +96,8 @@ export interface QuartermasterConfig {
   localEndpoints: Record<string, string>
   /** Allow the quota valuation to fetch first-party API prices from models.dev (default true). */
   fetchApiPrices: boolean
+  /** Directory exclusions for the local dashboard view only; never deletes history. */
+  ignoredProjectDirectories: string[]
 }
 
 const DEFAULTS = {
@@ -536,12 +538,48 @@ function localEndpoints(value: unknown): Record<string, string> {
   }))
 }
 
+// Path shape, not the gateway OS, determines case sensitivity. No filesystem I/O.
+function projectDirectoryKey(value: string): string | undefined {
+  if (!value || value !== value.trim() || value.length > 1024 || /[\u0000-\u001f\u007f-\u009f*?]/.test(value)) return undefined
+  const slashed = value.replace(/\\/g, "/")
+  const drive = /^[a-z]:\//i.test(slashed)
+  const unc = slashed.startsWith("//")
+  if (!drive && !unc && !slashed.startsWith("/")) return undefined
+  // A backslash-rooted Windows path is relative to the current drive.
+  if (!drive && !unc && value.startsWith("\\")) return undefined
+  const parts = slashed.split("/").filter(Boolean)
+  if (parts.some((part) => part === "." || part === "..")) return undefined
+  if (parts.length < (drive ? 2 : unc ? 3 : 1)) return undefined
+  const key = `${unc ? "//" : drive ? "" : "/"}${parts.join("/")}`
+  return drive || unc ? key.toLowerCase() : key
+}
+
+function ignoredDirectories(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length > 200) {
+    throw new Error("ignoredProjectDirectories: expected an array of at most 200 absolute directories")
+  }
+  return value.map((entry, index) => {
+    if (typeof entry !== "string" || projectDirectoryKey(entry) === undefined) {
+      throw new Error(`ignoredProjectDirectories[${index}]: expected an absolute non-root directory, at most 1024 characters, without controls, globs or dot segments`)
+    }
+    return entry
+  })
+}
+
+export function isIgnoredProjectDirectory(directory: string, ignored: readonly string[]): boolean {
+  const key = projectDirectoryKey(directory)
+  return key !== undefined && ignored.some((entry) => {
+    const root = projectDirectoryKey(entry)
+    return root !== undefined && (key === root || key.startsWith(`${root}/`))
+  })
+}
+
 export function parseConfig(input: unknown = {}): QuartermasterConfig {
   const options = record(input, "options")
   const fields = new Set([
     "plans", "categories", "agents", "workTypes", "usageSources", "quotaExemptModels", "exclusiveModels", "sharedRateLimits", "providerCooldownMs",
     "localHealthTimeoutMs", "localEndpoints", "budgets", "tokenRates", "modules", "probeRateLimits", "probeIntervalMs",
-    "probeMaxBackoffMs", "fetchApiPrices",
+    "probeMaxBackoffMs", "fetchApiPrices", "ignoredProjectDirectories",
   ])
   for (const key of Object.keys(options)) {
     if (!fields.has(key)) throw new Error(`options.${key}: unknown field`)
@@ -596,5 +634,6 @@ export function parseConfig(input: unknown = {}): QuartermasterConfig {
     localHealthTimeoutMs: duration(options.localHealthTimeoutMs, "localHealthTimeoutMs", DEFAULTS.localHealthTimeoutMs),
     localEndpoints: local,
     fetchApiPrices,
+    ignoredProjectDirectories: options.ignoredProjectDirectories === undefined ? [] : ignoredDirectories(options.ignoredProjectDirectories),
   }
 }

@@ -18,9 +18,11 @@ button:disabled{cursor:not-allowed;opacity:.45}
 .primary{background:var(--green);color:#fff;border-color:var(--green)}
 .primary:hover:not(:disabled){background:#3e5132}
 a{color:inherit}
-input,select{width:100%;min-width:0;padding:10px 12px;background:#fffdf6;color:var(--ink);border:1px solid #aeb49b;border-radius:1px}
+input,select,textarea{width:100%;min-width:0;padding:10px 12px;background:#fffdf6;color:var(--ink);border:1px solid #aeb49b;border-radius:1px}
 input[type=file]{font-size:12px}
-input::placeholder{color:#6e745e}
+input::placeholder,textarea::placeholder{color:#6e745e}
+.settings-card .field.wide{max-width:560px}
+.settings-card textarea{min-height:112px;resize:vertical;font:12px/1.6 var(--mono)}
 label{display:block;font-weight:650}
 h1,h2,h3,p{margin:0}
 h1{font:700 clamp(34px,4vw,50px)/1.08 Georgia,serif;letter-spacing:-1.7px}
@@ -480,6 +482,7 @@ details.plan[open]>summary{margin-bottom:18px}
     <div class="tab-panel" id="panel-settings" role="tabpanel" aria-labelledby="tab-settings" tabindex="-1" hidden>
     <div class="editor-section"><label for="limits">Settings summary</label><p class="hint">The cooldown floor and the rest of the loaded configuration. Changes here stay in the draft until Apply.</p>
   <div id="limits"></div>
+  <div id="ignored-projects"></div>
   <div id="budget-readings" class="settings-card"></div>
    </div>
    </div>
@@ -2109,6 +2112,17 @@ function normalizeMap(map,label){
   }
   return out
 }
+function normalizeIgnoredDirectories(value){
+  if(!Array.isArray(value))throw Error('Ignored project directories must be a list')
+  if(value.length>200)throw Error('Keep at most 200 ignored project directories')
+  return value.map(entry=>{
+    if(typeof entry!=='string')throw Error('Each ignored project directory must be a path')
+    const text=entry.trim(), slashed=text.replace(/\\/g,'/'), drive=/^[a-z]:\//i.test(slashed), unc=slashed.startsWith('//')
+    const parts=slashed.split('/').filter(Boolean)
+    if(text!==entry||!text||text.length>1024||/[\u0000-\u001f\u007f-\u009f*?]/.test(text)||(!drive&&!unc&&(!slashed.startsWith('/')||text.startsWith('\\')))||parts.some(part=>part==='.'||part==='..')||parts.length<(drive?2:unc?3:1))throw Error(`Ignored project directory needs an absolute directory path without wildcards or . or .. segments: ${text||entry}`)
+    return text
+  })
+}
 function editedOptions(){
   if(!draft)throw Error('Load project options before applying')
   const out=ownCopy(draft)
@@ -2116,6 +2130,7 @@ function editedOptions(){
   out.categories=normalizeCategories(out.categories)
   out.agents=normalizeMap(out.agents,'agent')
   out.workTypes=normalizeMap(out.workTypes,'work type')
+  if(out.ignoredProjectDirectories!==undefined)out.ignoredProjectDirectories=normalizeIgnoredDirectories(out.ignoredProjectDirectories)
   for(const [name,plan] of Object.entries(out.agents))if(!Object.hasOwn(out.plans,plan))throw Error(`Agent ${name} uses a plan that is not listed`)
   for(const [name,plan] of Object.entries(out.workTypes))if(!Object.hasOwn(out.plans,plan))throw Error(`Work type ${name} uses a plan that is not listed`)
   if(out.sharedRateLimits!==undefined){
@@ -2609,7 +2624,7 @@ function renderCategories(){
 }
 function renderBoard(){
   if(typeof document.createElement!=='function'||!draft)return
-  const mounts={pools:document.querySelector('#shared-pools'),probes:document.querySelector('#probes'),plans:document.querySelector('#plans'),categories:document.querySelector('#categories'),modules:document.querySelector('#modules'),agents:document.querySelector('#agents'),limits:document.querySelector('#limits')}
+  const mounts={pools:document.querySelector('#shared-pools'),probes:document.querySelector('#probes'),plans:document.querySelector('#plans'),categories:document.querySelector('#categories'),modules:document.querySelector('#modules'),agents:document.querySelector('#agents'),limits:document.querySelector('#limits'),ignoredProjects:document.querySelector('#ignored-projects')}
    if(Object.values(mounts).some(node=>!node||typeof node.replaceChildren!=='function'))return
    variantRefreshers=[]
   const inPool=pooled(), inProbe=probed()
@@ -2779,6 +2794,12 @@ function renderBoard(){
   ]
   for(const [label,values] of facts)if(values.length)settingsCard.append(h('div',{class:'settings-fact'},h('span',{class:'settings-label',text:label}),h('span',{text:values.join(', ')})))
   mounts.limits.append(settingsCard)
+  const ignoredPaths=Array.isArray(draft.ignoredProjectDirectories)?draft.ignoredProjectDirectories:[]
+  const ignoredInput=h('textarea',{id:'ignored-projects-input',rows:'4',spellcheck:'false',placeholder:'/absolute/path/to/project','aria-describedby':'ignored-projects-hint',value:ignoredPaths.join('\n')})
+  ignoredInput.addEventListener('input',()=>{draft.ignoredProjectDirectories=ignoredInput.value.split(/\r?\n/).map(line=>line.trim()).filter(Boolean)})
+  mounts.ignoredProjects.replaceChildren(h('div',{class:'plan settings-card'},
+    h('label',{class:'field wide',for:'ignored-projects-input'},h('span',{text:'Ignored project directories'}),ignoredInput),
+    h('p',{class:'hint',id:'ignored-projects-hint',text:'Local UI only: hides matching project directories currently listed here, and their descendants, from the usage report, including Sessions. Usage is still recorded and history is kept. Remove an entry to show it again. Budgets, routing and error counts are unchanged. One absolute path per line; Windows paths ignore case, other paths match case. An empty list ignores nothing.'})))
   paintAccess()
 }
 function poolProbeNote(){
@@ -3276,6 +3297,7 @@ async function applyChanges(){
     if(typeof body.path==='string')settingsPath=body.path
     show(saved)
     optionsStatus.textContent='Applied. The current session is unchanged. The next assignment uses these options.'
+    if(dashboardData)void refreshWorkspace(activeRange,true)
   }catch(error){optionsStatus.textContent=error.message||'Could not apply changes.'}
   finally{lockOptions(false);paintAccess()}
 }

@@ -2054,7 +2054,7 @@ export async function buildQuartermasterReport(
     // Full history, not the page range: an earlier compaction or write still
     // decides which later write is the cache rebuild. The summary counts only
     // steps inside the range.
-    sessions: summarizeSessions(allTokens, query, catalog, allWindows, allCompaction, allTime ? legacyLifetime : [], bucketOf),
+    sessions: summarizeSessions(allTokens.filter((record) => !excluded(record.hostProjectID)), query, catalog, allWindows, allCompaction, allTime ? legacyLifetime.filter((row) => !excluded(row.projectID)) : [], bucketOf),
     projects: { complete: false, total: projects.length, apiCosts: finalizeApiCost(projectApiTotal), items: projects },
     dimensions: {
       total: items.length,

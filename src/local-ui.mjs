@@ -3,6 +3,7 @@ import { existsSync } from "node:fs"
 import { readFile } from "node:fs/promises"
 import { Service } from "@opencode/client/service"
 import { applyDiscoveredQuartermasterOptions, readProjectQuartermasterOptions } from "./project-options.ts"
+import { isIgnoredProjectDirectory } from "./config.ts"
 import { spawn, spawnSync } from "node:child_process"
 import { createServer } from "node:http"
 import { connect as connectPort, isIP } from "node:net"
@@ -42,7 +43,14 @@ async function projectView(upstream, upstreamJSON) {
   // Every project the host no longer lists keeps its history under an id nothing
   // can name (deleted checkouts, retired chat directories); one row beats thousands.
   entries.push({ id: "unlisted-projects", name: "Unlisted projects", fallback: true })
-  return entries
+  return { entries, rows }
+}
+
+// User exclusions affect only report input, never the destructive retention view.
+function ignoredProjectView({ entries, rows }, ignored) {
+  const excluded = new Set(rows.filter((row) => typeof row?.canonical === "string" &&
+    isIgnoredProjectDirectory(row.canonical, ignored)).map((row) => row.id))
+  return entries.map((entry) => excluded.has(entry.id) ? { ...entry, exclude: true } : entry)
 }
 
 // The ids that survive the view: everything the host registers that is not a
@@ -338,7 +346,7 @@ export function createLocalUiServer({ openCodeURL, token, resolveEndpoint, proje
     // storage half, and it is only run when asked.
     if (req.method === "POST" && req.url === "/api/prune-unlisted") {
       try {
-        const entries = await projectView(upstream, upstreamJSON)
+        const { entries } = await projectView(upstream, upstreamJSON)
         const result = await rpc("pruneUnlisted", { confirm: "delete-unlisted", projects: retainedProjects(entries) })
         return send(res, 200, { ok: true, ...result })
       } catch (error) {
@@ -352,7 +360,11 @@ export function createLocalUiServer({ openCodeURL, token, resolveEndpoint, proje
         const projectID = await projectIDForDirectory()
         // The plugin cannot see the host's project list, so the view is built here:
         // chat directories fold into one row, the reviewer's isolation sandbox is left out.
-        const projects = await projectView(upstream, upstreamJSON).catch(() => [])
+        const [view, loaded] = await Promise.all([
+          projectView(upstream, upstreamJSON).catch(() => ({ entries: [], rows: [] })),
+          readProjectQuartermasterOptions(directory, readConfiguration).catch(() => null),
+        ])
+        const projects = ignoredProjectView(view, loaded?.config.ignoredProjectDirectories ?? [])
         const [plans, reportResult] = await Promise.all([
           rpc("status", {}).catch(() => null),
           rpc("report", { limit: 100, offset: 0, ...range, projects }).catch(() => null),

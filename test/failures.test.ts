@@ -50,6 +50,32 @@ test("structured retry failures permit only safe transient fallback", () => {
   }
 })
 
+test("Claude's plain five-hour limit cools Sonnet and selects another provider", () => {
+  const sonnet: ModelRef = { providerID: "claude-agent", modelID: "sonnet", variant: "high" }
+  const sol: ModelRef = { providerID: "openai", modelID: "sol" }
+  const models = [sonnet, sol]
+  const available = new Map(models.map((model) => [modelKey(model), { status: "available" as const }]))
+  const message = "You've hit your 5-hour limit · resets 12:30am (America/Chicago)"
+  for (const error of [
+    { message },
+    { type: "provider.unknown", message: message.replace("'", "’") },
+    { response: { body: message } },
+  ]) {
+    const decision = classifyRetryFailure(error, sonnet.providerID, sonnet.modelID)
+    assert.equal(decision.fallback, true)
+    assert.equal(decision.report?.classification, "temporary-rate-limit")
+    const failures = new FailureCooldowns(60_000)
+    assert.equal(failures.reportFailure(decision.report!, 1_000), true)
+    const selection = selectModel(models, models, failures.apply(available, models, 1_001), 1_001)
+    assert.equal(selection.status, "selected")
+    if (selection.status === "selected") assert.deepEqual(selection.model, sol)
+    assert.equal(selection.skipped[0]?.reason.code, "cooldown")
+  }
+  assert.equal(classifyRetryFailure({ message }, "other", "model").report, undefined)
+  assert.equal(classifyRetryFailure({ message: "Discuss the 5-hour limit" }, "claude-agent", "sonnet").report, undefined)
+  assert.equal(classifyRetryFailure({ type: "provider.auth", message }, "claude-agent", "sonnet").fallback, false)
+})
+
 test("model and provider outages affect only their scopes", () => {
   const failures = new FailureCooldowns(100)
   failures.reportFailure({ providerID: "a", modelID: "primary", classification: "model-outage" }, 0)

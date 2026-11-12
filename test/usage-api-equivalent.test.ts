@@ -91,6 +91,7 @@ async function build(input: {
   rollups?: TokenRollup[]
   lifetime?: TokenLifetime[]
   budgets?: readonly TokenBudgetConfig[]
+  now?: () => number
   query?: ReportQuery
   view?: ProjectView
   direct?: { records: unknown[]; rollups: unknown[] }
@@ -113,6 +114,7 @@ async function build(input: {
     errorLedger: { list: async () => [] },
     attributionLedger: { list: async () => input.claims ?? [] },
     budgets: input.budgets,
+    now: input.now,
     tokenRates: input.rates,
     catalog: async () => ({
       prices: input.prices ?? empty,
@@ -329,6 +331,27 @@ test("all-legacy and archived-only reports emit explicit unknown coverage, never
   assert.equal(archivedOnly.apiEquivalent?.legacyUnknownRecords, 2)
   assert.equal(archivedOnly.apiEquivalent?.archivedRecords, 2)
   assert.equal(archivedOnly.apiEquivalent?.scope, "selected-range-with-older-cumulative")
+})
+
+test("session exclusions hide raw and archived usage but preserve budgets and reversible history", async () => {
+  const records = [record("visible", "openai", "model", 10, 0), record("hidden", "openai", "model", 20, 0)]
+  records[1].hostProjectID = "ignored"
+  const archived = lifetime("ignored", 2)
+  archived.hostSessionID = "archived-hidden"
+  const input = { records, lifetime: [archived], now: () => 2_000_000_000_000, budgets: [{ id: "all", dimension: "provider" as const, target: "openai", limitTokens: 100 }] }
+  const visible = await build(input)
+  const hidden = await build({ ...input, view: {
+    names: new Map(), merge: new Map(), exclude: new Set(["ignored"]), known: new Set(), fallback: null,
+  } })
+  assert.equal(hidden.totals.observedTokens, 10)
+  assert.equal(hidden.sessions.items.length, 1)
+  assert.equal(hidden.sessions.items[0].observedTokens, 10)
+  assert.deepEqual(hidden.budgets, visible.budgets)
+  const restored = await build(input)
+  assert.deepEqual(restored.sessions, visible.sessions)
+  assert.deepEqual(restored.totals, visible.totals)
+  assert.equal(records.length, 2)
+  assert.equal(archived.hostSessionID, "archived-hidden")
 })
 
 test("excluded projects are removed from archived totals and dated reports leak no lifetime", async () => {

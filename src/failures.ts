@@ -32,6 +32,7 @@ export interface RetryFailureDecision {
 // The host retries plain rate-limit messages itself, so a provider that reports one only as text
 // (no status, no provider.rate-limit type) must still be recognised here.
 const RATE_LIMIT_TEXT = /rate.?limit|too many requests/i
+const CLAUDE_FIVE_HOUR_LIMIT_TEXT = /\byou['’]ve hit your 5-hour limit\b/i
 
 export function classifyRetryFailure(
   error: { type?: unknown; status?: unknown; message?: unknown; response?: unknown },
@@ -54,7 +55,8 @@ export function classifyRetryFailure(
   if (type === "provider.free-limit" || text.includes("FreeUsageLimitError")) {
     return { fallback: true, report: { providerID, modelID, classification: "temporary-rate-limit" } }
   }
-  if (type === "provider.rate-limit" || status === 429 || RATE_LIMIT_TEXT.test(text)) {
+  if (type === "provider.rate-limit" || status === 429 || RATE_LIMIT_TEXT.test(text) ||
+    (providerID === "claude-agent" && CLAUDE_FIVE_HOUR_LIMIT_TEXT.test(text))) {
     return { fallback: true, report: { providerID, modelID, classification: "temporary-rate-limit" } }
   }
   if (type === "provider.invalid-request" || type === "provider.no-route") {
