@@ -281,3 +281,215 @@ test("removes unattributed compaction rows and keeps attributed ones", async () 
   assert.deepEqual(removed, { compactions: 1, compactionTokens: 840 })
   assert.deepEqual((await ledger.list("project-a")).map((row) => row.hostEventID), ["cmp-known-model"])
 })
+
+const timingEpoch = 2_000_000_000_000
+const timingEvent = (
+  type: string, id: string, ms: number, message: string, data: Record<string, unknown> = {}, session = "s",
+) => ({ type: `session.${type}`, id, created: timingEpoch + ms, data: { sessionID: session, assistantMessageID: message, ...data } })
+const timingStart = (id: string, ms: number, message: string, overrides = {}, session?: string) =>
+  timingEvent("step.started", id, ms, message, {
+    model: { providerID: "p", id: id, variant: "fast" }, started: timingEpoch + ms, ...overrides,
+  }, session)
+const timingEnd = (id: string, ms: number, message: string, overrides = {}, session?: string) =>
+  timingEvent("step.ended", id, ms, message, {
+    finish: "stop", tokens: { input: 3, output: 32 }, ...overrides,
+  }, session)
+const timingDelta = (id: string, ms: number, message: string, delta = "discard-this-text", session?: string) =>
+  timingEvent("text.delta", id, ms, message, { delta, ordinal: 0 }, session)
+
+async function collectTimings(items: readonly unknown[]) {
+  const storage = new MemoryStorage()
+  const ledger = new TokenLedger(storage)
+  await consumeTokenEvents({
+    event: {} as never,
+    storage,
+    session: {
+      get: async () => ({ projectID: "project" }) as never,
+      context: async () => [{ type: "assistant", id: "missing", model: { providerID: "p", id: "fallback" } }] as never,
+    },
+  }, ledger, events(items), new AbortController().signal)
+  const rows = await ledger.list()
+  assert.doesNotMatch(JSON.stringify([...storage.values.values()]), /discard-this-text/)
+  return Object.fromEntries(rows.map((row) => [row.hostEventID, row]))
+}
+
+test("captures independent step rate and first nonempty visible delta per live model", async () => {
+  const a = timingStart("start-a", 1, "a", { started: timingEpoch }, "left")
+  const end = timingEnd("end-a", 1_000, "a", {}, "left")
+  const rows = await collectTimings([
+    a, a,
+    timingStart("start-b", 2, "b", {}, "right"),
+    timingEvent("reasoning.delta", "reason", 4, "a", { delta: "discard-this-text" }, "left"),
+    timingDelta("empty", 5, "a", "", "left"),
+    timingDelta("first", 32, "a", undefined, "left"),
+    timingDelta("second", 64, "a", undefined, "left"),
+    timingEvent("step.streamed", "boundary", 500, "a", {}, "left"),
+    timingEvent("step.streamed", "boundary-b", 500, "b", {}, "right"),
+    timingEnd("end-b", 1_002, "b", { tokens: { input: 3, output: 0 } }, "right"),
+    end, end,
+    timingStart("start-c", 1_010, "a", {}, "left"),
+    end, // replay must not steal the pending start
+    timingDelta("actual-zero", 1_010, "a", undefined, "left"),
+    timingEnd("end-c", 1_030, "a", { tokens: undefined }, "left"),
+  ])
+  assert.deepEqual(rows["end-a"].performance, {
+    providerID: "p", modelID: "start-a", variant: "fast",
+    // 32 tokens over dispatch -> streamed (500 ms), not the later 1,000 ms terminal.
+    histogram: { version: 1, outputTokensPerSecond: { 6144: 1 }, observedTtftMs: { 32: 1 } },
+  })
+  assert.deepEqual(rows["end-b"].performance?.histogram, { version: 1, outputTokensPerSecond: { 0: 1 } })
+  assert.equal(rows["end-c"].modelID, "start-c")
+  assert.deepEqual(rows["end-c"].performance?.histogram, { version: 1, observedTtftMs: { 0: 1 } })
+  assert.equal(rows["end-c"].usageStatus, "missing")
+})
+
+test("timing rejects missing, failed, ambiguous, reversed, or incompatible boundaries without changing usage", async () => {
+  const rows = await collectTimings([
+    timingDelta("orphan", 1, "missing"),
+    timingEnd("no-start", 100, "missing"),
+    timingStart("overlap-a", 2, "overlap"), timingStart("overlap-b", 3, "overlap"),
+    timingDelta("ambiguous", 4, "overlap"),
+    timingEnd("overlap-end-a", 100, "overlap"), timingEnd("overlap-end-b", 101, "overlap"),
+    timingStart("valid-again", 102, "overlap"), timingDelta("recovered-text", 110, "overlap"), timingEnd("recovered", 1_102, "overlap"),
+    timingStart("fails", 10, "fails"), timingDelta("failed-text", 12, "fails"),
+    timingEvent("step.failed", "failed", 40, "fails"),
+    timingStart("filtered", 10, "filtered"), timingEnd("filtered-end", 90, "filtered", { finish: "content-filter" }),
+    timingStart("retry", 11, "retry"), timingEvent("retry.scheduled", "retry-mark", 12, "retry"),
+    timingEnd("retry-end", 90, "retry"),
+    timingStart("clock", 15, "clock", { started: Math.floor(timingEpoch / 1_000) }),
+    timingEnd("wrong-clock", 40, "clock"),
+    timingStart("start-late", 90, "reversed"), timingEnd("reversed-ends", 80, "reversed"),
+    timingStart("out-of-order", 30, "order"), timingDelta("seen-later", 60, "order"), timingDelta("seen-earlier", 40, "order"),
+    timingEvent("step.streamed", "streamed-order", 500, "order"),
+    timingEnd("delta-out-of-order", 1_030, "order"),
+    timingDelta("before-start-envelope", 42, "prestart"),
+    timingStart("delayed-start", 44, "prestart", { started: timingEpoch + 40 }),
+    timingDelta("after-start-envelope", 50, "prestart"),
+    timingEvent("step.streamed", "streamed-prestart", 500, "prestart"),
+    timingEnd("text-may-belong-to-step", 1_040, "prestart"),
+  ])
+  for (const id of ["no-start", "overlap-end-a", "overlap-end-b", "failed", "filtered-end", "retry-end", "wrong-clock", "reversed-ends"]) {
+    assert.equal(rows[id].performance, undefined, id)
+  }
+  assert.equal(rows["no-start"].modelID, "fallback")
+  assert.equal(rows["overlap-end-a"].modelID, "overlap-a")
+  assert.equal(rows["overlap-end-b"].counts?.output, 32)
+  assert.equal(rows.recovered.performance?.modelID, "valid-again")
+  assert.deepEqual(rows["delta-out-of-order"].performance?.histogram, { version: 1, outputTokensPerSecond: { 6656: 1 } })
+  assert.deepEqual(rows["text-may-belong-to-step"].performance?.histogram, { version: 1, outputTokensPerSecond: { 6656: 1 } })
+})
+
+test("live timing uses session and message identity independently from token fallback", async () => {
+  const rows = await collectTimings([
+    timingEnd("no-start", 20, "missing"),
+    timingStart("next-observed", 30, "missing"),
+    timingDelta("resumed-text", 38, "missing"),
+    timingEnd("resumed", 1_030, "missing"),
+    timingStart("left-model", 40, "same-message", {}, "left"),
+    timingStart("right-model", 40, "same-message", {}, "right"),
+    timingDelta("left-text", 48, "same-message", undefined, "left"),
+    timingDelta("right-text", 56, "same-message", undefined, "right"),
+    timingEnd("right-end", 1_040, "same-message", {}, "right"),
+    timingEnd("left-end", 1_040, "same-message", {}, "left"),
+  ])
+  assert.equal(rows.resumed.modelID, "fallback")
+  assert.equal(rows.resumed.performance?.modelID, "next-observed")
+  assert.equal(rows["right-end"].performance?.modelID, "right-model")
+  assert.deepEqual(rows["right-end"].performance?.histogram.observedTtftMs, { 16: 1 })
+  assert.equal(rows["left-end"].performance?.modelID, "left-model")
+  assert.deepEqual(rows["left-end"].performance?.histogram.observedTtftMs, { 8: 1 })
+})
+
+test("effective rate ends at the provider response-body boundary, not tool settlement", async () => {
+  const rows = await collectTimings([
+    timingStart("late-start", 0, "late", { started: timingEpoch }),
+    timingDelta("late-text", 8, "late"),
+    timingEvent("step.streamed", "late-streamed", 1_000, "late"),
+    // A tool ran for four more seconds before the step settled.
+    timingEnd("late-end", 5_000, "late", { finish: "tool-calls" }),
+    timingStart("bare-start", 6_000, "bare", { started: timingEpoch + 6_000 }),
+    timingDelta("bare-text", 6_016, "bare"),
+    timingEnd("bare-end", 7_000, "bare"),
+    timingStart("zero-start", 8_000, "zero", { started: timingEpoch + 8_000 }),
+    timingEvent("step.streamed", "zero-streamed", 8_500, "zero"),
+    timingEnd("zero-end", 9_000, "zero", { tokens: { input: 3, output: 0 } }),
+    timingStart("twice-start", 10_000, "twice", { started: timingEpoch + 10_000 }),
+    timingEvent("step.streamed", "twice-a", 10_500, "twice"),
+    timingEvent("step.streamed", "twice-b", 10_600, "twice"),
+    timingEnd("twice-end", 11_000, "twice"),
+    timingStart("same-ms-start", 12_000, "same", { started: timingEpoch + 12_000 }),
+    timingEvent("step.streamed", "same-ms-streamed", 12_000, "same"),
+    timingEnd("same-ms-end", 13_000, "same"),
+  ])
+  // 32 tokens / 1 s, not 32 / 5 s.
+  assert.deepEqual(rows["late-end"].performance?.histogram, {
+    version: 1, outputTokensPerSecond: { 3072: 1 }, observedTtftMs: { 8: 1 },
+  })
+  // No streamed boundary: the full-step wall time is never substituted.
+  assert.deepEqual(rows["bare-end"].performance?.histogram, { version: 1, observedTtftMs: { 16: 1 } })
+  assert.deepEqual(rows["zero-end"].performance?.histogram, { version: 1, outputTokensPerSecond: { 0: 1 } })
+  assert.equal(rows["twice-end"].performance, undefined)
+  assert.equal(rows["same-ms-end"].performance, undefined)
+  assert.equal(rows["bare-end"].counts?.output, 32)
+})
+
+test("more than 2,000 unterminated or interrupted steps never disable later timing", async () => {
+  const abandoned: unknown[] = []
+  for (let i = 0; i < 2_100; i++) abandoned.push(timingStart(`open-${i}`, i, `open-${i}`, {}, "crashed"))
+  const interrupted: unknown[] = []
+  for (let i = 0; i < 2_100; i++) interrupted.push(timingStart(`cut-${i}`, 3_000 + i, `cut-${i}`, {}, "cancelled"))
+  const rows = await collectTimings([
+    ...abandoned,
+    // The first unresolved step was evicted: a later start on its message is not timed,
+    // and its late terminal cannot pair with anything.
+    timingStart("reuse", 2_500, "open-0", {}, "crashed"),
+    timingDelta("reuse-text", 2_510, "open-0", undefined, "crashed"),
+    timingEnd("reuse-end", 3_500, "open-0", {}, "crashed"),
+    ...interrupted,
+    timingEvent("execution.interrupted", "interrupt", 5_500, "none", { reason: "user" }, "cancelled"),
+    // A retry on a message whose earlier attempt left no terminal is skipped, then recovers.
+    timingStart("retry-a", 6_000, "r", {}, "fresh"),
+    timingEvent("retry.scheduled", "retry-mark", 6_010, "r", {}, "fresh"),
+    timingStart("retry-b", 6_020, "r", {}, "fresh"),
+    timingDelta("retry-b-text", 6_030, "r", undefined, "fresh"),
+    timingEnd("retry-b-end", 7_000, "r", {}, "fresh"),
+    timingStart("retry-c", 7_100, "r", {}, "fresh"),
+    timingDelta("retry-c-text", 7_108, "r", undefined, "fresh"),
+    timingEnd("retry-c-end", 8_000, "r", {}, "fresh"),
+    // After many abandoned steps a fresh message still gets a full sample.
+    timingStart("healthy", 8_100, "healthy", {}, "fresh"),
+    timingDelta("healthy-text", 8_116, "healthy", undefined, "fresh"),
+    timingEvent("step.streamed", "healthy-streamed", 8_600, "healthy", {}, "fresh"),
+    timingEnd("healthy-end", 9_100, "healthy", {}, "fresh"),
+    // Replaying that terminal changes nothing.
+    timingEnd("healthy-end", 9_100, "healthy", {}, "fresh"),
+  ])
+  assert.equal(rows["reuse-end"].performance, undefined)
+  assert.equal(rows["retry-b-end"].performance, undefined)
+  assert.deepEqual(rows["retry-c-end"].performance?.histogram, { version: 1, observedTtftMs: { 8: 1 } })
+  assert.equal(rows["healthy-end"].performance?.modelID, "healthy")
+  assert.deepEqual(rows["healthy-end"].performance?.histogram, {
+    version: 1, outputTokensPerSecond: { 6144: 1 }, observedTtftMs: { 16: 1 },
+  })
+})
+
+test("an interruption drops open steps and a stale terminal cannot clear the next start", async () => {
+  const rows = await collectTimings([
+    timingStart("cut-1", 10, "x", {}, "cancelled"),
+    timingDelta("abandoned-text", 12, "x", undefined, "cancelled"),
+    timingEvent("execution.interrupted", "stop", 20, "x", { reason: "user" }, "cancelled"),
+    // Text from the abandoned step that surfaces after the interruption is not reused.
+    timingDelta("late-abandoned", 22, "x", undefined, "cancelled"),
+    timingStart("next", 30, "x", {}, "cancelled"),
+    // The abandoned step's terminal is older than the new start.
+    timingEnd("stale-end", 15, "x", {}, "cancelled"),
+    timingDelta("next-text", 40, "x", undefined, "cancelled"),
+    timingEvent("step.streamed", "next-streamed", 530, "x", {}, "cancelled"),
+    timingEnd("next-end", 1_030, "x", {}, "cancelled"),
+  ])
+  assert.equal(rows["stale-end"].performance, undefined)
+  assert.equal(rows["next-end"].performance?.modelID, "next")
+  // dispatch -> first text is 10 ms; the abandoned 12 ms and 22 ms deltas never count.
+  assert.deepEqual(rows["next-end"].performance?.histogram.observedTtftMs, { 10: 1 })
+  assert.deepEqual(rows["next-end"].performance?.histogram.outputTokensPerSecond, { 6144: 1 })
+})

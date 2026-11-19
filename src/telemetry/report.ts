@@ -11,6 +11,7 @@ import { directUsageApiCost, type DirectUsageLedger, type DirectUsageLifetime, t
 import type { WindowLedger, WindowRecord } from "./window.ts"
 import type { TokenTelemetryRecord, FrozenApiCost } from "./types.ts"
 import { sessionKey } from "./session-key.ts"
+import { addPerformance, summarizePerformance, type ModelPerformance, type PerformanceHistogram } from "./performance.ts"
 
 export const REPORT_MAX_PAGE_SIZE = 100
 export const REPORT_MAX_OFFSET = 10_000
@@ -45,6 +46,8 @@ export interface UsageDimension {
   costs: ComponentCost | null
   // Frozen API cost for this provider; null when no record was priceable.
   apiCosts?: ApiComponentCost | null
+  // Named host model rows only; no evidence is null with zero samples.
+  performance?: ModelPerformance
 }
 
 export interface PluginUsageDimension {
@@ -1708,13 +1711,14 @@ export async function buildQuartermasterReport(
   ])
   const allTokens = ledgerRows.records
   const legacyRollups = ledgerRows.rollups
-  const legacyLifetime = ledgerRows.lifetime
+  const lifetime = allTime ? ledgerRows.lifetime.filter((row) => !excluded(row.projectID)) : []
+  const archivedUsage = lifetime.filter((row) => row.records > 0)
   const prices = catalog?.prices
   // A lifetime row is one combination. Presenting it as a day rollup with a
   // single slice lets every existing fold treat both history shapes alike.
   const rollups: TokenRollup[] = (allTime ? [
     ...legacyRollups,
-    ...legacyLifetime.map((row: TokenLifetime) => ({
+    ...archivedUsage.map((row: TokenLifetime) => ({
       projectID: row.projectID,
       day: 0,
       records: row.records,
@@ -1748,6 +1752,7 @@ export async function buildQuartermasterReport(
   const direct = directUsageRows.records.filter((record) => inRange(record.reportedAt, query) && !excluded(record.projectID))
   const compaction = allCompaction.filter((record) => inRange(record.completedAt, query) && !excluded(record.projectID))
   const dimensions = new Map<string, UsageDimension>()
+  const modelPerformance = new Map<string, PerformanceHistogram>()
   const providerApi = new Map<string, ApiCostAggregate>()
   let observedTokens = 0
   let unknownTokenRecords = 0
@@ -1763,6 +1768,14 @@ export async function buildQuartermasterReport(
     const item = dimensions.get(key) ?? blankDimension(dimension, value)
     dimensions.set(key, item)
     return item
+  }
+  const addModelPerformance = (providerID: string, modelID: string, histogram: PerformanceHistogram) => {
+    const key = `${providerID}/${modelID}`
+    const total = modelPerformance.get(key) ?? { version: 1 as const }
+    addPerformance(total, histogram)
+    modelPerformance.set(key, total)
+    // A timed model can differ from the accounting model after a replay.
+    place("model", key)
   }
   let processed = 0
   // Project ids change when the host re-registers a directory, so usage is
@@ -1831,6 +1844,11 @@ export async function buildQuartermasterReport(
     else providerCost.legacy += 1
     providerApi.set(providerKey, providerCost)
     for (const [dimension, target] of targets) absorbDimension(place(dimension, target), (total) => absorbRecord(total, record))
+    const timing = record.performance
+    if (timing) addModelPerformance(timing.providerID, timing.modelID, timing.histogram)
+  }
+  for (const row of lifetime) {
+    if (row.performance && row.providerID && row.modelID) addModelPerformance(row.providerID, row.modelID, row.performance)
   }
   const archivedSlices = hostSlices(rollups)
   const archivedSplit = blankTotal()
@@ -1872,8 +1890,7 @@ export async function buildQuartermasterReport(
   }
   const addNumber = (sum: number, value: number) => Number.isFinite(sum + value) ? sum + value : sum
   if (allTime) {
-    for (const row of legacyLifetime) {
-      if (excluded(row.projectID)) continue
+    for (const row of archivedUsage) {
       archived.records += row.records
       const unknown = row.apiUnknownRecords ?? (row.apiRecords === undefined ? row.records : 0)
       archived.legacyUnknown += unknown
@@ -1957,7 +1974,7 @@ export async function buildQuartermasterReport(
     source: "catalog" as const,
     rates: [],
   }]
-  const hasArchive = allTime && (legacyLifetime.some((row) => !excluded(row.projectID)) ||
+  const hasArchive = allTime && (archivedUsage.length > 0 ||
     legacyRollups.some((rollup) => !excluded(rollup.projectID)))
   const showApiEquivalent = tokens.length > 0 || hasArchive
   const apiScope: ApiEquivalentCosts["scope"] = allTime
@@ -1988,6 +2005,7 @@ export async function buildQuartermasterReport(
     item.cacheHitRate = hitRate(item)
     // Component costs for a model row, so the page can price each part of the split.
     if (item.dimension === "model" && item.value) {
+      item.performance = summarizePerformance(modelPerformance.get(item.value))
       item.costs = componentCosts.get(item.value) ?? null
       const apiCost = apiComponentCosts.get(item.value)
       item.apiCosts = apiCost && apiCost.pricedRecords > 0 ? apiCost : null
@@ -2054,7 +2072,7 @@ export async function buildQuartermasterReport(
     // Full history, not the page range: an earlier compaction or write still
     // decides which later write is the cache rebuild. The summary counts only
     // steps inside the range.
-    sessions: summarizeSessions(allTokens.filter((record) => !excluded(record.hostProjectID)), query, catalog, allWindows, allCompaction, allTime ? legacyLifetime.filter((row) => !excluded(row.projectID)) : [], bucketOf),
+    sessions: summarizeSessions(allTokens.filter((record) => !excluded(record.hostProjectID)), query, catalog, allWindows, allCompaction, archivedUsage, bucketOf),
     projects: { complete: false, total: projects.length, apiCosts: finalizeApiCost(projectApiTotal), items: projects },
     dimensions: {
       total: items.length,

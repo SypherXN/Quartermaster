@@ -126,13 +126,15 @@ export async function consumeTokenEvents(
 
       // Pair the step with its own start event; when that was missed (the plugin
       // subscribed mid-step) the host message still names the model.
-      const model = claims.claim(candidate.hostEventID, candidate.hostMessageID) ?? messageModel
+      const claim = claims.claimTerminal(candidate.hostEventID, candidate.hostMessageID, event)
+      const model = claim.model ?? messageModel
       const record = projectTokenEvents([event], () => ({
         ...context,
         agentID,
         ...(model ? { model: { providerID: model.providerID, modelID: model.modelID, ...(model.variant === null ? {} : { variant: model.variant }) } } : {}),
       }))[0]
       if (!record) continue
+      if (claim.performance) record.performance = claim.performance
       try {
         await ledger.ingest(record)
       } catch {

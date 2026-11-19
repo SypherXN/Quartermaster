@@ -45,9 +45,9 @@ plugin restarts, within its retention limits.
 - Count a complete step token object once. Failed steps without counts remain
   `counts: null` and `usageStatus: "missing"`.
 - Ignore streamed events, retry markers, message updates, and session
-  aggregates. A retry marker is not a provider response. `session.step.started`
-  is observed only to pair that step's own model with its terminal event; it
-  never becomes a record.
+  aggregates for token accounting. A retry marker is not a provider response.
+  `session.step.started` supplies the step model and dispatch timestamp, but
+  never becomes a usage row.
 - Keep `session.compaction.ended` and `session.compaction.failed` out of step
   records. Their own token object is stored in a separate compaction ledger and
   grouped by the model on that event. Those tokens are not added to observed
@@ -58,13 +58,12 @@ plugin restarts, within its retention limits.
 - Step-ended carries no model reference, but `session.step.started` names the
   model for that same step. `src/telemetry/step-model.ts` keeps the start events
   per assistant message and pairs them in order with the terminal events, so a
-  step's provider/model/variant come from its own start event. A session's last
-  model, a message's final model, and a configured plan are still not evidence
-  and are never substituted. An unpaired terminal step keeps null model fields.
-  The collector also looks up the exact assistant message by matching
-  `assistantMessageID` to `SessionMessageInfo.id` and retains only its `agent`
-  ID, never its content. If that message is absent from active context, agent
-  attribution stays unknown.
+  step's provider/model/variant come from its own start event. If the start
+  was missed, the exact assistant message's own model is a fallback for usage
+  only, not timing. A session's last model and configured plans are not
+  substituted. The exact assistant message is identified by matching
+  `assistantMessageID` to `SessionMessageInfo.id`; it can also supply the agent
+  ID. Its content is never kept in the token ledger.
 - Provider is a first-class token reporting dimension, not a fallback inferred
   from the model name. Each token record carries `providerID`; it is `null`
   whenever the exact provider for that step cannot be established.
@@ -112,6 +111,68 @@ without a guaranteed revision ordering, and pruning is not a cross-key atomic
 snapshot. The collector does not claim stronger cross-instance serialization.
 The ledger is internal plugin storage; project reports are exposed only through
 the plugin's V2 RPC.
+
+## Observed model performance
+
+Timing uses only live step evidence in the locked 2.0.23 schema. The dispatch
+boundary is `session.step.started.data.started`; latency ends at the envelope
+`created` of the first observed nonempty `session.text.delta`. This is observed
+time to first visible text (TTFT), not provider-internal first token latency.
+Reasoning, empty text, and the replayable full-text event do not count. The
+collector retains no delta text. Whole host-reported output tokens divided by
+the positive time from dispatch to the provider response-body boundary
+(`session.step.streamed`) yield **effective output tok/s**. Tool settlement
+after that boundary is excluded, but request startup, queueing, and any
+reasoning before or during the body are included, so it is not provider decode
+speed. A step with no valid `streamed` boundary (missing, repeated with a
+different time, out of order, or at the dispatch instant) contributes no rate;
+the full-step wall time is never substituted. A verified zero output with a valid
+boundary is a measured zero. The rate and TTFT samples can be missing
+independently.
+
+Samples require a unique observed start/terminal pair for the same session and
+assistant message, ordered epoch-millisecond timestamps, and a terminal finish
+of `stop`, `length`, or `tool-calls`. Overlaps, incompatible clocks, and known
+failed/retried/interrupted steps do not contribute; an out-of-order or missing
+text observation does not erase otherwise valid output rate. In-memory timing
+correlation is bounded at 2,000 unresolved and 2,000 settled session/message
+pairs. An interrupted or failed execution drops its open steps. A retry marker
+drops the open step and skips the next start on that message. When more than
+2,000 steps are unresolved, the least recently touched one is evicted and its
+message is remembered as lost: a later start there is not timed, because the
+evicted step's terminal could still arrive. Eviction costs only those samples,
+never the subscription or token collection. A terminal stamped earlier than the
+current start or the last settled terminal is treated as stale: it neither pairs
+with nor clears the current start. There is no backfill or additional
+inference. Timing and its live model identity freeze on first durable write
+and are not filled in or changed by a replay even if usage attribution changes.
+
+Remaining ambiguity: the schema gives no step ID on text, streamed, or terminal
+events, so pairing relies on session/message identity and timestamp order. A
+leftover terminal from an abandoned step that is stamped after a later start on
+the same message cannot be told apart from that start's terminal, and text from
+an abandoned step stamped after the new start can count as its text. These
+cases are rare and are skipped when detected, not corrected.
+
+Named host model rows (`report.dimensions.items`, `dimension: "model"`) add
+`performance` with `medianOutputTokensPerSecond`,
+`outputTokensPerSecondSamples`, `medianObservedTtftMs`, `p95ObservedTtftMs`, and
+`observedTtftSamples`. Metrics with no samples are `null`, with a sample count
+of `0`. This follows the existing provider/model grouping across variants and
+included projects. Direct calls, compactions, and historical rows without live
+timing produce no samples. If a replay moves all usage for a timed model to
+another model, the original model can have samples but no usage records.
+
+The version-1 sparse histogram stores per-step samples in the terminal row and
+merges bucket counts into the existing lifetime fold journal and tombstone
+flow. All-time reports merge retained and folded counts before selecting
+approximate nearest-rank quantiles; time-filtered reports only use retained
+rows. Each histogram has up to 177 bins: exact below 16 units (milliseconds
+or hundredths of a token/second), eight buckets per doubling thereafter,
+and a separate measured-zero bucket. Estimates are bucket lower edges.
+Values above 16,777,216 ms or 167,772.16 tok/s (after converting to hundredths)
+have no sample. Positive rates that round below one hundredth use the first
+positive bucket.
 
 ## Provider error observations
 

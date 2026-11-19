@@ -4,6 +4,7 @@ import type { Schema } from "effect"
 import type { TokenTelemetryRecord, ApiPriceSnapshot, FrozenApiCost } from "./types.ts"
 import type { CatalogPrice } from "./prices.ts"
 import { frozenApiCost } from "./costs.ts"
+import { addPerformance, asPerformanceHistogram, type PerformanceHistogram } from "./performance.ts"
 
 const PREFIX = "quartermaster:telemetry:v1:"
 // Read-only: daily rollups written before lifetime rows existed.
@@ -61,6 +62,9 @@ export interface TokenLifetime extends TokenRollupSlice {
   apiCost?: FrozenApiCost
   apiRecords?: number
   apiUnknownRecords?: number
+  // Keyed to the model observed live. A later replay can revise usage to a
+  // different model, leaving this row with timing but no accounting records.
+  performance?: PerformanceHistogram
 }
 
 const sliceIdentity = (item: Pick<TokenRollupSlice, "agentID" | "providerID" | "modelID" | "variant">) =>
@@ -250,6 +254,8 @@ function asLifetime(value: unknown): TokenLifetime | undefined {
   if (apiRecords !== undefined && apiRecords > 0 && apiCost === undefined) return undefined
   if (apiCost !== undefined && apiRecords === undefined) return undefined
   if (apiCost !== undefined && apiCost.pricedRecords + apiCost.unpricedRecords !== (apiRecords as number)) return undefined
+  const performance = slice.providerID && slice.modelID
+    ? asPerformanceHistogram((value as { performance?: unknown }).performance) : undefined
   return {
     projectID: projectID as string | null,
     hostSessionID: (session.hostSessionID as string | null | undefined) ?? null,
@@ -258,6 +264,7 @@ function asLifetime(value: unknown): TokenLifetime | undefined {
     ...(apiCost === undefined ? {} : { apiCost }),
     ...(apiRecords === undefined ? {} : { apiRecords: apiRecords as number }),
     ...(apiUnknownRecords === undefined ? {} : { apiUnknownRecords: apiUnknownRecords as number }),
+    ...(performance === undefined ? {} : { performance }),
   }
 }
 
@@ -416,6 +423,10 @@ function asRecord(value: unknown): TokenTelemetryRecord | undefined {
   const hostCost = typeof hostCostUSD === "number" && Number.isFinite(hostCostUSD) && hostCostUSD >= 0 ? hostCostUSD : null
   const apiPrice = record.apiPrice === undefined ? undefined : asApiPrice(record.apiPrice)
   if (record.apiPrice !== undefined && apiPrice === undefined) return undefined
+  const timing = record.performance
+  const histogram = typeof timing === "object" && timing !== null && typeof timing.providerID === "string" &&
+    timing.providerID.length > 0 && typeof timing.modelID === "string" && timing.modelID.length > 0 &&
+    nullableString(timing.variant) ? asPerformanceHistogram(timing.histogram, 1) : undefined
 
   // Rebuild the whitelist so even a malformed stored value cannot export extra fields.
   return {
@@ -442,6 +453,7 @@ function asRecord(value: unknown): TokenTelemetryRecord | undefined {
     partial: partial ?? false,
     hostCostUSD: hostCost,
     ...(apiPrice === undefined ? {} : { apiPrice }),
+    ...(histogram && timing ? { performance: { providerID: timing.providerID, modelID: timing.modelID, variant: timing.variant, histogram } } : {}),
   }
 }
 
@@ -533,15 +545,22 @@ export class TokenLedger {
       if ((await this.storage.get(tombstoneKey(record.hostEventID))) !== undefined) return
       const existingValue = await this.storage.get(key)
       let apiPrice: ApiPriceSnapshot | undefined
+      let performance: TokenTelemetryRecord["performance"]
       if (existingValue !== undefined) {
         const existing = asRecord(existingValue)
         if (!existing) throw new Error("Malformed token record")
         apiPrice = existing.apiPrice
+        performance = existing.performance
       } else {
         apiPrice = supplied ?? await this.captureApiPrice(record)
+        performance = record.performance
       }
-      const { apiPrice: _incoming, ...plain } = record
-      await this.storage.set(key, (apiPrice === undefined ? plain : { ...plain, apiPrice }) as unknown as Schema.Json)
+      const { apiPrice: _incoming, performance: _timing, ...plain } = record
+      await this.storage.set(key, {
+        ...plain,
+        ...(apiPrice === undefined ? {} : { apiPrice }),
+        ...(performance === undefined ? {} : { performance }),
+      } as unknown as Schema.Json)
       await this.pruneLocked()
     })
   }
@@ -786,40 +805,51 @@ export class TokenLedger {
   // that leaves the raw window lands here; it is never written twice, and the
   // session id is kept so the sessions ledger can still name it.
   private async foldLifetime(records: readonly TokenTelemetryRecord[]): Promise<void> {
-    for (let offset = 0; offset < records.length; offset += FOLD_BATCH) {
-      const batch = records.slice(offset, offset + FOLD_BATCH)
-      if (!batch.length) continue
-      const existing = new Map<string, TokenLifetime>()
-      for (const record of batch) {
-        const session = {
-          hostSessionID: record.hostSessionID.length > 0 ? record.hostSessionID : null,
-          parentSessionID: record.parentSessionID,
-        }
-        const key = lifetimeKey(record.hostProjectID, { ...identityOf(record), ...session })
-        if (existing.has(key)) continue
-        const stored = await this.storage.get(key)
-        if (stored === undefined) continue
-        const row = asLifetime(stored)
-        if (!row || lifetimeKey(row.projectID, row) !== key) throw new Error("Malformed token lifetime row")
-        existing.set(key, row)
+    for (let offset = 0; offset < records.length;) {
+      const batch: TokenTelemetryRecord[] = []
+      let slots = FOLD_BATCH
+      while (offset < records.length && slots >= 1) {
+        const record = records[offset]!
+        const timing = record.performance
+        const separateModel = timing && (timing.providerID !== record.providerID ||
+          timing.modelID !== record.modelID || timing.variant !== record.variant)
+        const needed = separateModel ? 2 : 1
+        if (slots < needed) break
+        batch.push(record)
+        slots -= needed
+        offset += 1
       }
-      const touched = new Set<string>()
-      for (const record of batch) {
+      const targets = new Map<string, TokenLifetime>()
+      const targetFor = async (record: TokenTelemetryRecord, model: Pick<TokenRollupSlice, "providerID" | "modelID" | "variant">): Promise<TokenLifetime> => {
         const session = {
           hostSessionID: record.hostSessionID.length > 0 ? record.hostSessionID : null,
           parentSessionID: record.parentSessionID,
         }
-        const key = lifetimeKey(record.hostProjectID, { ...identityOf(record), ...session })
-        const row = existing.get(key) ?? { projectID: record.hostProjectID, ...session, ...emptySlice(record) }
+        const key = lifetimeKey(record.hostProjectID, { agentID: record.hostAgentID, ...model, ...session })
+        const pending = targets.get(key)
+        if (pending) return pending
+        const stored = await this.storage.get(key)
+        const row = stored === undefined
+          ? { projectID: record.hostProjectID, ...session, ...emptySlice(record), ...model }
+          : asLifetime(stored)
+        if (!row || lifetimeKey(row.projectID, row) !== key) throw new Error("Malformed token lifetime row")
+        targets.set(key, row)
+        return row
+      }
+      for (const record of batch) {
+        const row = await targetFor(record, identityOf(record))
         addFrozenApiCost(row, record)
         addToSlice(row, record)
-        existing.set(key, row)
-        touched.add(key)
+        const performance = record.performance
+        if (performance) {
+          const { histogram, ...model } = performance
+          const timing = await targetFor(record, model)
+          addPerformance(timing.performance ??= { version: 1 }, histogram)
+        }
       }
-      const targets = [...touched].map((key) => ({ key, row: existing.get(key)! }))
       const journal: FoldJournal = {
         version: 1,
-        targets,
+        targets: [...targets].map(([key, row]) => ({ key, row })),
         rawKeys: batch.map((record) => keyFor(record.hostEventID)),
         tombstones: batch.map((record) => record.hostEventID),
       }

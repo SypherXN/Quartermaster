@@ -1,4 +1,5 @@
 import type { CatalogPrice } from "./prices.ts"
+import type { StepPerformance } from "./performance.ts"
 
 export interface TokenCounts {
   input: number
@@ -62,6 +63,8 @@ export interface TokenTelemetryRecord {
   hostCostUSD?: number | null
   // Frozen API-market price for this model at first write. Never backfilled.
   apiPrice?: ApiPriceSnapshot
+  // Frozen live timing, independent of token attribution revised on replay.
+  performance?: StepPerformance
 }
 
 export type TokenEventContextResolver = (

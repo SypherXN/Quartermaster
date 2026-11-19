@@ -2,6 +2,7 @@ import assert from "node:assert/strict"
 import test from "node:test"
 import type { StorageDomain } from "@opencode/plugin/promise/storage"
 import { TokenLedger } from "../../src/telemetry/ledger.ts"
+import { performanceSample } from "../../src/telemetry/performance.ts"
 import { buildQuartermasterReport } from "../../src/telemetry/report.ts"
 import type { CatalogPrice } from "../../src/telemetry/prices.ts"
 import type { TokenTelemetryRecord } from "../../src/telemetry/types.ts"
@@ -51,6 +52,99 @@ function record(id: string, at: number, input = 1_000_000, output = 0): TokenTel
     usageStatus: "reported", partial: false,
   }
 }
+
+test("model timing keeps sample weights across expiry, interrupted fold, and replay", async () => {
+  const storage = new MemoryStorage()
+  let clock = 2_000_000_000_000
+  const options = { now: () => clock, retentionMs: DAY }
+  const open = () => new TokenLedger(storage as unknown as StorageDomain, options)
+  const first = open()
+  const timed = (id: string, hostSessionID: string, rate: number, ttft: number): TokenTelemetryRecord => ({
+    ...record(id, clock - 10), hostSessionID,
+    performance: {
+      providerID: "openai", modelID: "gpt-6-luna", variant: null, histogram: performanceSample(rate, ttft)!,
+    },
+  })
+  const once = timed("once", "small-session", 10.24, 8)
+  const many = [64, 64, 64, 128].map((ttft, n) => timed(`many-${n}`, "large-session", 81.92, ttft))
+  const ignored = { ...timed("ignored", "ignored-session", 1, 999), hostProjectID: "ignore" }
+  const missing = { ...record("legacy", clock - 10), modelID: "legacy" }
+  for (const step of [once, ...many, ignored, missing]) await first.ingest(step)
+  // Normal token revisions continue; timing stays with the observed model.
+  await first.ingest({ ...once, modelID: "fallback", performance: undefined, counts: { ...once.counts!, output: 5 } })
+  // A replay can't enrich a first durable write that had no timing.
+  await first.ingest({ ...missing, performance: once.performance })
+  const original = await first.list()
+  assert.equal(original.find((row) => row.hostEventID === "once")?.counts?.output, 5)
+  assert.deepEqual(original.find((row) => row.hostEventID === "once")?.performance, once.performance)
+  const report = (tokenLedger: TokenLedger, since?: number) => buildQuartermasterReport({
+    projectID: "project-a", tokenLedger, errorLedger: { list: async () => [] }, attributionLedger: { list: async () => [] },
+    budgets: undefined, tokenRates: undefined, now: () => clock,
+  }, { since, limit: 100, offset: 0 }, false, {
+    names: new Map(), merge: new Map(), exclude: new Set(["ignore"]), known: new Set(), fallback: null,
+  })
+  const outputs = (value: Awaited<ReturnType<typeof report>>) => Object.fromEntries(value.dimensions.items
+    .filter((row) => row.dimension === "model")
+    .map((row) => [row.value, [row.records, row.performance]]))
+  const before = await report(first)
+  const empty = {
+    medianOutputTokensPerSecond: null, outputTokensPerSecondSamples: 0,
+    medianObservedTtftMs: null, p95ObservedTtftMs: null, observedTtftSamples: 0,
+  }
+  assert.deepEqual(outputs(before), {
+    "openai/fallback": [1, empty], "openai/legacy": [1, empty],
+    "openai/gpt-6-luna": [4, {
+      medianOutputTokensPerSecond: 81.92, outputTokensPerSecondSamples: 5,
+      medianObservedTtftMs: 64, p95ObservedTtftMs: 128, observedTtftSamples: 5,
+    }],
+  })
+  assert.equal(before.dimensions.items.find((row) => row.dimension === "provider")?.performance, undefined)
+  assert.equal(before.totals.records, 6)
+
+  clock += DAY + 1
+  storage.failSetAfter = (key) => key.startsWith("quartermaster:telemetry:tombstone:v1:")
+  await assert.rejects(first.snapshot(), /set ack lost/)
+  storage.failSetAfter = undefined
+  const resumed = open()
+  await resumed.ingest(once) // recovery reapplies absolute targets, then tombstone blocks replay
+  const after = await report(resumed)
+  assert.equal(after.totals.records, before.totals.records)
+  assert.equal(after.archived.records, 6)
+  assert.deepEqual(outputs(after), outputs(before))
+  assert.deepEqual(outputs(await report(resumed, 0)), {})
+  assert.equal((await resumed.listLifetime()).find((row) => row.hostSessionID === "small-session" && row.performance)?.records, 0)
+  await resumed.ingest(timed("fresh", "fresh-session", 10.24, 256))
+  assert.equal((await report(resumed)).dimensions.items.find((row) => row.value === "openai/gpt-6-luna")?.performance?.observedTtftSamples, 6)
+  assert.deepEqual(outputs(await report(resumed, 0)), {
+    "openai/gpt-6-luna": [1, {
+      medianOutputTokensPerSecond: 10.24, outputTokensPerSecondSamples: 1,
+      medianObservedTtftMs: 256, p95ObservedTtftMs: 256, observedTtftSamples: 1,
+    }],
+  })
+})
+
+test("malformed timing cannot invalidate raw usage or a journaled lifetime target", async () => {
+  const storage = new MemoryStorage()
+  let clock = 100
+  const options = { now: () => clock, retentionMs: 50 }
+  const ledger = new TokenLedger(storage as unknown as StorageDomain, options)
+  const row = { ...record("timed", 100), performance: {
+    providerID: "openai", modelID: "gpt-6-luna", variant: null, histogram: { version: 1, observedTtftMs: { 0: 2 } },
+  } } satisfies TokenTelemetryRecord
+  await ledger.ingest(row)
+  assert.equal((await ledger.list())[0]?.performance, undefined)
+  const journalKey = "quartermaster:telemetry:fold-journal:v1"
+  clock += DAY
+  storage.failSet = (key) => key.startsWith("quartermaster:telemetry:lifetime:v1:")
+  await assert.rejects(ledger.snapshot(), /set failed/)
+  storage.failSet = undefined
+  const journal = storage.values.get(journalKey) as { targets: { row: { performance?: unknown } }[] }
+  journal.targets[0].row.performance = { version: 1, outputTokensPerSecond: { 1: -1 }, observedTtftMs: { 3: "not-a-count" } }
+  const recovered = await ledger.snapshot()
+  assert.equal(recovered.records.length, 0)
+  assert.equal(recovered.lifetime[0]?.observedTokens, 1_000_000)
+  assert.equal(recovered.lifetime[0]?.performance, undefined)
+})
 
 test("freezes the first API price across a family upgrade, duplicates and restart", async () => {
   const storage = new MemoryStorage()

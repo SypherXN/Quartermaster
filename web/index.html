@@ -645,6 +645,7 @@ function paintOverview(){
     // Model rows carry value "provider/model"; agents and plugins are already folded in.
   function modelDimensions(){return (currentReport?.dimensions?.items||[]).filter(item=>item.dimension==='model')}
   const modelLabel=item=>item.value||'Unknown model'
+  const timingOnly=item=>item.records===0&&(item.performance?.outputTokensPerSecondSamples>0||item.performance?.observedTtftSamples>0)
   function paintModels(){
     const report=currentReport
     const all=[...modelDimensions()].sort((a,b)=>(b.observedTokens||0)-(a.observedTokens||0))
@@ -654,25 +655,34 @@ function paintOverview(){
     // Sum the ranged rows so share, the KPI and the footer agree under any range.
     const total=all.reduce((sum,item)=>sum+(item.observedTokens||0),0)
     const unknown=total-rows.reduce((sum,item)=>sum+(item.observedTokens||0),0)
-    const top=rows[0]
+    const usageRows=rows.filter(item=>!timingOnly(item))
+    const top=usageRows[0]
     const share=item=>total>0&&item.observedTokens?Math.round(item.observedTokens/total*100):null
     mount('#models-stats',
-      stat('Models in use',rows.length?number(rows.length):'—','Distinct provider/model combinations',true),
+      stat('Models in use',usageRows.length?number(usageRows.length):'—','Distinct provider/model combinations',true),
       stat('Observed tokens',report?number(total):'—',`Input + output · ${RANGES[activeRange].label}`),
       stat('Top model',top?modelLabel(top):'—',top&&share(top)!==null?`${share(top)}% of observed tokens`:'Share unknown'))
     if(!rows.length){mount('#models-table',empty('No model data yet.','Refresh the workspace to read the ledger.'));return}
-    const cols=[['Model',''],['Steps','num'],['Tokens','num'],['Share','num'],['Cache hit','num'],['Host cost','num'],['API equiv.','num']]
+    const cols=[['Model',''],['Steps','num'],['Tokens','num'],['Share','num'],['Cache hit','num'],['Host cost','num'],['API equiv.','num'],['Median effective tok/s','num'],['Rate samples','num'],['Median first output','num'],['P95 first output','num'],['First output samples','num']]
     const body=rows.flatMap(item=>{
       const key=String(item.value), name=modelLabel(item), open=expandedModels.has(key)
+      const perf=item.performance
+      const samples=value=>known(value)&&value>=0?number(value):'—'
+      const metric=(value,count,unit)=>known(value)&&value>=0&&known(count)&&count>0?`${value.toLocaleString(undefined,{maximumFractionDigits:2})} ${unit}`:'—'
       const toggle=()=>{if(expandedModels.has(key))expandedModels.delete(key);else expandedModels.add(key);paintModels()}
       const line=h('tr',{class:'project-row'+(open?' row-open':''),tabindex:'0',role:'button','aria-expanded':String(open),onclick:toggle,onkeydown:event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();toggle()}}},
-        h('td',{class:'mono',title:name},h('span',{class:'caret','aria-hidden':'true',text:open?'▾':'▸'}),h('span',{text:name})),
+        h('td',{class:'mono',title:name},h('span',{class:'caret','aria-hidden':'true',text:open?'▾':'▸'}),h('span',{text:name}),...(timingOnly(item)?[h('span',{class:'badge neutral',text:'timing only'})]:[])),
         h('td',{class:'num',text:number(item.records)}),
         h('td',{class:'num',text:number(item.observedTokens)}),
         h('td',{class:'num',text:share(item)===null?'—':`${share(item)}%`}),
         h('td',{class:'num',text:known(item.cacheHitRate)?`${Math.round(item.cacheHitRate*100)}%`:'—'}),
         h('td',{class:'num',text:typeof item.hostCostUSD==='number'?`${item.hostCostUSD.toFixed(2)} USD`:'—'}),
-        h('td',{class:'num',text:apiCostText(item)}))
+        h('td',{class:'num',text:apiCostText(item)}),
+        h('td',{class:'num',text:metric(perf?.medianOutputTokensPerSecond,perf?.outputTokensPerSecondSamples,'tok/s')}),
+        h('td',{class:'num',text:samples(perf?.outputTokensPerSecondSamples)}),
+        h('td',{class:'num',text:metric(perf?.medianObservedTtftMs,perf?.observedTtftSamples,'ms')}),
+        h('td',{class:'num',text:metric(perf?.p95ObservedTtftMs,perf?.observedTtftSamples,'ms')}),
+        h('td',{class:'num',text:samples(perf?.observedTtftSamples)}))
       if(!open)return [line]
       // The split the ledger recorded for this model: what was read, what was written,
       // and what was spent thinking. Missing counters stay '—' rather than becoming 0.
@@ -699,7 +709,7 @@ function paintOverview(){
        return [line,h('tr',{class:'project-detail-row'},h('td',{colspan:String(cols.length)},detail,...(apiCostCoverage(item)?[h('p',{class:'hint',text:apiCostCoverage(item)})]:[])))]
     })
     mount('#models-table',h('div',{class:'ledger-wrap'},h('table',{class:'ledger'},
-      h('caption',{class:'hint',text:`Observed tokens by provider and model over ${RANGES[activeRange].label}, highest first. Expand a row for its input, output, cache and reasoning split. A share of observed tokens is not a share of provider quota. API equivalent prices each recorded step at the API price recorded for it — new records freeze their price when recorded and a missing price stays unknown; no historical backfill. Informational, not a bill, distinct from the host cost.`}),
+      h('caption',{class:'hint',text:`Observed tokens by provider and model over ${RANGES[activeRange].label}, highest first. Expand a row for its input, output, cache and reasoning split. Effective output rate uses host-observed time from dispatch to the end of the provider response body. It includes startup and stream transport, excludes tool settlement, and is not pure decode speed. A missing boundary means no rate. Time to first visible output is observed by the host, not an exact provider measurement. Medians and P95 are approximate; sample counts are independent. A dash means unknown. A share of observed tokens is not a share of provider quota. API equivalent prices each recorded step at the API price recorded for it — new records freeze their price when recorded and a missing price stays unknown; no historical backfill. Informational, not a bill, distinct from the host cost.`}),
       h('thead',{},h('tr',{},...cols.map(([label,cls])=>h('th',{scope:'col',class:cls,text:label})))),
       h('tbody',{},...body))))
     const attention=document.querySelector('#models-attention')
@@ -849,7 +859,7 @@ function paintOverview(){
   const modelsOf=item=>{
    const prefix=typeof item.value==='string'&&item.value?`${item.value}/`:null
    if(!prefix)return []
-   return (currentReport?.dimensions?.items||[]).filter(entry=>entry.dimension==='model'&&typeof entry.value==='string'&&entry.value.startsWith(prefix))
+   return (currentReport?.dimensions?.items||[]).filter(entry=>entry.dimension==='model'&&typeof entry.value==='string'&&entry.value.startsWith(prefix)&&!timingOnly(entry))
   }
   const cols=[['Provider',''],['Steps','num'],['Tokens','num'],['Share','num'],['Cache hit','num'],['Host cost','num'],['API equiv.','num'],['Errors','num'],['Error types',''],['Statuses','']]
   const body=all.flatMap(item=>{
