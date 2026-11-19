@@ -100,6 +100,11 @@ export class QuotaEstimates {
     for (const [rawSourceID, source] of Object.entries(usage.snapshot.sources)) {
       if (!source) continue
       const sourceID = rawSourceID as UsageSourceID
+      if (source.checkedAt === null) {
+        // No observation is not evidence that the account or its windows vanished.
+        for (const key of this.series.keys()) if (key.startsWith(`${sourceID}::`)) seen.add(key)
+        continue
+      }
       if (!source.authenticated || source.error !== null) {
         changed = this.dropSource(sourceID) || changed
         continue

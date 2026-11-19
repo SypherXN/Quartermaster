@@ -16,12 +16,13 @@ test("gateway forwards well-formed quota estimates and drops malformed ones with
       demo: {
         sourceID: "codex",
         authenticated: true,
-        checkedAt: 123,
+        checkedAt: 1_200_123,
         stale: false,
         availability: "available",
         nextAvailableAt: null,
         windows: [
           { name: "weekly", usedPercent: 50, state: "ok", resetsAt: 12_345, resetEstimated: true,
+            instanceAnchorAt: 1_200_000,
             apiValue: { currency: "USD", basis: "api-equivalent-not-billed", observedUSD: 12.5,
               projectedFullUSD: 250, projectionStatus: "estimated", reason: null,
               trackingSince: 123, observedAt: 1_200_123, spanMs: 1_200_000, quotaDeltaPercent: 10,
@@ -76,6 +77,12 @@ test("gateway forwards well-formed quota estimates and drops malformed ones with
               projectedFullUSD: null, projectionStatus: "unavailable", reason: "API prices unavailable",
               trackingSince: 123, observedAt: 1_200_123.5, spanMs: 1_200_000.5, quotaDeltaPercent: 10,
               records: 0, pricedRecords: 0, unpricedRecords: 0, partialRecords: 0, complete: false } },
+          // A valid value at the wrong observation clock, and an anchor after it, are stripped.
+          { name: "bad-api-clock", usedPercent: 35, state: "ok", resetsAt: null, instanceAnchorAt: 1_200_124,
+            apiValue: { currency: "USD", basis: "api-equivalent-not-billed", observedUSD: 12.5,
+              projectedFullUSD: 250, projectionStatus: "estimated", reason: null,
+              trackingSince: 122, observedAt: 1_200_122, spanMs: 1_200_000, quotaDeltaPercent: 10,
+              records: 4, pricedRecords: 4, unpricedRecords: 0, partialRecords: 0, complete: false } },
         ],
       },
     },
@@ -118,6 +125,7 @@ test("gateway forwards well-formed quota estimates and drops malformed ones with
     trackingSince: 123, observedAt: 1_200_123, spanMs: 1_200_000, quotaDeltaPercent: 10,
     records: 4, pricedRecords: 4, unpricedRecords: 0, partialRecords: 0, complete: false,
   })
+  assert.equal(windows[0].instanceAnchorAt, 1_200_000)
   // A contradictory api value is dropped; the window itself stays.
   assert.equal(windows[1].apiValue, undefined)
   assert.deepEqual(windows[2].apiValue, {
@@ -140,5 +148,9 @@ test("gateway forwards well-formed quota estimates and drops malformed ones with
     assert.equal(windows[index].usedPercent, 30)
     assert.equal(windows[index].estimate, undefined)
   }
+  // A mismatched observation clock and a future anchor are stripped; the window stays.
+  assert.equal(windows[13].usedPercent, 35)
+  assert.equal(windows[13].apiValue, undefined)
+  assert.equal(windows[13].instanceAnchorAt, undefined)
   assert.equal(JSON.stringify(dashboard).includes(secret), false)
 })

@@ -126,7 +126,11 @@ test("qm-status labels unbound, missing plan, missing catalog and unavailable me
     assert.equal(unbound.session.binding, "unbound")
     assert.equal(unbound.recommendation.status, "no-plan")
     delete fixture.config.plans.review
-    assert.equal((await fixture.diagnose()).session.binding, "missing-plan")
+    const missing = await fixture.diagnose()
+    assert.equal(missing.session.binding, "missing-plan")
+    assert.deepEqual(missing.session.plan, { id: "review", candidates: [] })
+    assert.equal(missing.recommendation.status, "no-plan")
+    assert.deepEqual(missing.recommendation.skipped, [])
     fixture.config.plans.review = [{ providerID: "missing", modelID: "not-enabled" }]
     assert.equal((await fixture.diagnose()).recommendation.skipped[0].code, "not-in-registry")
     fixture.sessions.set("foreign", { projectID: "different-project", agent: "private-agent", model: { providerID: "private", id: "secret-model" } })

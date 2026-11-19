@@ -10,6 +10,7 @@ import {
   VALUE_REASON_LIMIT,
   VALUE_REASON_NO_PRICES,
   VALUE_REASON_NON_USD,
+  VALUE_REASON_RESTARTED,
   VALUE_REASON_STALE,
   VALUE_REASON_TOKENS,
   type QuotaApiValue,
@@ -447,6 +448,27 @@ test("mapping, pricing and record-limit changes reanchor with an explicit warnin
   assert.equal(overflowValue?.apiValue.trackingSince, t0 + 20 * MIN)
 })
 
+test("a token-rate change for an unmapped provider does not reanchor another source", async () => {
+  const { tracker, prices, config } = await anchored()
+  await advance(tracker, prices, t0 + 10 * MIN, 25)
+  ;(config.tokenRates ??= []).push({
+    providerID: "claude", modelID: "m", inputPerMillion: 5, outputPerMillion: 5,
+    currency: "USD", source: "test", asOf: 1,
+  })
+  const unaffected = await tracker.prepare(usage(t0 + 20 * MIN, 30), t0 + 20 * MIN, prices)
+  const unaffectedValue = unaffected?.valueFor("codex", "weekly", t0 + 20 * MIN)
+  unaffectedValue?.commit()
+  assert.notEqual(unaffectedValue?.apiValue.reason, VALUE_REASON_BASIS, "an unrelated provider's rate cannot reanchor this source")
+  assert.equal(unaffectedValue?.apiValue.trackingSince, t0)
+
+  config.tokenRates[0] = { ...config.tokenRates[0], inputPerMillion: 11 }
+  const repriced = await tracker.prepare(usage(t0 + 30 * MIN, 32), t0 + 30 * MIN, prices)
+  const repricedValue = repriced?.valueFor("codex", "weekly", t0 + 30 * MIN)
+  repricedValue?.commit()
+  assert.equal(repricedValue?.apiValue.reason, VALUE_REASON_BASIS, "the mapped provider's own rate still reanchors")
+  assert.equal(repricedValue?.apiValue.trackingSince, t0 + 30 * MIN)
+})
+
 test("saves a real reset after a gap or stale read from the frozen previous value and allocates no gap work", async () => {
   const gap = await anchored()
   gap.tracker.addTokenRecord(tokenRecord("e1", t0 + 5 * MIN, 1_000_000, 0))
@@ -855,4 +877,251 @@ test("prices opencode jev-1.13 from the opencode host catalog and freezes that s
   const repriced = quotaPricesFromModels(models.map((model) => ({ ...model, cost: [catalogRow(40, 80)] })))
   assert.equal(repriced.get("opencode/jev-1.13")?.[0].input, 40)
   assert.equal(frozenApiCost(record)?.total, frozen?.total)
+})
+
+const window5h7d = (at: number): UsageWindow[] => [
+  { name: "5h", usedPercent: 0, state: "ok", resetsAt: at + 5 * 60 * MIN },
+  { name: "7d", usedPercent: 47, state: "ok", resetsAt: at + 7 * 24 * 60 * MIN },
+]
+
+test("a configured source with no mapped records still gets a value, and an unconfigured source is never valued", async () => {
+  const config = parseConfig({ usageSources: { "claude-agent": "claude-agent" } })
+  const tracker = new QuotaValueTracker(config)
+  // An unmapped provider's work belongs to no tracked source and must not count.
+  tracker.addTokenRecord(tokenRecord("other", t0 + MIN, 1_000_000, 0, { providerID: "anthropic", modelID: "opus" }))
+  const plan = await tracker.prepare(usage(t0, 0, { sourceID: "claude-agent", windows: window5h7d(t0) }), t0, new Map())
+  const five = plan?.valueFor("claude-agent", "5h", t0)
+  const seven = plan?.valueFor("claude-agent", "7d", t0)
+  five?.commit()
+  seven?.commit()
+  assert.ok(five && seven, "every reported window of a configured source is valued")
+  assert.equal(five.apiValue.records, 0)
+  assert.equal(five.apiValue.observedUSD, null)
+  assert.equal(tracker.latestValue("claude-agent", "5h")?.observedAt, t0)
+  assert.equal(tracker.latestValue("claude-agent", "7d")?.observedAt, t0)
+  // The codex source is not in usageSources, so it is not tracked at all.
+  assert.equal(plan?.valueFor("codex", "weekly", t0), undefined)
+})
+
+test("a real zero rate is a priced zero, an all-zero catalog row stays unpriced, and a sub-cent amount stays positive", async () => {
+  const zeroRate = parseConfig({
+    usageSources: { openai: "codex" },
+    tokenRates: [{ providerID: "openai", modelID: "m", inputPerMillion: 0, outputPerMillion: 0, currency: "USD", source: "test", asOf: 1 }],
+  })
+  const zero = await anchored(zeroRate)
+  zero.tracker.addTokenRecord(tokenRecord("z1", t0 + 5 * MIN, 1_000_000, 1_000_000))
+  await advance(zero.tracker, zero.prices, t0 + 10 * MIN, 25)
+  const priced = await valueAt(zero.tracker, t0 + 20 * MIN, 30, zero.prices)
+  assert.equal(priced?.observedUSD, 0)
+  assert.equal(priced?.pricedRecords, 1)
+  assert.equal(priced?.unpricedRecords, 0)
+
+  const config = parseConfig({ usageSources: { openai: "codex" } })
+  const marker = new Map([["openai/m", [
+    { tierSize: null, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheReadKnown: true, cacheWriteKnown: true },
+  ]]]) as PriceTable
+  const unpriced = await anchored(config, marker)
+  unpriced.tracker.addTokenRecord(tokenRecord("z2", t0 + 5 * MIN, 1_000_000, 1_000_000))
+  await advance(unpriced.tracker, marker, t0 + 10 * MIN, 25)
+  const none = await valueAt(unpriced.tracker, t0 + 20 * MIN, 30, marker)
+  assert.equal(none?.observedUSD, null)
+  assert.equal(none?.pricedRecords, 0)
+  assert.equal(none?.unpricedRecords, 1)
+  assert.equal(none?.reason, VALUE_REASON_NO_PRICES)
+
+  // A cheap real call is a positive sub-cent dollar amount, never a rounded-away zero.
+  const cheap = new Map([["openai/m", [
+    { tierSize: null, input: 0.05, output: 0.2, cacheRead: 0.01, cacheWrite: 0.01, cacheReadKnown: true, cacheWriteKnown: true },
+  ]]]) as PriceTable
+  const small = await anchored(config, cheap)
+  small.tracker.addTokenRecord(tokenRecord("z3", t0 + 5 * MIN, 2_000, 500))
+  await advance(small.tracker, cheap, t0 + 10 * MIN, 25)
+  const tiny = await valueAt(small.tracker, t0 + 20 * MIN, 30, cheap)
+  assert.ok((tiny?.observedUSD ?? 0) > 0 && (tiny?.observedUSD ?? 1) < 0.005)
+  assert.equal(tiny?.pricedRecords, 1)
+})
+
+test("steady five-minute observations carry the anchor past the projection gate", async () => {
+  const { tracker, prices } = await anchored()
+  tracker.addTokenRecord(tokenRecord("s1", t0 + 2 * MIN, 1_000_000, 0))
+  let last: QuotaApiValue | undefined
+  const seen: string[] = []
+  for (let minute = 5; minute <= 20; minute += 5) {
+    last = await advance(tracker, prices, t0 + minute * MIN, 20 + minute / 5)
+    seen.push(`${minute}:${last?.projectionStatus}`)
+    assert.equal(last?.trackingSince, t0, "a steady cadence never reanchors")
+  }
+  assert.deepEqual(seen, ["5:unavailable", "10:unavailable", "15:estimated", "20:estimated"])
+  assert.equal(last?.spanMs, 20 * MIN)
+  assert.equal(last?.projectedFullUSD, 10 * 100 / 4)
+})
+
+test("re-reading the same observation clock replays the committed value without drift", async () => {
+  const { tracker, prices } = await anchored()
+  tracker.addTokenRecord(tokenRecord("d1", t0 + 2 * MIN, 1_000_000, 0))
+  const first = await tracker.prepare(usage(t0 + 10 * MIN, 25), t0 + 10 * MIN, prices)
+  const committed = first?.valueFor("codex", "weekly", t0 + 10 * MIN)
+  committed?.commit()
+  // A late-persisted record that completed inside the span must not rewrite a value already published.
+  tracker.addTokenRecord(tokenRecord("d2", t0 + 5 * MIN, 1_000_000, 0))
+  const again = await tracker.prepare(usage(t0 + 10 * MIN, 25), t0 + 10 * MIN + 30_000, prices)
+  const replay = again?.valueFor("codex", "weekly", t0 + 10 * MIN)
+  assert.deepEqual(replay?.apiValue, committed?.apiValue)
+  assert.equal(replay?.apiValueSnapshots.length, 0)
+  replay?.commit()
+  assert.deepEqual(tracker.latestValue("codex", "weekly"), committed?.apiValue)
+})
+
+test("a restart seed does not anchor a span, so work completed before the buffer was live cannot bias the projection low", async () => {
+  const prices: PriceTable = new Map()
+  // The cached quota clock t0 predates this process, so the explicit seed is
+  // uncorroborated: work completed between t0 and process start is in the ledger
+  // but never reaches the live-fed buffer.
+  const restarted = new QuotaValueTracker(rateConfig())
+  const processStart = t0 + 3 * MIN
+  restarted.addTokenRecord(tokenRecord("after-start", t0 + 4 * MIN, 1_000_000, 0))
+  const seedPlan = await restarted.prepare(usage(t0, 20), processStart, prices)
+  const seeded = seedPlan?.valueFor("codex", "weekly", t0, { seed: true })
+  assert.equal(seeded?.apiValue.reason, VALUE_REASON_RESTARTED)
+  assert.equal(seeded?.apiValue.projectedFullUSD, null)
+  seeded?.commit()
+  assert.deepEqual(restarted.latestValue("codex", "weekly"), seeded?.apiValue)
+
+  // Re-reading the cached clock replays the seed and must not consume the pending restart.
+  const replayPlan = await restarted.prepare(usage(t0, 20), processStart + MIN, prices)
+  const replay = replayPlan?.valueFor("codex", "weekly", t0)
+  assert.deepEqual(replay?.apiValue, seeded?.apiValue)
+  replay?.commit()
+
+  // The seed was committed unanchored, so the next fresh observation re-anchors
+  // instead of projecting from a span whose start the buffer cannot vouch for.
+  // (The "after-start" record above was already pruned by the first prepare, so
+  // this test pins the marker and re-anchor, not a would-be $100 projection; the
+  // startedAt test below exercises the actual low-projection bias.)
+  const next = await valueAt(restarted, t0 + 15 * MIN, 30, prices)
+  assert.equal(next?.projectionStatus, "unavailable")
+  assert.equal(next?.projectedFullUSD, null)
+  assert.equal(next?.reason, VALUE_REASON_RESTARTED)
+  assert.equal(next?.trackingSince, t0 + 15 * MIN)
+
+  // The following observations anchor on the live buffer and project normally.
+  restarted.addTokenRecord(tokenRecord("after-anchor", t0 + 20 * MIN, 1_000_000, 0))
+  await valueAt(restarted, t0 + 25 * MIN, 35, prices)
+  const settled = await valueAt(restarted, t0 + 35 * MIN, 40, prices)
+  assert.equal(settled?.projectionStatus, "estimated")
+  assert.equal(settled?.trackingSince, t0 + 15 * MIN)
+  assert.equal(settled?.observedUSD, 10)
+  assert.equal(settled?.projectedFullUSD, 100)
+})
+
+test("a first new-clock observation older than process start is uncorroborated without a seed flag", async () => {
+  const prices: PriceTable = new Map()
+  const processStart = t0 + 3 * MIN
+  // Same sequence for both trackers: the first observation (t0 + 1m) predates
+  // process start; the live buffer only receives work after start.
+  const run = async (tracker: QuotaValueTracker) => {
+    // First prepare runs with an empty states map and prunes the buffer.
+    const first = await valueAt(tracker, t0 + MIN, 20, prices)
+    // Work that completed before start is missing; only this later record is live.
+    tracker.addTokenRecord(tokenRecord("live", t0 + 4 * MIN, 1_000_000, 0))
+    const second = await valueAt(tracker, t0 + 16 * MIN, 30, prices)
+    return { first, second }
+  }
+
+  // Without a start clock the span anchors at t0 + 1m and pairs the full 10% delta
+  // with only the partial record set, projecting the allowance low ($100).
+  const naive = await run(new QuotaValueTracker(rateConfig()))
+  assert.notEqual(naive.first?.reason, VALUE_REASON_RESTARTED)
+  assert.equal(naive.second?.projectionStatus, "estimated")
+  assert.equal(naive.second?.projectedFullUSD, 100)
+
+  const restarted = await run(new QuotaValueTracker(rateConfig(), processStart))
+  assert.equal(restarted.first?.reason, VALUE_REASON_RESTARTED)
+  assert.equal(restarted.first?.projectedFullUSD, null)
+  assert.equal(restarted.second?.projectionStatus, "unavailable")
+  assert.equal(restarted.second?.projectedFullUSD, null)
+  assert.equal(restarted.second?.reason, VALUE_REASON_RESTARTED)
+  assert.equal(restarted.second?.trackingSince, t0 + 16 * MIN)
+})
+
+test("a default-constructed tracker never marks a first observation as restarted", async () => {
+  const tracker = new QuotaValueTracker(rateConfig())
+  const first = await valueAt(tracker, t0 - 60 * MIN, 20)
+  assert.notEqual(first?.reason, VALUE_REASON_RESTARTED)
+  assert.equal(first?.trackingSince, t0 - 60 * MIN)
+
+  // A first observation at or after the supplied start clock is not marked either.
+  const live = new QuotaValueTracker(rateConfig(), t0)
+  const fresh = await valueAt(live, t0, 20)
+  assert.notEqual(fresh?.reason, VALUE_REASON_RESTARTED)
+})
+
+test("a price change for one source does not reanchor another source's windows", async () => {
+  const config = parseConfig({ usageSources: { openai: "codex", "opencode-go": "go" } })
+  const both = (at: number, percent: number): UsageReadResult => {
+    const source = (usedPercent: number): UsageSource => ({
+      authenticated: true, checkedAt: at, stale: false, error: null, nextAvailableAt: null, availability: "available",
+      windows: [{ name: "weekly", usedPercent, state: "ok", resetsAt: null }],
+    })
+    return { status: "ok", snapshot: { updatedAt: at, sources: {
+      go: source(percent), codex: source(percent),
+      cursor: { authenticated: true, checkedAt: at, stale: false, error: null, windows: [], nextAvailableAt: null, availability: "available" },
+    } } }
+  }
+  const row = (input: number) => [{ tierSize: null, input, output: input, cacheRead: 0, cacheWrite: 0, cacheReadKnown: true, cacheWriteKnown: true }]
+  const before = new Map([["openai/m", row(1)], ["opencode-go/m", row(1)]]) as PriceTable
+  const after = new Map([["openai/m", row(1)], ["opencode-go/m", row(2)]]) as PriceTable
+  const tracker = new QuotaValueTracker(config)
+  const observe = async (at: number, percent: number, prices: PriceTable) => {
+    const plan = await tracker.prepare(both(at, percent), at, prices)
+    const go = plan?.valueFor("go", "weekly", at)
+    const codex = plan?.valueFor("codex", "weekly", at)
+    go?.commit()
+    codex?.commit()
+    return { go: go?.apiValue, codex: codex?.apiValue }
+  }
+  await observe(t0, 20, before)
+  await observe(t0 + 5 * MIN, 22, before)
+  const changed = await observe(t0 + 10 * MIN, 24, after)
+  assert.equal(changed.go?.reason, VALUE_REASON_BASIS)
+  assert.equal(changed.go?.trackingSince, t0 + 10 * MIN)
+  assert.equal(changed.codex?.trackingSince, t0, "the unchanged source keeps its anchor")
+  assert.notEqual(changed.codex?.reason, VALUE_REASON_BASIS)
+})
+
+test("a recorded boundary closes the frozen segment and reanchors even when the percentage rebounds", async () => {
+  const { tracker, prices } = await anchored()
+  tracker.addTokenRecord(tokenRecord("e1", t0 + 5 * MIN, 1_000_000, 500_000))
+  await advance(tracker, prices, t0 + 10 * MIN, 25)
+  await advance(tracker, prices, t0 + 20 * MIN, 30)
+  const frozen = tracker.latestValue("codex", "weekly")
+  assert.equal(frozen?.observedUSD, 20)
+
+  tracker.addTokenRecord(tokenRecord("e2", t0 + 25 * MIN, 2_000_000, 0))
+  const plan = await tracker.prepare(usage(t0 + 30 * MIN, 40), t0 + 30 * MIN, prices)
+  // Without the option a rising percentage is the same segment.
+  const same = plan?.valueFor("codex", "weekly", t0 + 30 * MIN)
+  assert.equal(same?.apiValueSnapshots.length, 0)
+  assert.equal(same?.apiValue.trackingSince, t0)
+  // Nothing was committed, so the same plan can still be valued across the boundary.
+  const closed = plan?.valueFor("codex", "weekly", t0 + 30 * MIN, { boundary: true })
+  assert.equal(closed?.apiValueSnapshots.filter((snapshot) => snapshot.event === "reset").length, 1)
+  assert.deepEqual(closed?.apiValueSnapshots[0].value, frozen)
+  assert.equal(closed?.apiValue.trackingSince, t0 + 30 * MIN)
+  assert.equal(closed?.apiValue.observedUSD, null, "the interval before the boundary is attributable to neither segment")
+  closed?.commit()
+
+  // The next observation is a normal one in the new segment: no second reset.
+  tracker.addTokenRecord(tokenRecord("e3", t0 + 35 * MIN, 1_000_000, 0))
+  const next = await valueAt(tracker, t0 + 40 * MIN, 45, prices)
+  assert.equal(next?.trackingSince, t0 + 30 * MIN)
+  assert.equal(next?.observedUSD, 10)
+})
+
+test("a recorded boundary is ignored for a series with no state", async () => {
+  const fresh = new QuotaValueTracker(parseConfig({ usageSources: { openai: "codex" } }))
+  const first = (await fresh.prepare(usage(t0, 50), t0, new Map()))
+    ?.valueFor("codex", "weekly", t0, { boundary: true })
+  assert.equal(first?.apiValueSnapshots.length, 0, "no state means nothing to close")
+  assert.equal(first?.apiValue.trackingSince, t0)
 })

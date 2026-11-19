@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises"
 import { Service } from "@opencode/client/service"
 import { applyDiscoveredQuartermasterOptions, readProjectQuartermasterOptions } from "./project-options.ts"
 import { isIgnoredProjectDirectory } from "./config.ts"
+import { QUOTA_HISTORY_MAX_PAGE } from "./quota-history.ts"
 import { spawn, spawnSync } from "node:child_process"
 import { createServer } from "node:http"
 import { connect as connectPort, isIP } from "node:net"
@@ -165,6 +166,154 @@ function quotaApiValue(value) {
     partialRecords: value.partialRecords,
     complete: false,
   }
+}
+
+const historyParams = new Set(["kind", "sourceID", "windowName", "from", "to", "limit", "cursor"])
+const plainText = (value, max) => typeof value === "string" && value.length > 0 && value.length <= max && !/[\u0000-\u001f\u007f]/.test(value)
+// Cursors are the last row's observation clock, and every page starts strictly
+// after it: a repeated read of the same page dedupes instead of duplicating.
+const timestampCursor = (value) =>
+  typeof value === "string" && /^(?:0|[1-9]\d{0,15})$/.test(value) && Number.isSafeInteger(Number(value))
+// Query validation for the history endpoint: exact params only, no repeats.
+function quotaHistoryInput(searchParams) {
+  const seen = new Set()
+  for (const key of searchParams.keys()) {
+    if (!historyParams.has(key) || seen.has(key)) return { error: `unexpected or repeated query parameter: ${key}` }
+    seen.add(key)
+  }
+  const sourceID = searchParams.get("sourceID")
+  const windowName = searchParams.get("windowName")
+  if (!plainText(sourceID, 128)) return { error: "sourceID must be a non-empty string up to 128 characters" }
+  if (!plainText(windowName, 128)) return { error: "windowName must be a non-empty string up to 128 characters" }
+  const input = { sourceID, windowName }
+  if (searchParams.has("kind")) {
+    const kind = searchParams.get("kind")
+    if (kind !== "points" && kind !== "windows") return { error: "kind must be points or windows" }
+    input.kind = kind
+  }
+  for (const key of ["from", "to"]) {
+    if (!searchParams.has(key)) continue
+    const raw = searchParams.get(key)
+    const value = /^\d{1,16}$/.test(raw) ? Number(raw) : NaN
+    if (!Number.isSafeInteger(value)) return { error: `${key} must be an integer epoch in milliseconds` }
+    input[key] = value
+  }
+  if (input.from !== undefined && input.to !== undefined && input.from > input.to) return { error: "from must not exceed to" }
+  if (searchParams.has("limit")) {
+    const raw = searchParams.get("limit")
+    const value = /^\d{1,16}$/.test(raw) ? Number(raw) : NaN
+    if (!Number.isSafeInteger(value) || value < 1) return { error: "limit must be a positive integer" }
+    input.limit = Math.min(value, QUOTA_HISTORY_MAX_PAGE)
+  }
+  if (searchParams.has("cursor")) {
+    const cursor = searchParams.get("cursor")
+    if (!timestampCursor(cursor)) return { error: "cursor must be a canonical timestamp returned by this query" }
+    input.cursor = cursor
+  }
+  return { input }
+}
+
+const wholeNumber = (value) => Number.isSafeInteger(value) && value >= 0
+const nullableWhole = (value) => value === null || wholeNumber(value)
+function historyWindow(value, counter, input) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || value.version !== 1 ||
+    value.sourceID !== input.sourceID || value.windowName !== input.windowName ||
+    !wholeNumber(value.lastObservedAt) || !wholeNumber(value.nextObservedAt) || value.nextObservedAt <= value.lastObservedAt ||
+    !Number.isFinite(value.lastPercent) || value.lastPercent < 0 || value.lastPercent > 100 ||
+    !Number.isFinite(value.nextPercent) || value.nextPercent < 0 || value.nextPercent > 100 ||
+    !nullableWhole(value.resetsAt) || !nullableWhole(value.nextResetsAt) ||
+    typeof value.resetEstimated !== "boolean" || typeof value.deadlineCrossed !== "boolean" ||
+    (value.deadlineCrossed ? value.resetsAt === null || value.resetsAt <= value.lastObservedAt || value.resetsAt > value.nextObservedAt
+      : value.nextPercent >= value.lastPercent)) return undefined
+  const row = {
+    version: 1, sourceID: value.sourceID, windowName: value.windowName,
+    lastObservedAt: value.lastObservedAt, nextObservedAt: value.nextObservedAt,
+    lastPercent: value.lastPercent, nextPercent: value.nextPercent, resetsAt: value.resetsAt,
+    resetEstimated: value.resetEstimated, nextResetsAt: value.nextResetsAt, deadlineCrossed: value.deadlineCrossed,
+  }
+  if (value.instanceAnchorAt !== undefined) {
+    if (wholeNumber(value.instanceAnchorAt) && value.instanceAnchorAt <= value.lastObservedAt) row.instanceAnchorAt = value.instanceAnchorAt
+    else counter.bad++
+  }
+  if (value.apiValue !== undefined) {
+    const apiValue = quotaApiValue(value.apiValue)
+    if (apiValue && apiValue.observedAt === value.lastObservedAt) row.apiValue = apiValue
+    else counter.bad++
+  }
+  if (value.maxed !== undefined) {
+    const maxed = value.maxed
+    const apiValue = quotaApiValue(maxed?.value)
+    if (maxed && !Array.isArray(maxed) && wholeNumber(maxed.capturedAt) && maxed.capturedAt <= value.lastObservedAt &&
+      apiValue && apiValue.observedAt <= maxed.capturedAt) row.maxed = { capturedAt: maxed.capturedAt, value: apiValue }
+    else counter.bad++
+  }
+  if (value.finalEstimate !== undefined) {
+    const finalEstimate = quotaApiValue(value.finalEstimate)
+    if (finalEstimate?.projectionStatus === "estimated" && finalEstimate.projectedFullUSD !== null &&
+      finalEstimate.observedAt <= value.lastObservedAt) row.finalEstimate = finalEstimate
+    else counter.bad++
+  }
+  // The pane reads an unavailable outcome's reason from finalEstimate.reason, so
+  // expose the validated compatibility value as that frozen outcome. It is never
+  // `estimated` here: only a real projection can become a charted amount.
+  if (!row.finalEstimate && row.apiValue?.projectionStatus === "unavailable") row.finalEstimate = row.apiValue
+  if (!row.finalEstimate) {
+    row.finalEstimateReason = plainText(value.finalEstimateReason, 160) && value.finalEstimateReason.trim() === value.finalEstimateReason
+      ? value.finalEstimateReason : row.apiValue?.reason ?? "No estimate recorded"
+  }
+  return row
+}
+// A frozen closed-segment value. Anything that fails the shared apiValue check is dropped.
+function historySnapshot(value) {
+  if (!value || typeof value !== "object" || !["reset", "maxed"].includes(value.event) ||
+    !plainText(value.segmentID, 128) || !wholeNumber(value.capturedAt)) return undefined
+  const apiValue = quotaApiValue(value.value)
+  return apiValue ? { event: value.event, segmentID: value.segmentID, capturedAt: value.capturedAt, value: apiValue } : undefined
+}
+
+// Returns the narrowed point, or undefined when the core fields are malformed.
+// `bad` counts apiValue/snapshot payloads that were stripped from a kept point.
+function historyPoint(value, counter) {
+  if (!value || typeof value !== "object" || !wholeNumber(value.observedAt) ||
+    !Number.isFinite(value.percent) || value.percent < 0 || value.percent > 100 ||
+    !(value.resetsAt === null || wholeNumber(value.resetsAt)) || typeof value.cycleBoundary !== "boolean") return undefined
+  const point = { observedAt: value.observedAt, percent: value.percent, resetsAt: value.resetsAt, cycleBoundary: value.cycleBoundary }
+  if (wholeNumber(value.instanceAnchorAt) && value.instanceAnchorAt <= value.observedAt) point.instanceAnchorAt = value.instanceAnchorAt
+  if (value.apiValue !== undefined) {
+    const apiValue = quotaApiValue(value.apiValue)
+    if (apiValue) point.apiValue = apiValue
+    else counter.bad++
+  }
+  if (value.apiValueSnapshots !== undefined) {
+    if (!Array.isArray(value.apiValueSnapshots) || value.apiValueSnapshots.length > 4) counter.bad++
+    else {
+      const kept = value.apiValueSnapshots.map(historySnapshot).filter(Boolean)
+      counter.bad += value.apiValueSnapshots.length - kept.length
+      if (kept.length) point.apiValueSnapshots = kept
+    }
+  }
+  return point
+}
+
+// Only the totals the chart can use; null when the stored row is not in shape.
+function historyCumulative(value) {
+  if (!value || typeof value !== "object") return null
+  const out = {}
+  for (const key of ["observations", "cycleBoundaries"]) if (wholeNumber(value[key])) out[key] = value[key]
+  for (const key of ["firstObservedAt", "lastObservedAt"]) if (nullableWhole(value[key])) out[key] = value[key]
+  const totals = value.apiValue
+  if (totals && typeof totals === "object" && totals.basis === "closed-reset-segments-only") {
+    const number = (item) => Number.isFinite(item) && item >= 0
+    if (wholeNumber(totals.apiValuePoints) && wholeNumber(totals.unpricedApiValuePoints) && wholeNumber(totals.closedResetSegments) &&
+      wholeNumber(totals.maxedSnapshots) && number(totals.closedObservedUSD) && typeof totals.closedObservedUSDComplete === "boolean") {
+      out.apiValue = {
+        basis: totals.basis, apiValuePoints: totals.apiValuePoints, unpricedApiValuePoints: totals.unpricedApiValuePoints,
+        closedResetSegments: totals.closedResetSegments, closedObservedUSD: totals.closedObservedUSD,
+        closedObservedUSDComplete: totals.closedObservedUSDComplete, maxedSnapshots: totals.maxedSnapshots,
+      }
+    }
+  }
+  return out
 }
 
 export function createLocalUiServer({ openCodeURL, token, resolveEndpoint, projectDirectory, port = 4175 }) {
@@ -353,6 +502,45 @@ export function createLocalUiServer({ openCodeURL, token, resolveEndpoint, proje
         return send(res, 502, { error: error instanceof Error ? error.message : "prune failed" })
       }
     }
+    if (req.method === "GET" && (req.url === "/api/quota-history" || req.url?.startsWith("/api/quota-history?"))) {
+      const parsed = quotaHistoryInput(new URL(req.url, "http://127.0.0.1").searchParams)
+      if (parsed.error) return send(res, 400, { error: parsed.error })
+      try {
+        const result = await rpc("quotaHistory", parsed.input)
+        if (result?.status === "unavailable") {
+          return send(res, 200, { status: "unavailable", reason: typeof result.reason === "string" ? result.reason.slice(0, 160) : "unavailable" })
+        }
+        const windowsQuery = parsed.input.kind === "windows"
+        if (result?.status !== "ok" || !Array.isArray(result.points) || (windowsQuery && !Array.isArray(result.windows))) throw new Error("history")
+        const counter = { bad: 0 }
+        const points = []
+        const windows = []
+        let dropped = 0
+        for (const row of (windowsQuery ? result.windows : result.points).slice(0, QUOTA_HISTORY_MAX_PAGE)) {
+          const item = windowsQuery ? historyWindow(row, counter, parsed.input) : historyPoint(row, counter)
+          if (item) (windowsQuery ? windows : points).push(item)
+          else dropped++
+        }
+        const metadata = result.metadata
+        // A cursor must move strictly forward, so a refresh of the same page cannot
+        // return it again and a malformed upstream value stops pagination instead.
+        const nextCursor = timestampCursor(result.nextCursor) &&
+          (parsed.input.cursor === undefined || Number(result.nextCursor) > Number(parsed.input.cursor))
+          ? result.nextCursor : null
+        send(res, 200, {
+          status: "ok", points, ...(windowsQuery ? { windows } : {}), dropped: dropped + counter.bad,
+          nextCursor,
+          cumulative: windowsQuery ? null : historyCumulative(result.cumulative),
+          ...(metadata && wholeNumber(metadata.rawRetentionMs) && wholeNumber(metadata.rawSince) && wholeNumber(metadata.pageSize)
+             ? { metadata: { rawRetentionMs: metadata.rawRetentionMs, rawSince: metadata.rawSince, pageSize: metadata.pageSize,
+                 ...(metadata.closedRetention === "indefinite" ? { closedRetention: "indefinite" } : {}),
+                 ...(metadata.rangeAppliesTo === "windows" || metadata.rangeAppliesTo === "points" ? { rangeAppliesTo: metadata.rangeAppliesTo } : {}) } } : {}),
+        })
+      } catch {
+        send(res, 502, { error: "Quota history unavailable" })
+      }
+      return
+    }
     if (req.method === "GET" && (req.url === "/api/dashboard" || req.url?.startsWith("/api/dashboard?"))) {
       const since = Number(new URL(req.url ?? "/", "http://127.0.0.1").searchParams.get("since"))
       const range = Number.isSafeInteger(since) && since > 0 ? { since } : {}
@@ -387,10 +575,16 @@ export function createLocalUiServer({ openCodeURL, token, resolveEndpoint, proje
               !["ok", "rate-limited", "unknown"].includes(window.state) ||
               !(window.resetsAt === undefined || window.resetsAt === null || Number.isFinite(window.resetsAt))) throw new Error("status")
             const estimate = quotaEstimate(window.estimate)
-            const apiValue = quotaApiValue(window.apiValue)
+            // The backend gates dollars to a fresh source at the exact observation
+            // clock; the gateway repeats the check so a stale value cannot cross it.
+            const value = quotaApiValue(window.apiValue)
+            const apiValue = !source.stale && source.authenticated !== false && value?.observedAt === source.checkedAt ? value : undefined
+            const instanceAnchorAt = wholeNumber(window.instanceAnchorAt) && wholeNumber(source.checkedAt) &&
+              window.instanceAnchorAt <= source.checkedAt ? window.instanceAnchorAt : undefined
             return { name: window.name, usedPercent: window.usedPercent, state: window.state,
               resetsAt: window.resetsAt, ...(typeof window.resetEstimated === "boolean" ? { resetEstimated: window.resetEstimated } : {}),
-              ...(estimate ? { estimate } : {}), ...(apiValue ? { apiValue } : {}) }
+              ...(estimate ? { estimate } : {}), ...(apiValue ? { apiValue } : {}),
+              ...(instanceAnchorAt === undefined ? {} : { instanceAnchorAt }) }
           })
           return { providerID, ...(source.sourceID ? { sourceID: source.sourceID } : {}),
             ...(typeof source.authenticated === "boolean" ? { authenticated: source.authenticated } : {}),

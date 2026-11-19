@@ -12,6 +12,7 @@ const config = parseConfig({
 })
 const checkedAt = new Date().toISOString()
 const estimatedReset = new Date(Date.now() - 1_000).toISOString()
+const cooldownStorageKey = "availability/cooldowns-v1"
 
 function snapshot(availability: "available" | "limited", stale = false) {
   const limited = availability === "limited"
@@ -50,7 +51,8 @@ function setup(initial: UsageReadResult, statusReply: () => Promise<unknown>, sa
   let transform: ((editor: AgentEditor) => void) | undefined
   let reloads = 0
   let statusCalls = 0
-  let persisted = savedState
+  // Plugin storage is key-scoped: quota observations must not overwrite cooldowns.
+  const persisted = new Map<string, unknown>(savedState === undefined ? [] : [[cooldownStorageKey, savedState]])
   const ctx = {
     model: {
       list: async () => ({ data: [
@@ -59,9 +61,9 @@ function setup(initial: UsageReadResult, statusReply: () => Promise<unknown>, sa
       ] }),
     },
     storage: {
-      get: async () => persisted,
-      set: async (_key: string, value: unknown) => { persisted = value },
-      remove: async () => {},
+      get: async (key: string) => persisted.get(key),
+      set: async (key: string, value: unknown) => { persisted.set(key, value) },
+      remove: async (key: string) => { persisted.delete(key) },
       scan: async () => ({ entries: [] }),
     },
     rpc: () => ({ status: async () => { statusCalls++; return statusReply() } }),
@@ -78,7 +80,7 @@ function setup(initial: UsageReadResult, statusReply: () => Promise<unknown>, sa
     agents,
     get reloads() { return reloads },
     get statusCalls() { return statusCalls },
-    get persisted() { return persisted },
+    get persisted() { return persisted.get(cooldownStorageKey) },
     runTransform: () => transform?.(editor),
     start: () => registerAgentRouting(ctx as never, config, initial),
   }
@@ -152,6 +154,8 @@ test("cooldowns persist and restore on the next plugin instance", async () => {
 
   const restarted = setup(usage("available"), async () => snapshot("available"), first.persisted)
   const restartedRouting = await restarted.start()
-  assert.deepEqual(restarted.agents.reviewer.model, { providerID: "provider-b", id: "backup" })
-  await restartedRouting?.dispose()
+  try {
+    assert.deepEqual(restarted.persisted, first.persisted, "startup quota writes leave the saved cooldown key intact")
+    assert.deepEqual(restarted.agents.reviewer.model, { providerID: "provider-b", id: "backup" })
+  } finally { await restartedRouting?.dispose() }
 })

@@ -82,6 +82,28 @@ test("pace is limited by the tightest window, and finished ones stop constrainin
   assert.equal(pace({ providerID: "ollama", modelID: "local-model" }), undefined)
 })
 
+test("a window longer than a week is scored over a week, so a monthly window cannot pin a provider", () => {
+  const minute = 60_000
+  const at = 1_000 * minute
+  const week = 7 * 24 * 60
+  const sources = { "opencode-go": "go" }
+  const model = { providerID: "opencode-go", modelID: "paid-one" }
+  const paceOf = (resetsAt: number, name: string) => quotaFreshPaces(
+    sources,
+    readingAt(at, { go: freshSourceAt(at, [{ name, usedPercent: 24, state: "ok", resetsAt }]) }),
+    at,
+  )(model)
+
+  // 76% left with 30 days to go: a month is a week's horizon, not a month's.
+  const monthly = paceOf(at + 30 * 24 * 60 * minute, "monthly")
+  assert.ok(Math.abs((monthly as number) - 76 / week) < 1e-9)
+
+  // The same headroom on a weekly window scores no worse, so a provider whose
+  // only wide window is monthly can still win a pace race.
+  const weekly = paceOf(at + week * minute, "weekly")
+  assert.ok((weekly as number) >= (monthly as number))
+})
+
 test("a usable window keeps its headroom; only a full window or a reported limit blocks", () => {
   const eligible = (windows: UsageSource["windows"], stale = false) =>
     buildQuotaEligibility(registry, { "opencode-go": "go", openai: "codex" }, ["opencode-go/free-model"], withGoWindows(windows, stale))

@@ -3,43 +3,150 @@ import test from "node:test"
 import { readFile } from "node:fs/promises"
 import { createContext, runInContext } from "node:vm"
 
-const readPage = () => readFile(new URL("../web/index.html", import.meta.url), "utf8")
-const textOf = (node) => [node.textContent, node.value, ...node.children.map(textOf)].filter(Boolean).join(" ")
+// Runs web/index.html's inline script in a VM. The pane under test renders one card per
+// (sourceID, windowName) with a current estimate and a chart of saved closed-window
+// estimates; these checks assert that behaviour, not helper names.
 
-async function renderHarness() {
-  const page = await readPage()
-  const script = page.match(/<script>([\s\S]*?)<\/script>/)?.[1]
-  assert.ok(script)
-  let calls = 0
-  const nodes = new Map()
-  const node = (key) => ({
-    key, children: [], textContent: "", value: "", disabled: false, checked: false, type: "",
-    attributes: {}, handlers: {}, hidden: false, open: false, tabIndex: 0, dataset: {}, style: {},
-    classList: { add() {}, remove() {}, toggle() {} },
-    setAttribute(name, value) { this.attributes[name] = value },
-    getAttribute(name) { return this.attributes[name] ?? null },
-    hasAttribute(name) { return name in this.attributes },
-    removeAttribute(name) { delete this.attributes[name] },
-    focus() {},
-    closest() { return null },
-    append(...kids) { this.children.push(...kids) },
-    replaceChildren(...kids) { this.children = kids },
-    addEventListener(type, callback) { this.handlers[type] = callback },
-  })
+const readPage = () => readFile(new URL("../web/index.html", import.meta.url), "utf8")
+const hasClass = (node, name) => String(node?.attributes?.class ?? "").split(/\s+/).includes(name)
+const descendants = node => (node ? [node, ...node.children.flatMap(descendants)] : [])
+const textOf = node => node
+  ? [String(node.textContent ?? ""), String(node.value ?? ""), ...node.children.map(textOf)].filter(Boolean).join(" ")
+  : ""
+
+const T0 = Date.UTC(2026, 0, 5, 0, 0)
+const MIN = 60000
+const HOUR = 60 * MIN
+const DAY = 24 * HOUR
+
+const ATTR = /^\[\s*([\w:-]+)\s*(?:=\s*(?:"([^"]*)"|'([^']*)'|([^\]\s]+)))?\s*\]$/
+function matchesToken(node, token) {
+  if (!node || typeof node !== "object" || !node.attributes) return false
+  if (token === "*") return true
+  if (token.startsWith("#")) return node.attributes.id === token.slice(1)
+  if (token.startsWith(".")) return hasClass(node, token.slice(1))
+  const attr = ATTR.exec(token)
+  if (attr) {
+    if (!(attr[1] in node.attributes)) return false
+    const want = attr[2] ?? attr[3] ?? attr[4]
+    return want === undefined || node.attributes[attr[1]] === want
+  }
+  return node.tag === token
+}
+
+function createDom() {
+  const roots = new Map()
+  let seq = 0
   const doc = {
-    createElement: () => node("fresh-" + Math.random()),    querySelector(selector) {
-      if (!nodes.has(selector)) nodes.set(selector, node(selector))
-      return nodes.get(selector)
-    },
-    querySelectorAll() { return [] },
-    getElementById(id) { return this.querySelector(`#${id}`) },
+    activeElement: null,
     title: "",
     visibilityState: "hidden",
+    roots,
+    createElement(tag) { return makeNode(tag) },
     addEventListener() {},
+    getElementById(id) { return doc.querySelector(`#${id}`) },
+    querySelector(selector) {
+      const text = String(selector)
+      if (text.startsWith("#") && !/\s/.test(text)) return rootFor(text.slice(1))
+      return queryAll(text)[0] ?? null
+    },
+    querySelectorAll(selector) { return queryAll(String(selector)) },
   }
+  function makeNode(tag, root = false) {
+    const node = {
+      tag, key: `n${++seq}`, isRoot: root, parent: null, children: [],
+      textContent: "", value: "", disabled: false, checked: false, type: "",
+      hidden: false, open: false, tabIndex: 0, attributes: {}, handlers: {}, style: {}, dataset: {},
+      classList: { add() {}, remove() {}, toggle() {}, contains() { return false } },
+      setAttribute(name, value) { node.attributes[name] = String(value) },
+      getAttribute(name) { return name in node.attributes ? node.attributes[name] : null },
+      hasAttribute(name) { return name in node.attributes },
+      removeAttribute(name) { delete node.attributes[name] },
+      append(...kids) { for (const kid of kids) { kid.parent = node; node.children.push(kid) } },
+      replaceChildren(...kids) { for (const kid of node.children) kid.parent = null; node.children = []; node.append(...kids) },
+      addEventListener(type, callback) { node.handlers[type] = callback },
+      focus() { doc.activeElement = node },
+      contains(other) { for (let item = other; item; item = item.parent) if (item === node) return true; return false },
+      closest(selector) { for (let item = node; item; item = item.parent) if (matchesToken(item, selector)) return item; return null },
+      querySelector(selector) { return queryWithin(node, selector, false) },
+      querySelectorAll(selector) { return queryWithin(node, selector, true) },
+      get firstChild() { return node.children[0] ?? null },
+      get childNodes() { return node.children },
+      get isConnected() { let item = node; while (item.parent) item = item.parent; return item.isRoot === true },
+    }
+    return node
+  }
+  function rootFor(id) {
+    const key = `#${id}`
+    if (!roots.has(key)) {
+      const node = makeNode("div", true)
+      node.key = key
+      node.attributes.id = id
+      roots.set(key, node)
+    }
+    return roots.get(key)
+  }
+  function queryWithin(scope, selector, all) {
+    const tokens = String(selector).trim().split(/\s+/)
+    const pool = descendants(scope).slice(1)
+    const found = tokens.length === 1 ? pool.filter(node => matchesToken(node, tokens[0])) : []
+    return all ? found : found[0] ?? null
+  }
+  function queryAll(selector) {
+    const tokens = String(selector).trim().split(/\s+/)
+    if (tokens.length > 2) return []
+    const pool = [...roots.values()].flatMap(descendants)
+    if (tokens.length === 1) return pool.filter(node => matchesToken(node, tokens[0]))
+    const anchors = pool.filter(node => matchesToken(node, tokens[0]))
+    return anchors.flatMap(anchor => descendants(anchor).slice(1).filter(node => matchesToken(node, tokens[1])))
+  }
+  return doc
+}
+
+const settle = async (rounds = 6) => { for (let index = 0; index < rounds; index++) await new Promise(resolve => setImmediate(resolve)) }
+
+// A gateway page whose resolution each test controls, so in-flight, busy and failure
+// states can be inspected synchronously between click and response.
+function controlled() {
+  const pages = []
+  return {
+    pages,
+    handler: url => new Promise((resolve, reject) => { pages.push({ url, resolve, reject }) }),
+  }
+}
+
+const okPage = (windows, nextCursor = null, extra = {}) => ({
+  ok: true,
+  status: 200,
+  json: async () => ({ status: "ok", windows, nextCursor, dropped: 0, metadata: {}, ...extra }),
+})
+const httpFailure = status => ({ ok: false, status, json: async () => ({ error: "Quota history unavailable" }) })
+
+async function renderHarness({ historyFetch, estimates = false } = {}) {
+  const page = await readPage()
+  const script = page.match(/<script>([\s\S]*?)<\/script>/)?.[1]
+  assert.ok(script, "the page keeps exactly one inline script")
+
+  const clock = { now: T0 + 2 * HOUR }
+  class FakeDate extends Date {
+    constructor(...args) { super(...(args.length ? args : [clock.now])) }
+    static now() { return clock.now }
+  }
+  const dom = createDom()
+  // The static page ships with Usage selected and the Estimates panel hidden.
+  dom.querySelector("#quota-panel-estimates").hidden = !estimates
+  dom.querySelector("#quota-panel-usage").hidden = estimates
+
+  const requests = []
   const context = createContext({
-    document: doc,
-    fetch: () => { calls++; return new Promise(() => {}) },
+    document: dom,
+    Date: FakeDate,
+    fetch(url, options = {}) {
+      const target = String(url)
+      requests.push({ url: target, options })
+      if (!target.includes("kind=windows")) return new Promise(() => {})
+      return historyFetch ? historyFetch(target, options) : new Promise(() => {})
+    },
     addEventListener() {},
     localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
     setInterval() { return 0 },
@@ -48,469 +155,580 @@ async function renderHarness() {
     window: { location: { hash: "" }, addEventListener() {} },
   })
   runInContext(script, context)
+
+  const renderSources = (sources, extra = {}) => runInContext(
+    `renderDashboard(${JSON.stringify({
+      projectID: "fixture", generatedAt: clock.now, cooldowns: [],
+      availability: { status: "authenticated", updatedAt: clock.now, ...extra, sources },
+    })})`,
+    context,
+  )
   return {
-    page, context, nodes,
-    render: (data) => runInContext(`renderDashboard(${JSON.stringify(data)})`, context),
-    renderProvider: (windows, extra = {}) => runInContext(
-      `renderDashboard(${JSON.stringify({
-        projectID: "fixture", generatedAt: Date.now(), cooldowns: [],
-        availability: { status: "authenticated", sources: { "fixture/prov": { status: "authenticated", observedAt: Date.now(), sourceID: "fixture-source", windows, ...extra } } },
-      })})`,
-      context,
-    ),
-    text: (selector) => textOf(nodes.get(selector)),
-    eval: (expression) => runInContext(expression, context),
-    fetchCalls: () => calls,
+    context, doc: dom, nodes: dom.roots, clock,
+    text: selector => textOf(dom.querySelector(selector)),
+    eval: expression => runInContext(expression, context),
+    render: data => runInContext(`renderDashboard(${JSON.stringify(data)})`, context),
+    renderSources,
+    selectView: name => runInContext(`selectQuotaView(${JSON.stringify(name)})`, context),
+    requests,
+    windowsRequests: () => requests.filter(request => request.url.includes("kind=windows")),
   }
 }
 
-const estimated = (over = {}) => ({
-  status: "estimated",
-  cutoffPercent: 100,
-  sampleCount: 8,
-  spanMs: 47 * 60000,
-  ratePerMinute: 1.5,
-  cutoffAt: Date.now() + 3600000,
-  ...over,
+const sourceFixture = (clock, over = {}) => ({
+  status: "authenticated", sourceID: "src-a", observedAt: clock.now, windows: [], ...over,
 })
+const quotaWindow = (clock, label = "Daily", over = {}) => ({
+  label, percent: 42, resetsAt: clock.now + DAY, ...over,
+})
+// A fully valid apiValue. `estimated` needs a coherent tracking span, priced records and
+// a nonzero quota delta; `unavailable` needs a truthful reason and no projection.
+const valueAt = (observedAt, over = {}) => {
+  const spanMs = over.spanMs ?? 47 * MIN
+  return {
+    currency: "USD", basis: "api-equivalent-not-billed", complete: false,
+    projectionStatus: "estimated", observedUSD: 5, projectedFullUSD: 40,
+    reason: null, spanMs, observedAt, trackingSince: observedAt - spanMs,
+    quotaDeltaPercent: 12, records: 10, pricedRecords: 10, unpricedRecords: 0, partialRecords: 0,
+    ...over,
+  }
+}
+const currentValue = (clock, over = {}) => valueAt(clock.now, { projectedFullUSD: 45.6, ...over })
 
-test("usage pane keeps windows, bars and reset; Estimates pane carries the forecast", async () => {
-  const h = await renderHarness()
-  h.renderProvider([{ label: "Daily", percent: 42, resetsAt: Date.now() + 86400000, estimate: estimated() }])
+const closedRow = (index, over = {}) => {
+  const lastObservedAt = T0 + index * 4 * HOUR
+  return {
+    version: 1, sourceID: "src-a", windowName: "Daily",
+    lastObservedAt, nextObservedAt: lastObservedAt + HOUR,
+    lastPercent: 100, nextPercent: 0, resetsAt: lastObservedAt + 30 * MIN,
+    nextResetsAt: null, resetEstimated: false, deadlineCrossed: true, ...over,
+  }
+}
+const finalAt = (row, over = {}) => valueAt(row.lastObservedAt - MIN, over)
+
+const cards = harness => descendants(harness.nodes.get("#quota-estimates")).filter(node => hasClass(node, "window-card"))
+const cardFor = (harness, sourceID, windowName) => cards(harness)
+  .find(node => node.attributes["data-source"] === sourceID && node.attributes["data-window"] === windowName)
+const regions = harness => descendants(harness.nodes.get("#quota-estimates")).filter(node => hasClass(node, "wh-region"))
+const regionFor = (harness, sourceID, windowName) => regions(harness)
+  .find(node => node.attributes["data-source"] === sourceID && node.attributes["data-window"] === windowName)
+const roleNodes = (root, role) => descendants(root).filter(node => node.attributes?.["data-role"] === role)
+const providerLineOf = root => descendants(root).find(node => node.tag === "p" && /^Providers?: /.test(String(node.textContent)))
+const marksOf = region => descendants(region).filter(node => hasClass(node, "wh-mark"))
+const svgOf = region => descendants(region).find(node => hasClass(node, "wh-svg"))
+const plotOf = region => descendants(region).find(node => hasClass(node, "wh-plot"))
+const readoutOf = region => descendants(region).find(node => hasClass(node, "wh-readout"))
+const moreButton = region => descendants(region).find(node => node.attributes?.["data-wh-focus"] === "more")
+const detailsOf = region => descendants(region).find(node => node.tag === "details")
+const tableOf = region => descendants(region).find(node => hasClass(node, "ledger"))
+const marksState = region => marksOf(region).map(mark => mark.attributes["data-estimate"])
+
+test("an empty Estimates pane asks for nothing and skips windows without a numeric percent", async () => {
+  const h = await renderHarness({ estimates: true })
+  h.renderSources({
+    "fixture/prov": sourceFixture(h.clock, {
+      windows: [
+        { label: "Requests", remaining: 5, resetsAt: h.clock.now + HOUR },
+        { label: "Daily", percent: null },
+      ],
+    }),
+  })
+  await settle()
+  assert.match(h.text("#quota-estimates"), /No quota estimates yet/)
+  assert.equal(cards(h).length, 0, "a non-numeric window gets no card")
+  assert.equal(h.windowsRequests().length, 0, "and triggers no history request")
+  // The Usage pane is unaffected by the Estimates redesign.
   const usage = h.text("#quota-providers")
-  assert.match(usage, /Daily 42% used/)
+  assert.match(usage, /Requests/)
   assert.match(usage, /Provider reset · /)
-  assert.doesNotMatch(usage, /Estimate|cutoff/, "the usage pane never speaks forecast")
-  const estimates = h.text("#quota-estimates")
-  assert.match(estimates, /Daily 42% used/)
-  assert.match(estimates, /Estimate · 100% cutoff ≈ .+ if the recent rate holds \(about 1[.,]5 percentage points\/min over 47 min\)/)
-  assert.match(estimates, /estimate basis · 8 samples · 47 min span/)
-  assert.doesNotMatch(estimates, /stale quota|out of date|insufficient/)
+  assert.match(usage, /Usage unknown/)
 })
 
-test("reset landing before a future cutoff says so, not a forecast clock", async () => {
-  const h = await renderHarness()
-  h.renderProvider([{ label: "Daily", percent: 80, resetsAt: Date.now() + 10 * 60000, estimate: estimated({ cutoffAt: Date.now() + 30 * 60000 }) }])
-  const text = h.text("#quota-estimates")
-  assert.match(text, /reset expected before 100% cutoff at recent usage rate/)
-  assert.doesNotMatch(text, /cutoff ≈/)
-})
-
-test("estimated window whose cutoff time already passed and is unproven reads out of date, alone", async () => {
-  const h = await renderHarness()
-  h.renderProvider([{ label: "Daily", percent: 40, estimate: estimated({ cutoffAt: Date.now() - 60000 }) }])
-  const text = h.text("#quota-estimates")
-  assert.match(text, /Estimate out of date/)
-  assert.doesNotMatch(text, /recent rate|cutoff reached|stale quota/)
-})
-
-test("estimated window with a passed cutoff but proven observed percent reads cutoff reached (payload-derived percent)", async () => {
-  const h = await renderHarness()
-  h.renderProvider([{ label: "Daily", percent: 95, estimate: estimated({ cutoffPercent: 90, cutoffAt: Date.now() - 60000 }) }])
-  const text = h.text("#quota-estimates")
-  assert.match(text, /Routing cutoff reached \(90%\)/)
-})
-
-test("reported reset already passed: the estimate reads out of date until a fresh read, never reset-before-cutoff", async () => {
-  const h = await renderHarness()
-  h.renderProvider([{ label: "Daily", percent: 50, resetsAt: Date.now() - 60000, estimate: estimated() }])
-  const text = h.text("#quota-estimates")
-  assert.match(text, /Provider reset reported for/)
-  assert.match(text, /Estimate out of date/)
-  assert.doesNotMatch(text, /reset expected before/)
-})
-
-test("stale source suppresses a cutoff-reached estimate: stale quota, not cutoff reached", async () => {
-  const h = await renderHarness()
-  h.renderProvider(
-    [{ label: "Daily", percent: 95, estimate: { status: "cutoff-reached", cutoffPercent: 100, sampleCount: 8, spanMs: 47 * 60000 } }],
-    { stale: true },
-  )
-  const text = h.text("#quota-estimates")
-  assert.match(text, /Estimate unavailable · stale quota/)
-  assert.doesNotMatch(text, /Routing cutoff reached/)
-})
-
-test("future observation timestamp: cutoff-reached reads stale quota", async () => {
-  const h = await renderHarness()
-  h.renderProvider(
-    [{ label: "Daily", percent: 95, estimate: { status: "cutoff-reached", cutoffPercent: 100, sampleCount: 8, spanMs: 47 * 60000 } }],
-    { observedAt: Date.now() + 10 * 60000 },
-  )
-  const text = h.text("#quota-estimates")
-  assert.match(text, /Estimate unavailable · stale quota/)
-  assert.doesNotMatch(text, /Routing cutoff reached/)
-})
-
-test("cutoff-reached with no observation timestamp is stale quota (fail closed)", async () => {
-  const h = await renderHarness()
-  h.renderProvider(
-    [{ label: "Daily", percent: 95, estimate: { status: "cutoff-reached", cutoffPercent: 100, sampleCount: 8, spanMs: 47 * 60000 } }],
-    { observedAt: undefined },
-  )
-  const text = h.text("#quota-estimates")
-  assert.match(text, /Estimate unavailable · stale quota/)
-})
-
-test("cutoff-reached older than five minutes reads stale quota", async () => {
-  const h = await renderHarness()
-  h.renderProvider(
-    [{ label: "Daily", percent: 95, estimate: { status: "cutoff-reached", cutoffPercent: 100, sampleCount: 8, spanMs: 47 * 60000 } }],
-    { observedAt: Date.now() - 6 * 60000 },
-  )
-  const text = h.text("#quota-estimates")
-  assert.match(text, /Estimate unavailable · stale quota/)
-})
-
-test("unauthenticated source suppresses the estimate", async () => {
-  const h = await renderHarness()
-  h.renderProvider([{ label: "Daily", percent: 42, estimate: estimated() }], { authenticated: false })
-  const text = h.text("#quota-estimates")
-  assert.match(text, /Estimate unavailable · stale quota/)
-  assert.doesNotMatch(text, /cutoff ≈/)
-})
-
-test("cutoff-reached contradicted by observed percent on a fresh source reads out of date", async () => {
-  const h = await renderHarness()
-  h.renderProvider([{ label: "Daily", percent: 40, estimate: { status: "cutoff-reached", cutoffPercent: 100, sampleCount: 8, spanMs: 47 * 60000 } }])
-  const text = h.text("#quota-estimates")
-  assert.match(text, /Estimate out of date/)
-})
-
-test("fresh numeric window carries no estimate: insufficient history is reported", async () => {
-  const h = await renderHarness()
-  h.renderProvider([{ label: "Daily", percent: 10 }])
-  const text = h.text("#quota-estimates")
-  assert.match(text, /Estimate · insufficient history \(needs at least 15 min of fresh observations\)/)
-})
-
-test("unfresh numeric window carries no estimate: stale quota, not insufficient history", async () => {
-  const h = await renderHarness()
-  h.renderProvider([{ label: "Daily", percent: 10 }], { observedAt: Date.now() - 6 * 60000 })
-  const text = h.text("#quota-estimates")
-  assert.match(text, /Estimate unavailable · stale quota/)
-})
-
-test("no-recent-usage wording on a fresh numeric window", async () => {
-  const h = await renderHarness()
-  h.renderProvider([{ label: "Daily", percent: 20, estimate: { status: "no-recent-usage", cutoffPercent: 100, sampleCount: 6, spanMs: 60 * 60000 } }])
-  assert.match(h.text("#quota-estimates"), /No recent quota increase; estimate unavailable/)
-})
-
-test("stale-status estimate wording on a fresh source still reports stale quota", async () => {
-  const h = await renderHarness()
-  h.renderProvider([{ label: "Daily", percent: 30, estimate: { status: "stale", cutoffPercent: 100, sampleCount: 4, spanMs: 30 * 60000 } }])
-  assert.match(h.text("#quota-estimates"), /Estimate unavailable · stale quota/)
-})
-
-test("insufficient-history status wording", async () => {
-  const h = await renderHarness()
-  h.renderProvider([{ label: "Daily", percent: 10, estimate: { status: "insufficient-history", cutoffPercent: 100, sampleCount: 1, spanMs: 5 * 60000 } }])
-  assert.match(h.text("#quota-estimates"), /Estimate · insufficient history \(needs at least 15 min of fresh observations\)/)
-})
-
-test("window without a numeric percent omits the estimate entirely, reset still renders", async () => {
-  const h = await renderHarness()
-  h.renderProvider([
-    { label: "Requests", remaining: 120, resetsAt: Date.now() + 3600000 },
-    { label: "Daily", percent: Number.NaN, estimate: estimated() },
-  ])
-  const usage = h.text("#quota-providers")
-  assert.match(usage, /Provider reset · /)
-  assert.doesNotMatch(usage, /\d+% used/)
-  const estimates = h.text("#quota-estimates")
-  assert.match(estimates, /No quota estimates yet/)
-  assert.doesNotMatch(estimates, /Estimate ·|Routing cutoff|percentage points\/min/)
-})
-
-test("a very low rate never rounds to zero", async () => {
-  const h = await renderHarness()
-  h.renderProvider([{ label: "Daily", percent: 10, estimate: estimated({ ratePerMinute: 0.004, spanMs: 30 * 60000 }) }])
-  const text = h.text("#quota-estimates")
-  assert.match(text, /rate less than 0\.01 percentage points\/min over 30 min/)
-  assert.doesNotMatch(text, /about 0 /)
-})
-
-test("normalizer enforces backend bounds, drops the whole malformed estimate, keeps good quota", async () => {
-  const h = await renderHarness()
-  const windows = JSON.parse(h.eval(`JSON.stringify(usageWindows([
-    { label: "Valid", percent: 42, resetsAt: 1000, estimate: ${JSON.stringify(estimated({ cutoffAt: 1000000, spanMs: 16 * 60000, sampleCount: 2 }))} },
-    { label: "BadStatus", percent: 42, estimate: { status: "flying", cutoffPercent: 100, sampleCount: 3, spanMs: 900000 } },
-    { label: "NoCutoff", percent: 42, estimate: { status: "estimated", sampleCount: 3, spanMs: 900000, ratePerMinute: 1, cutoffAt: 1000 } },
-    { label: "NoSample", percent: 42, estimate: { status: "estimated", cutoffPercent: 100, spanMs: 900000, ratePerMinute: 1, cutoffAt: 1000 } },
-    { label: "OneSample", percent: 42, estimate: { status: "estimated", cutoffPercent: 100, sampleCount: 1, spanMs: 900000, ratePerMinute: 1, cutoffAt: 1000 } },
-    { label: "ShortSpan", percent: 42, estimate: { status: "estimated", cutoffPercent: 100, sampleCount: 3, spanMs: 14 * 60000, ratePerMinute: 1, cutoffAt: 1000 } },
-    { label: "NegRate", percent: 42, estimate: { status: "estimated", cutoffPercent: 100, sampleCount: 3, spanMs: 900000, ratePerMinute: -2, cutoffAt: 1000 } },
-    { label: "ZeroRate", percent: 42, estimate: { status: "estimated", cutoffPercent: 100, sampleCount: 3, spanMs: 900000, ratePerMinute: 0, cutoffAt: 1000 } },
-    { label: "FutureAt", percent: 42, estimate: { status: "estimated", cutoffPercent: 100, sampleCount: 3, spanMs: 900000, ratePerMinute: 1, cutoffAt: -5 } },
-    { label: "BigCutoff", percent: 42, estimate: { status: "cutoff-reached", cutoffPercent: 150, sampleCount: 3, spanMs: 900000 } },
-    { label: "NoMeta", percent: 42, estimate: { status: "no-recent-usage" } },
-    { label: "BadShape", percent: 42, estimate: "soon" },
-    { label: "Untouched", percent: 42 },
-    { label: "ResetStream", resetsAt: "1970-01-01T00:00:01Z", resetEstimated: true },
-  ]))`))
-  assert.deepEqual(windows[0], {
-    label: "Valid", percent: 42, resetsAt: 1000,
-    estimate: { status: "estimated", cutoffPercent: 100, sampleCount: 2, spanMs: 960000, ratePerMinute: 1.5, cutoffAt: 1000000 },
-  }, "valid metadata round-trips")
-  for (const w of windows.slice(1, 13)) assert.equal(w.estimate, undefined, `${w.label}: non-conforming estimate dropped whole`)
-  assert.equal(windows.find(w => w.label === "Untouched").percent, 42, "good quota survives malformed neighbors")
-  assert.equal(windows.find(w => w.label === "ResetStream").resetsAt, 1000, "string reset timestamps still parse")
-  assert.equal(windows.find(w => w.label === "ResetStream").resetEstimated, true)
-})
-
-test("quota page gains an Estimates tab: default Usage, aria-linked panels, click and keyboard selection", async () => {
-  const page = await readPage()
-  assert.equal((page.match(/id="quota-tab-/g) || []).length, 2, "exactly two quota tabs, unique ids")
-  assert.match(page, /id="quota-tab-usage" aria-selected="true" aria-controls="quota-panel-usage" tabindex="0"/)
-  assert.match(page, /id="quota-tab-estimates" aria-selected="false" aria-controls="quota-panel-estimates" tabindex="-1"/)
-  assert.match(page, /id="quota-panel-usage" role="tabpanel" aria-labelledby="quota-tab-usage" tabindex="0"/)
-  assert.match(page, /id="quota-panel-estimates" role="tabpanel" aria-labelledby="quota-tab-estimates" tabindex="-1" hidden/)
-  const h = await renderHarness()
-  const usageTab = h.nodes.get("#quota-tab-usage"), estimatesTab = h.nodes.get("#quota-tab-estimates")
-  assert.ok(usageTab && estimatesTab, "both tabs wired at init")
-  assert.ok(typeof usageTab.handlers.click === "function" && typeof estimatesTab.handlers.click === "function")
-  runInContext('selectQuotaView("usage")', h.context)
-  assert.equal(h.nodes.get("#quota-panel-estimates")?.hidden, true, "Estimates panel starts hidden")
-  assert.equal(h.nodes.get("#quota-panel-usage")?.hidden, false, "Usage panel starts shown")
-  assert.equal(usageTab.tabIndex, 0, "active tab is in the roving tabindex")
-  assert.equal(estimatesTab.tabIndex, -1)
-  assert.equal(h.nodes.get("#quota-panel-usage")?.tabIndex, 0, "active panel joins the roving tabindex")
-  assert.equal(h.nodes.get("#quota-panel-estimates")?.tabIndex, -1)
-  estimatesTab.handlers.click()
-  assert.equal(estimatesTab.attributes["aria-selected"], "true")
-  assert.equal(usageTab.attributes["aria-selected"], "false")
-  assert.equal(h.nodes.get("#quota-panel-estimates")?.hidden, false)
-  assert.equal(h.nodes.get("#quota-panel-usage")?.hidden, true)
-  assert.equal(estimatesTab.tabIndex, 0, "roving tabindex follows the click")
-  assert.equal(usageTab.tabIndex, -1)
-  assert.equal(h.nodes.get("#quota-panel-estimates")?.tabIndex, 0)
-  assert.equal(h.nodes.get("#quota-panel-usage")?.tabIndex, -1)
-  assert.ok(typeof estimatesTab.handlers.keydown === "function", "keyboard support like the plans tabs")
-  estimatesTab.handlers.keydown({ key: "ArrowLeft", preventDefault() {} })
-  assert.equal(usageTab.attributes["aria-selected"], "true")
-  assert.equal(estimatesTab.attributes["aria-selected"], "false")
-  assert.equal(h.nodes.get("#quota-panel-usage")?.hidden, false)
-  assert.equal(usageTab.tabIndex, 0, "roving tabindex follows the keyboard")
-  assert.equal(estimatesTab.tabIndex, -1)
-  runInContext('selectQuotaView("usage")', h.context)
-})
-
-test("estimates pane data: provider card, basis, reported reset and observation freshness; empty state without numeric windows", async () => {
-  const h = await renderHarness()
-  h.renderProvider([])
-  assert.match(h.text("#quota-estimates"), /No quota estimates yet\.?/)
-  h.renderProvider([{ label: "Daily", percent: 42, resetsAt: Date.now() + 86400000, estimate: estimated() }])
-  const text = h.text("#quota-estimates")
-  assert.match(text, /fixture\/prov/, "provider card names the source")
-  assert.match(text, /Daily 42% used/)
-  assert.match(text, /Estimate · 100% cutoff ≈ /)
-  assert.match(text, /estimate basis · 8 samples · 47 min span/)
-  assert.match(text, /Provider reset reported for/)
-  assert.match(text, /Quota observed .+ fresh observation/)
-})
-
-test("forecast stays off the Usage pane and the Overview stats even when estimates exist", async () => {
-  const h = await renderHarness()
-  h.renderProvider([{ label: "Daily", percent: 42, estimate: estimated() }])
-  const usage = h.text("#quota-providers")
-  assert.doesNotMatch(usage, /Estimate ·|cutoff ≈|percentage points\/min/)
-  for (const selector of ["#overview-stats", "#overview-chart", "#overview-attention"]) {
-    const node = h.nodes.get(selector)
-    if (node) assert.doesNotMatch(textOf(node), /Estimate ·|cutoff ≈|percentage points\/min/, `${selector} stays forecast-free`)
+test("one card per source and window: aliases share, independent sources stay separate", async () => {
+  const h = await renderHarness({ estimates: true })
+  const windows = [quotaWindow(h.clock, "Daily", { apiValue: currentValue(h.clock) })]
+  h.renderSources({
+    "one/provider": sourceFixture(h.clock, { sourceID: "src-a", windows }),
+    "another/provider": sourceFixture(h.clock, { sourceID: "src-a", windows }),
+    "other/provider": sourceFixture(h.clock, { sourceID: "src-b", windows }),
+  })
+  await settle()
+  assert.equal(cards(h).length, 2, "two providers on one source make one card, a second source makes another")
+  assert.ok(cardFor(h, "src-a", "Daily"))
+  assert.ok(cardFor(h, "src-b", "Daily"))
+  // The page writes "Provider:" for one alias and "Providers:" for several; match the whole
+  // line so neither singular grammar nor the "another/"-contains-"other/" pair can mislead.
+  assert.equal(textOf(providerLineOf(cardFor(h, "src-a", "Daily"))), "Providers: one/provider, another/provider")
+  assert.equal(textOf(providerLineOf(cardFor(h, "src-b", "Daily"))), "Provider: other/provider")
+  assert.equal(regions(h).length, 2, "one history region per card")
+  for (const region of regions(h)) {
+    assert.equal(region.attributes["data-window"], "Daily")
+    assert.ok(["src-a", "src-b"].includes(region.attributes["data-source"]))
+  }
+  assert.equal(h.windowsRequests().length, 2, "aliases share one fetch; the other source gets its own")
+  const urls = h.windowsRequests().map(request => new URL(request.url, "http://local"))
+  for (const url of urls) {
+    assert.equal(url.pathname, "/api/quota-history")
+    assert.equal(url.searchParams.get("kind"), "windows")
+    assert.equal(url.searchParams.get("limit"), "20")
+    assert.equal(url.searchParams.get("windowName"), "Daily")
+    assert.equal(url.searchParams.has("from"), false, "closed windows are not raw-history filtered")
+    assert.equal(url.searchParams.has("cursor"), false, "the first page needs no cursor")
+  }
+  assert.deepEqual(urls.map(url => url.searchParams.get("sourceID")).sort(), ["src-a", "src-b"], "queries use the real source, not the provider alias")
+  for (const request of h.requests) {
+    assert.match(request.url, /^\/api\/quota-history\?/)
+    assert.equal(request.options.credentials, "same-origin")
+    assert.equal(request.options.headers, undefined, "no credentials or tokens travel in the request")
   }
 })
 
-test("routing annotations use the 100% gate: 95 is not limited, 100 is 'quota fully used'", async () => {
+test("the current estimate is exactly one amount with its qualifiers", async () => {
+  const h = await renderHarness({ estimates: true })
+  h.renderSources({ "fixture/prov": sourceFixture(h.clock, { windows: [quotaWindow(h.clock, "Daily", { apiValue: currentValue(h.clock) })] }) })
+  const card = cardFor(h, "src-a", "Daily")
+  const amounts = roleNodes(card, "current-amount")
+  assert.equal(amounts.length, 1, "one current amount per card")
+  assert.match(textOf(amounts[0]), /USD 45[.,]6/)
+  assert.equal(amounts[0].parent.attributes["data-current-state"], "estimate")
+  assert.equal(roleNodes(card, "current-reason").length, 0, "an available estimate needs no reason")
+  assert.match(textOf(card), /10 of 10 records priced/)
+  assert.match(textOf(card), /47 min tracked/)
+  assert.match(textOf(card), /Fresh quota/)
+})
+
+test("zero, sub-cent and unknown current values render honestly", async () => {
+  const h = await renderHarness({ estimates: true })
+  const at = h.clock.now
+  const zero = valueAt(at, { projectedFullUSD: 0 })
+  const tiny = valueAt(at, { projectedFullUSD: 0.003 })
+  h.renderSources({
+    "fixture/prov": sourceFixture(h.clock, { sourceID: "src-a", windows: [quotaWindow(h.clock, "Daily", { apiValue: zero })] }),
+    "fixture/other": sourceFixture(h.clock, { sourceID: "src-b", windows: [quotaWindow(h.clock, "Weekly", { apiValue: tiny })] }),
+  })
+  const zeroCard = cardFor(h, "src-a", "Daily")
+  assert.match(textOf(roleNodes(zeroCard, "current-amount")[0]), /USD 0\b/)
+  assert.equal(roleNodes(zeroCard, "current-reason").length, 0, "an explicit zero is a real estimate")
+  const tinyCard = cardFor(h, "src-b", "Weekly")
+  assert.match(textOf(roleNodes(tinyCard, "current-amount")[0]), /USD <0[.,]01/, "a positive sub-cent amount never becomes a literal zero")
+  assert.doesNotMatch(textOf(tinyCard), /USD 0\b/)
+  const unknown = await renderHarness({ estimates: true })
+  unknown.renderSources({ "fixture/prov": sourceFixture(unknown.clock, { windows: [quotaWindow(unknown.clock)] }) })
+  const unknownCard = cardFor(unknown, "src-a", "Daily")
+  assert.equal(unknownCard.attributes["data-source"], "src-a")
+  assert.equal(roleNodes(unknownCard, "current-amount").length, 1, "not tracked still renders exactly one amount slot")
+  assert.match(textOf(roleNodes(unknownCard, "current-amount")[0]), /No estimate/)
+  assert.match(textOf(roleNodes(unknownCard, "current-reason")[0]), /Not tracked yet/)
+})
+
+test("stale, unauthenticated and clock-mismatched sources hide the current dollars but keep saved history", async () => {
+  const ctl = controlled()
+  const h = await renderHarness({ estimates: true, historyFetch: ctl.handler })
+  const saved = { ...closedRow(0), finalEstimate: finalAt(closedRow(0), { projectedFullUSD: 76.54 }) }
+  h.renderSources({ "fixture/prov": sourceFixture(h.clock, { stale: true, windows: [quotaWindow(h.clock, "Daily", { apiValue: currentValue(h.clock) })] }) })
+  await settle()
+  ctl.pages[0].resolve(okPage([saved]))
+  await settle()
+  const card = cardFor(h, "src-a", "Daily")
+  assert.equal(roleNodes(card, "current-amount").length, 1)
+  assert.match(textOf(roleNodes(card, "current-reason")[0]), /Stale quota reading/)
+  assert.doesNotMatch(textOf(card), /USD 45[.,]6/, "a stale quota never presents a current dollar value")
+  assert.match(svgOf(regionFor(h, "src-a", "Daily")).attributes["aria-label"], /USD 76[.,]54/, "frozen history is unaffected by current staleness")
+
+  const unauthenticated = await renderHarness({ estimates: true })
+  unauthenticated.renderSources({ "fixture/prov": sourceFixture(unauthenticated.clock, { authenticated: false, windows: [quotaWindow(unauthenticated.clock, "Daily", { apiValue: currentValue(unauthenticated.clock) })] }) })
+  assert.match(textOf(roleNodes(cardFor(unauthenticated, "src-a", "Daily"), "current-reason")[0]), /Stale quota reading/)
+
+  const mismatched = await renderHarness({ estimates: true })
+  mismatched.renderSources({ "fixture/prov": sourceFixture(mismatched.clock, { windows: [quotaWindow(mismatched.clock, "Daily", { apiValue: valueAt(mismatched.clock.now - MIN, { projectedFullUSD: 45.6 }) })] }) })
+  const cardMismatch = cardFor(mismatched, "src-a", "Daily")
+  assert.match(textOf(roleNodes(cardMismatch, "current-reason")[0]), /does not match the latest quota reading/)
+  assert.doesNotMatch(textOf(cardMismatch), /USD 45[.,]6/)
+})
+
+test("the chart plots only saved final estimates, never raw points, observed subtotals or maxed snapshots", async () => {
+  const ctl = controlled()
+  const h = await renderHarness({ estimates: true, historyFetch: ctl.handler })
+  h.renderSources({ "fixture/prov": sourceFixture(h.clock, { windows: [quotaWindow(h.clock)] }) })
+  await settle()
+
+  const first = closedRow(0)
+  const savedRow = {
+    ...first,
+    finalEstimate: finalAt(first, { projectedFullUSD: 76.54 }),
+    // The gateway carries these for other consumers; the chart must ignore them.
+    apiValue: valueAt(first.lastObservedAt - MIN, { observedUSD: 98.76, projectedFullUSD: 87.65 }),
+    maxed: { capturedAt: first.lastObservedAt, value: valueAt(first.lastObservedAt - MIN, { projectedFullUSD: 99.99 }) },
+    boundaryPoint: { secret: "PRIVATE_BOUNDARY" },
+  }
+  const second = closedRow(1)
+  const unavailableRow = {
+    ...second,
+    apiValue: valueAt(second.lastObservedAt - MIN, { projectedFullUSD: 12.34 }),
+    finalEstimate: finalAt(second, { projectionStatus: "unavailable", projectedFullUSD: null, reason: "Too little history" }),
+  }
+  const third = closedRow(2)
+  // A final estimate observed after the boundary is not a valid saved value.
+  const futureFinal = { ...third, apiValue: valueAt(third.lastObservedAt - MIN, { projectedFullUSD: 12.34 }), finalEstimate: valueAt(third.lastObservedAt + 2 * MIN, { projectedFullUSD: 55 }) }
+  const fourth = closedRow(3)
+  const apiValueOnly = { ...fourth, apiValue: valueAt(fourth.lastObservedAt - MIN, { projectedFullUSD: 12.34 }) }
+  const rawPoint = { observedAt: T0, percent: 5, apiValue: valueAt(T0, { projectedFullUSD: 999 }) }
+
+  ctl.pages[0].resolve(okPage([savedRow, unavailableRow, futureFinal, apiValueOnly], null, { points: [rawPoint] }))
+  await settle()
+  const region = regionFor(h, "src-a", "Daily")
+  const svg = svgOf(region)
+  assert.ok(svg, "a saved estimate gives the card a chart")
+  const label = svg.attributes["aria-label"]
+  assert.match(label, /^Saved estimates for Daily on src-a: 1 of 4 loaded closed windows have an estimate/)
+  assert.match(label, /USD 76[.,]54/)
+  assert.match(label, /Y axis: USD per full window/)
+  assert.match(label, /X axis: closed windows, oldest first/)
+  assert.equal(svg.attributes.role, "img")
+  assert.deepEqual(marksState(region), ["saved", "none", "none", "none"], "only the final estimate becomes a saved mark")
+  const marks = marksOf(region)
+  assert.match(textOf(marks[0]), /≈ USD 76[.,]54/)
+  assert.match(textOf(marks[1]), /no estimate saved/)
+  assert.match(textOf(marks[2]), /no estimate saved/, "a final estimate after the boundary is not fallback-usable")
+  assert.match(textOf(marks[3]), /no estimate saved/, "apiValue alone is never a chart value")
+  const regionText = textOf(region)
+  assert.equal((regionText.match(/≈ USD/g) || []).length, 1, "exactly one saved amount")
+  assert.match(regionText, /Closed windows, oldest first \(4\)/)
+  assert.doesNotMatch(regionText, /87[.,]65|99[.,]99|98[.,]76|12[.,]34|USD 55|999|PRIVATE_BOUNDARY/, "no observed subtotal, maxed snapshot, raw point or private field reaches the pane")
+  const rows = descendants(tableOf(region)).filter(node => node.tag === "tr").filter(node => node.parent?.tag === "tbody")
+  assert.equal(rows.length, 4)
+  assert.match(textOf(rows[1].children[3]), /Too little history/, "an unavailable window keeps its truthful reason in details")
+})
+
+test("all-unavailable, empty and unavailable-channel states stay honest", async () => {
+  const all = await renderHarness({ estimates: true, historyFetch: async () => okPage([
+    { ...closedRow(0), finalEstimate: valueAt(T0, { projectionStatus: "unavailable", projectedFullUSD: null, reason: "No prices" }) },
+    { ...closedRow(1), finalEstimate: valueAt(T0, { projectionStatus: "unavailable", projectedFullUSD: null, reason: "Too little history" }) },
+  ]) })
+  all.renderSources({ "fixture/prov": sourceFixture(all.clock, { windows: [quotaWindow(all.clock)] }) })
+  await settle()
+  const allRegion = regionFor(all, "src-a", "Daily")
+  assert.equal(svgOf(allRegion), undefined, "no chart is invented without a saved amount")
+  assert.match(textOf(allRegion), /None of the loaded closed windows has a saved estimate/)
+  assert.match(textOf(allRegion), /No prices/)
+  assert.match(textOf(allRegion), /Too little history/)
+  assert.equal(marksOf(allRegion).length, 0)
+  assert.equal(descendants(tableOf(allRegion)).filter(node => node.tag === "tr" && node.parent?.tag === "tbody").length, 2, "unavailable windows are still listed")
+
+  const empty = await renderHarness({ estimates: true, historyFetch: async () => okPage([], null) })
+  empty.renderSources({ "fixture/prov": sourceFixture(empty.clock, { windows: [quotaWindow(empty.clock)] }) })
+  await settle()
+  assert.match(textOf(regionFor(empty, "src-a", "Daily")), /No closed window saved yet\. An estimate is saved here when a Daily window closes\./)
+
+  const unavailable = await renderHarness({ estimates: true, historyFetch: async () => ({ ok: true, status: 200, json: async () => ({ status: "unavailable" }) }) })
+  unavailable.renderSources({ "fixture/prov": sourceFixture(unavailable.clock, { windows: [quotaWindow(unavailable.clock)] }) })
+  await settle()
+  assert.match(textOf(regionFor(unavailable, "src-a", "Daily")), /Saved window estimates are unavailable for this source/)
+
+  const nameless = await renderHarness({ estimates: true })
+  nameless.renderSources({ "fixture/prov": sourceFixture(nameless.clock, { sourceID: undefined, windows: [quotaWindow(nameless.clock)] }) })
+  await settle()
+  assert.match(textOf(regionFor(nameless, "", "Daily")), /Saved estimates are unavailable: this source or window has no stable name/)
+  assert.equal(nameless.windowsRequests().length, 0, "an unstable identity is never queried")
+})
+
+test("malformed closed rows are counted, not shown, and legacy rows stay readable", async () => {
+  const base0 = closedRow(0)
+  const base1 = closedRow(1)
+  const base2 = closedRow(2)
+  const legacy = { ...base0, finalEstimate: finalAt(base0, { projectedFullUSD: 21 }) }
+  const anchored = { ...base1, instanceAnchorAt: base1.lastObservedAt - 2 * HOUR, finalEstimate: finalAt(base1, { projectionStatus: "unavailable", projectedFullUSD: null, reason: "No pricing" }) }
+  const badMoney = { ...base2, finalEstimate: { ...finalAt(base2), projectedFullUSD: -1 } }
+  const bad = closedRow(5)
+  const h = await renderHarness({ estimates: true, historyFetch: async () => okPage([
+    legacy, anchored, badMoney, null,
+    { ...bad, sourceID: "src-other" },
+    { ...bad, windowName: "Weekly" },
+    { ...bad, nextObservedAt: bad.lastObservedAt },
+    { ...bad, lastPercent: 101 },
+  ]) })
+  h.renderSources({ "fixture/prov": sourceFixture(h.clock, { windows: [quotaWindow(h.clock)] }) })
+  await settle()
+  const region = regionFor(h, "src-a", "Daily")
+  assert.match(textOf(region), /Showing 3 closed windows, oldest first/)
+  assert.match(textOf(region), /5 saved items could not be shown\./, "rejected rows are reported, not silently dropped")
+  assert.equal(descendants(tableOf(region)).filter(node => node.tag === "tr" && node.parent?.tag === "tbody").length, 3)
+  assert.match(textOf(region), /USD 21/)
+  assert.match(svgOf(region).attributes["aria-label"], /1 of 3 loaded closed windows have an estimate/, "a malformed monetary value is not charted")
+  assert.doesNotMatch(textOf(region), /src-other|Weekly/, "cross-identity rows never reach the card")
+  // A legacy row without an anchor is accepted; an anchored row explains the tracked
+  // span; a rejected monetary payload stays a row without an estimate.
+  const marks = marksOf(region)
+  assert.equal(marks.length, 3)
+  assert.deepEqual(marksState(region), ["saved", "none", "none"])
+  marks[0].handlers.click()
+  assert.match(textOf(readoutOf(region)), /Saved estimate ≈ USD 21/)
+  assert.doesNotMatch(textOf(readoutOf(region)), /Tracked from/)
+  marks[1].handlers.click()
+  assert.match(textOf(readoutOf(region)), /Tracked from/)
+  assert.match(textOf(readoutOf(region)), /No pricing/)
+  marks[2].handlers.click()
+  assert.match(textOf(readoutOf(region)), /No estimate saved \(no estimate was recorded for this window\)/)
+})
+
+test("pagination is explicit, deduplicated and keeps pages oldest first", async () => {
+  const ctl = controlled()
+  const h = await renderHarness({ estimates: true, historyFetch: ctl.handler })
+  h.renderSources({ "fixture/prov": sourceFixture(h.clock, { windows: [quotaWindow(h.clock)] }) })
+  await settle()
+  const first = { ...closedRow(0), finalEstimate: finalAt(closedRow(0), { projectedFullUSD: 21 }) }
+  const second = { ...closedRow(1), finalEstimate: finalAt(closedRow(1), { projectedFullUSD: 32 }) }
+  ctl.pages[0].resolve(okPage([first], "c1"))
+  await settle()
+  const region = regionFor(h, "src-a", "Daily")
+  assert.match(textOf(region), /Showing 1 closed window, oldest first/)
+  assert.match(textOf(region), /Newer windows are not loaded yet\./)
+  const loadMore = moreButton(region)
+  assert.ok(loadMore, "a non-null cursor offers an explicit control")
+  assert.equal(textOf(loadMore), "Load newer windows")
+  assert.equal(loadMore.attributes["aria-disabled"], "false")
+
+  loadMore.handlers.click()
+  loadMore.handlers.click()
+  assert.equal(ctl.pages.length, 2, "a second click while in flight starts no second request")
+  assert.equal(new URL(ctl.pages[1].url, "http://local").searchParams.get("cursor"), "c1")
+  ctl.pages[1].resolve(okPage([first, second], null))
+  await settle()
+
+  assert.equal(moreButton(region), undefined, "an exhausted cursor removes the control")
+  assert.doesNotMatch(textOf(region), /Newer windows are not loaded yet/)
+  const rows = descendants(tableOf(region)).filter(node => node.tag === "tr" && node.parent?.tag === "tbody")
+  assert.equal(rows.length, 2, "the repeated row is merged by durable identity")
+  assert.match(textOf(rows[0].children[2]), /USD 21/, "merged pages stay oldest first")
+  assert.match(textOf(rows[1].children[2]), /USD 32/)
+  // Text position is not an ordering check: the y-axis label names the maximum (USD 32)
+  // before any mark is drawn. Assert the mark order the reader actually navigates.
+  const marks = marksOf(region)
+  assert.deepEqual(marksState(region), ["saved", "saved"], "both pages keep a saved estimate")
+  assert.deepEqual(marks.map(mark => mark.attributes["data-index"]), ["0", "1"], "marks are indexed oldest first")
+  assert.match(textOf(marks[0]), /≈ USD 21/)
+  assert.match(textOf(marks[1]), /≈ USD 32/)
+  assert.match(textOf(readoutOf(region)), /Window 1 of 2 loaded/, "the earlier selection is kept, not jumped to the newest window")
+  assert.match(textOf(readoutOf(region)), /Saved estimate ≈ USD 21/)
+  assert.match(textOf(region), /Showing 2 closed windows/)
+})
+
+test("a page whose cursor does not advance is rejected without losing loaded rows", async () => {
+  const ctl = controlled()
+  const h = await renderHarness({ estimates: true, historyFetch: ctl.handler })
+  h.renderSources({ "fixture/prov": sourceFixture(h.clock, { windows: [quotaWindow(h.clock)] }) })
+  await settle()
+  const first = { ...closedRow(0), finalEstimate: finalAt(closedRow(0), { projectedFullUSD: 21 }) }
+  const second = { ...closedRow(1), finalEstimate: finalAt(closedRow(1), { projectedFullUSD: 32 }) }
+  ctl.pages[0].resolve(okPage([first], "c1"))
+  await settle()
+  moreButton(regionFor(h, "src-a", "Daily")).handlers.click()
+  ctl.pages[1].resolve(okPage([second], "c1"))
+  await settle()
+  const region = regionFor(h, "src-a", "Daily")
+  assert.match(textOf(region), /Newer windows could not be loaded\. The windows above are still shown\./)
+  assert.match(textOf(region), /USD 21/)
+  assert.doesNotMatch(textOf(region), /USD 32/, "a rejected page contributes no rows")
+  assert.equal(textOf(moreButton(region)), "Retry loading newer windows")
+  moreButton(region).handlers.click()
+  ctl.pages[2].resolve(okPage([second], null))
+  await settle()
+  assert.match(textOf(region), /USD 32/)
+  assert.doesNotMatch(textOf(region), /could not be loaded/)
+
+  const oversized = await renderHarness({ estimates: true, historyFetch: async () => okPage(Array.from({ length: 21 }, (_, index) => closedRow(index))) })
+  oversized.renderSources({ "fixture/prov": sourceFixture(oversized.clock, { windows: [quotaWindow(oversized.clock)] }) })
+  await settle()
+  assert.match(textOf(regionFor(oversized, "src-a", "Daily")), /Saved window estimates could not be loaded\./, "more than one page per response is rejected")
+})
+
+test("a failed append keeps the loaded page, keeps button focus and does not retry in a loop", async () => {
+  const ctl = controlled()
+  const h = await renderHarness({ estimates: true, historyFetch: ctl.handler })
+  h.renderSources({ "fixture/prov": sourceFixture(h.clock, { windows: [quotaWindow(h.clock)] }) })
+  await settle()
+  const first = { ...closedRow(0), finalEstimate: finalAt(closedRow(0), { projectedFullUSD: 21 }) }
+  ctl.pages[0].resolve(okPage([first], "c1"))
+  await settle()
+  const region = regionFor(h, "src-a", "Daily")
+
+  moreButton(region).focus()
+  moreButton(region).handlers.click()
+  const busy = moreButton(region)
+  assert.equal(busy.attributes["aria-disabled"], "true", "the in-flight control is aria-disabled")
+  assert.notEqual(busy.disabled, true, "aria-disabled keeps the control focusable")
+  assert.match(textOf(busy), /Loading/, "the in-flight control says it is loading")
+  assert.equal(h.doc.activeElement, busy, "the in-flight repaint keeps focus on the same control")
+
+  ctl.pages[1].resolve(httpFailure(503))
+  await settle()
+  assert.match(textOf(region), /Newer windows could not be loaded\. The windows above are still shown\./)
+  assert.match(textOf(region), /USD 21/, "a failed append preserves the first page")
+  const retry = moreButton(region)
+  assert.equal(textOf(retry), "Retry loading newer windows")
+  assert.equal(retry.attributes["aria-disabled"], "false")
+  assert.equal(h.doc.activeElement, retry, "focus returns to the rebuilt retry control")
+
+  h.renderSources({ "fixture/prov": sourceFixture(h.clock, { windows: [quotaWindow(h.clock)] }) })
+  h.renderSources({ "fixture/prov": sourceFixture(h.clock, { windows: [quotaWindow(h.clock)] }) })
+  await settle()
+  assert.equal(ctl.pages.length, 2, "a repaint never retries a cached failure")
+  assert.match(textOf(regionFor(h, "src-a", "Daily")), /USD 21/)
+
+  moreButton(regionFor(h, "src-a", "Daily")).handlers.click()
+  ctl.pages[2].resolve(okPage([{ ...closedRow(1), finalEstimate: finalAt(closedRow(1), { projectedFullUSD: 32 }) }], null))
+  await settle()
+  const healed = regionFor(h, "src-a", "Daily")
+  assert.match(textOf(healed), /USD 32/)
+  assert.doesNotMatch(textOf(healed), /could not be loaded/)
+})
+
+test("the fetch waits for the visible tab, shares one in-flight read and honours the cache window", async () => {
+  const ctl = controlled()
+  const h = await renderHarness({ historyFetch: ctl.handler })
+  const windows = [quotaWindow(h.clock)]
+  h.renderSources({ "fixture/prov": sourceFixture(h.clock, { windows }) })
+  await settle()
+  assert.equal(ctl.pages.length, 0, "a hidden tab asks for nothing")
+  assert.match(textOf(regionFor(h, "src-a", "Daily")), /Loading saved windows/)
+
+  h.selectView("estimates")
+  await settle()
+  assert.equal(ctl.pages.length, 1, "selecting the Estimates tab paints and requests")
+  h.renderSources({ "fixture/prov": sourceFixture(h.clock, { windows }) })
+  h.selectView("estimates")
+  await settle()
+  assert.equal(ctl.pages.length, 1, "a second subscriber joins the same in-flight read")
+
+  ctl.pages[0].resolve(okPage([{ ...closedRow(0), finalEstimate: finalAt(closedRow(0), { projectedFullUSD: 21 }) }]))
+  await settle()
+  assert.match(textOf(regionFor(h, "src-a", "Daily")), /≈ USD 21/)
+
+  h.clock.now += 59 * 1000
+  h.renderSources({ "fixture/prov": sourceFixture(h.clock, { windows }) })
+  await settle()
+  assert.equal(ctl.pages.length, 1, "a repaint inside the cache window reuses the response")
+
+  h.clock.now += 2 * 1000
+  h.renderSources({ "fixture/prov": sourceFixture(h.clock, { windows }) })
+  await settle()
+  assert.equal(ctl.pages.length, 2, "an expired cache window refreshes once")
+  assert.equal(new URL(ctl.pages[1].url, "http://local").searchParams.has("cursor"), false, "a refresh re-reads from the start of the newest page")
+})
+
+test("details state, chart keyboard readout and accessible labels survive a repaint", async () => {
+  const h = await renderHarness({ estimates: true, historyFetch: async () => okPage([
+    { ...closedRow(0), instanceAnchorAt: closedRow(0).lastObservedAt - 2 * HOUR, finalEstimate: finalAt(closedRow(0), { projectedFullUSD: 21 }) },
+    { ...closedRow(1), finalEstimate: finalAt(closedRow(1), { projectionStatus: "unavailable", projectedFullUSD: null, reason: "No pricing" }) },
+  ]) })
+  const windows = [quotaWindow(h.clock)]
+  h.renderSources({ "fixture/prov": sourceFixture(h.clock, { windows }) })
+  await settle()
+  const region = regionFor(h, "src-a", "Daily")
+  const plot = plotOf(region)
+  assert.equal(plot.attributes.role, "group")
+  assert.equal(plot.attributes.tabindex, "0")
+  assert.equal(plot.attributes["data-wh-focus"], "plot")
+  assert.match(plot.attributes["aria-label"], /Saved estimates chart for Daily\. Use the left and right arrow keys/)
+  const readout = readoutOf(region)
+  assert.equal(readout.attributes["aria-live"], "polite")
+  assert.match(textOf(readout), /Window 2 of 2 loaded/)
+  assert.match(textOf(readout), /No estimate saved: No pricing/)
+  assert.match(textOf(readout), /the exact end is not known/)
+  assert.match(textOf(readout), /reported reset/)
+
+  plot.handlers.keydown({ key: "Home", preventDefault() {} })
+  assert.match(textOf(readoutOf(region)), /Window 1 of 2 loaded/)
+  assert.match(textOf(readoutOf(region)), /Saved estimate ≈ USD 21/)
+  assert.match(textOf(readoutOf(region)), /tracked from/i)
+  assert.match(textOf(readoutOf(region)), /not the provider's start time/)
+  plot.handlers.keydown({ key: "ArrowRight", preventDefault() {} })
+  assert.match(textOf(readoutOf(region)), /Window 2 of 2 loaded/)
+  plot.handlers.keydown({ key: "End", preventDefault() {} })
+  assert.match(textOf(readoutOf(region)), /Window 2 of 2 loaded/)
+  plot.handlers.keydown({ key: "ArrowLeft", preventDefault() {} })
+  assert.match(textOf(readoutOf(region)), /Window 1 of 2 loaded/)
+  marksOf(region)[1].handlers.click()
+  assert.match(textOf(readoutOf(region)), /Window 2 of 2 loaded/)
+
+  const details = detailsOf(region)
+  assert.equal(details.tag, "details")
+  const summary = descendants(details).find(node => node.tag === "summary")
+  assert.equal(summary.attributes["data-wh-focus"], "details")
+  assert.equal(textOf(summary), "Window details (2)")
+  assert.ok(tableOf(region), "the details disclosure carries the ledger table")
+  assert.match(textOf(tableOf(region)), /Closed windows, oldest first\. The close falls somewhere between the two quota observations listed\./)
+  details.open = true
+  details.handlers.toggle()
+
+  plotOf(region).focus()
+  h.renderSources({ "fixture/prov": sourceFixture(h.clock, { windows }) })
+  await settle()
+  const repainted = regionFor(h, "src-a", "Daily")
+  assert.equal(detailsOf(repainted).open, true, "the disclosure keeps its open state across a repaint")
+  assert.equal(h.doc.activeElement, plotOf(repainted), "the keyboard user keeps their place across a repaint")
+})
+
+test("quota tabs, the Usage pane and routing annotations are unchanged", async () => {
+  const page = await readPage()
+  assert.equal((page.match(/id="quota-tab-/g) || []).length, 2, "exactly two quota tabs")
+  assert.match(page, /id="quota-tab-usage" aria-selected="true" aria-controls="quota-panel-usage" tabindex="0"/)
+  assert.match(page, /id="quota-tab-estimates" aria-selected="false" aria-controls="quota-panel-estimates" tabindex="-1"/)
+  assert.match(page, /id="quota-panel-estimates" role="tabpanel" aria-labelledby="quota-tab-estimates" tabindex="-1" hidden/)
+
   const h = await renderHarness()
-  const window = percent => ({ label: "Daily", percent, resetsAt: Date.now() + 3600000 })
-  h.render({
-    projectID: "fixture", generatedAt: Date.now(), cooldowns: [],
+  h.selectView("usage")
+  assert.equal(h.nodes.get("#quota-panel-estimates").hidden, true)
+  assert.equal(h.nodes.get("#quota-panel-usage").hidden, false)
+  const usageTab = h.nodes.get("#quota-tab-usage")
+  const estimatesTab = h.nodes.get("#quota-tab-estimates")
+  assert.ok(usageTab && estimatesTab, "both tabs are wired at init")
+  estimatesTab.handlers.click()
+  assert.equal(estimatesTab.attributes["aria-selected"], "true")
+  assert.equal(usageTab.attributes["aria-selected"], "false")
+  assert.equal(h.nodes.get("#quota-panel-estimates").hidden, false)
+  assert.equal(h.nodes.get("#quota-panel-usage").hidden, true)
+  assert.equal(estimatesTab.tabIndex, 0)
+  assert.equal(usageTab.tabIndex, -1)
+  estimatesTab.handlers.keydown({ key: "ArrowLeft", preventDefault() {} })
+  assert.equal(usageTab.attributes["aria-selected"], "true")
+  assert.equal(h.nodes.get("#quota-panel-usage").hidden, false)
+  assert.equal(usageTab.tabIndex, 0)
+
+  h.renderSources({ "fixture/prov": sourceFixture(h.clock, { windows: [quotaWindow(h.clock)] }) })
+  const usage = h.text("#quota-providers")
+  assert.match(usage, /Daily 42% used/)
+  assert.match(usage, /Provider reset · /)
+  assert.doesNotMatch(usage, /USD|cutoff|Estimate ·/)
+
+  const g = await renderHarness()
+  const window95 = percent => ({ label: "Daily", percent, resetsAt: g.clock.now + HOUR })
+  g.render({
+    projectID: "fixture", generatedAt: g.clock.now, cooldowns: [],
     availability: {
       status: "authenticated",
       sources: {
-        "fixture/low": { status: "authenticated", observedAt: Date.now(), windows: [window(95)] },
-        "fixture/full": { status: "authenticated", observedAt: Date.now(), windows: [window(100)] },
+        "fixture/low": { status: "authenticated", observedAt: g.clock.now, windows: [window95(95)] },
+        "fixture/full": { status: "authenticated", observedAt: g.clock.now, windows: [window95(100)] },
       },
     },
   })
-  runInContext("paintRouting()", h.context)
-  const screen = h.text("#routing-strategies") + " " + h.text("#routing-groups")
-  assert.doesNotMatch(screen, /over the 90% gate/, "the removed 90% note is gone everywhere")
-  assert.match(screen, /95% used/, "the 95% provider renders")
+  g.eval("paintRouting()")
+  const screen = g.text("#routing-strategies") + " " + g.text("#routing-groups")
+  assert.match(screen, /95% used/)
   assert.doesNotMatch(screen, /95% used · quota fully used/, "95% is not marked limited")
-  assert.match(screen, /100% used · quota fully used/, "only 100% is marked fully used")
+  assert.match(screen, /100% used · quota fully used/, "only 100% is fully used")
 })
 
-test("tab strip carries the plain-language estimate disclaimer on the Estimates panel", async () => {
+test("the pane notes state the retention, non-billed and non-additive limits", async () => {
   const page = await readPage()
   const panel = page.slice(page.indexOf('id="quota-panel-estimates"'), page.indexOf('id="quota-estimates"'))
   assert.match(panel, /informational only/)
-  assert.match(panel, /until 100%/)
-  assert.match(panel, /not a guarantee that all remaining quota is usable/)
-  assert.match(panel, /bypasses a reported limit/)
-  assert.match(panel, /never guessed/)
-  assert.match(panel, /at least 15 minutes of fresh authenticated history/)
-  assert.match(panel, /no numeric quota percent/)
-  assert.match(panel, /About API values/)
-  assert.match(panel, /must not be summed/)
-  assert.match(panel, /retained for 90 days/)
-  assert.match(panel, /never that history/)
-  assert.match(panel, /known subtotal but blocks the full-allowance projection/)
-  assert.doesNotMatch(panel, /comes from older cumulative data|stays undercounted|90% mark|90% gate/)
-})
-
-const apiValue = (over = {}) => ({
-  currency: "USD",
-  basis: "api-equivalent-not-billed",
-  complete: false,
-  projectionStatus: "estimated",
-  observedUSD: 12.34,
-  projectedFullUSD: 45.6,
-  reason: null,
-  trackingSince: Date.now() - 47 * 60000,
-  observedAt: Date.now(),
-  spanMs: 47 * 60000,
-  quotaDeltaPercent: 12,
-  records: 10,
-  pricedRecords: 10,
-  unpricedRecords: 0,
-  partialRecords: 0,
-  ...over,
-})
-
-test("valid apiValue: observed cash with priced/track-span qualifiers and the full-allowance projection", async () => {
-  const h = await renderHarness()
-  const T = Date.now()
-  h.renderProvider([{ label: "Daily", percent: 42, estimate: estimated(), apiValue: apiValue({ observedAt: T, trackingSince: T - 47 * 60000 }) }], { observedAt: T })
-  const text = h.text("#quota-estimates")
-  assert.match(text, /Observed API value ≈ USD 12[.,]34/)
-  assert.match(text, /10 of 10 records priced/)
-  assert.doesNotMatch(text, /partial/)
-  assert.match(text, /47 min track span/)
-  assert.match(text, /Estimated full allowance ≈ USD 45[.,]6 · approximate; recent USD per percentage point, not a provider budget/)
-  assert.doesNotMatch(text, /complete[=:] ?true/i)
-})
-
-test("explicit zero observed pricing and a zero full-allowance projection are both valid, never unpriced", async () => {
-  const h = await renderHarness()
-  const T = Date.now()
-  h.renderProvider([{ label: "Daily", percent: 42, apiValue: apiValue({ observedUSD: 0, projectedFullUSD: null, projectionStatus: "unavailable", reason: "Need 15 minutes", observedAt: T, trackingSince: T - 47 * 60000 }) }], { observedAt: T })
-  const text = h.text("#quota-estimates")
-  assert.match(text, /Observed API value ≈ USD 0 · zero priced work so far/)
-  assert.match(text, /Estimated full allowance unavailable — Need 15 minutes/)
-  const g = await renderHarness()
-  const U = Date.now()
-  g.renderProvider([{ label: "Daily", percent: 42, apiValue: apiValue({ observedUSD: 0, projectedFullUSD: 0, observedAt: U, trackingSince: U - 47 * 60000 }) }], { observedAt: U })
-  assert.match(g.text("#quota-estimates"), /Estimated full allowance ≈ USD 0 · approximate/)
-  assert.doesNotMatch(g.text("#quota-estimates"), /unpriced/)
-})
-
-test("unpriced window shows unpriced wording, never a fabricated 0 or projection", async () => {
-  const h = await renderHarness()
-  const T = Date.now()
-  h.renderProvider([{ label: "Daily", percent: 42, apiValue: apiValue({ observedUSD: null, pricedRecords: 0, unpricedRecords: 10, projectedFullUSD: null, projectionStatus: "unavailable", reason: "API prices unavailable", observedAt: T, trackingSince: T - 47 * 60000 }) }], { observedAt: T })
-  const text = h.text("#quota-estimates")
-  assert.match(text, /Observed API value · unpriced \(no priced work recorded yet\)/)
-  assert.match(text, /Estimated full allowance unavailable — API prices unavailable/)
-})
-
-test("window without apiValue (older host) says not tracked, waiting — not zero", async () => {
-  const h = await renderHarness()
-  h.renderProvider([{ label: "Daily", percent: 42 }])
-  const text = h.text("#quota-estimates")
-  assert.match(text, /Observed API value · not tracked yet/)
-  assert.doesNotMatch(text, /Estimated full allowance|USD 0/)
-})
-
-test("stale and unauthenticated sources hide current API values and projections", async () => {
-  const h = await renderHarness()
-  h.renderProvider([{ label: "Daily", percent: 42, apiValue: apiValue() }], { stale: true })
-  assert.match(h.text("#quota-estimates"), /Observed API value unavailable · stale quota/)
-  const g = await renderHarness()
-  g.renderProvider([{ label: "Daily", percent: 42, apiValue: apiValue() }], { authenticated: false })
-  assert.match(g.text("#quota-estimates"), /Observed API value unavailable · stale quota/)
-  assert.doesNotMatch(g.text("#quota-estimates"), /≈ USD/)
-})
-
-test("apiValue rejections per contract: drops whole block, keeps window quota and whitelist keys", async () => {
-  const h = await renderHarness()
-  const cases = [
-    { label: "Currency", apiValue: apiValue({ currency: "EUR" }) },
-    { label: "Basis", apiValue: apiValue({ basis: "retail" }) },
-    { label: "Complete", apiValue: apiValue({ complete: true }) },
-    { label: "Status", apiValue: apiValue({ projectionStatus: "flying" }) },
-    { label: "Fractional", apiValue: apiValue({ pricedRecords: 6.5 }) },
-    { label: "CounterSum", apiValue: apiValue({ unpricedRecords: 5 }) },
-    { label: "PartialOverflow", apiValue: apiValue({ partialRecords: 11 }) },
-    { label: "EstimatedDeltaZero", apiValue: apiValue({ quotaDeltaPercent: 0 }) },
-    { label: "EstimatedShortSpan", apiValue: apiValue({ spanMs: 14 * 60000, trackingSince: Date.now() - 14 * 60000 }) },
-    { label: "SpanMismatch", apiValue: apiValue({ observedAt: Date.now() - 48 * 60000, trackingSince: Date.now() - 47 * 60000 }) },
-    { label: "TrackNullSpan", apiValue: apiValue({ trackingSince: null }) },
-    { label: "NoRecords", apiValue: apiValue({ records: undefined }) },
-    { label: "NoClock", apiValue: apiValue({ observedAt: undefined }) },
-    { label: "NegCash", apiValue: apiValue({ observedUSD: -5 }) },
-    { label: "NoCashWithPrices", apiValue: apiValue({ observedUSD: null }) },
-    { label: "EstimatedReason", apiValue: apiValue({ reason: "working on it" }) },
-    { label: "NoProjection", apiValue: apiValue({ projectedFullUSD: null }) },
-    { label: "ReasonGone", apiValue: apiValue({ projectionStatus: "unavailable", projectedFullUSD: null, reason: "" }) },
-    { label: "MissingDelta", apiValue: apiValue({ projectionStatus: "unavailable", projectedFullUSD: null, reason: "ok", quotaDeltaPercent: undefined }) },
-    { label: "ReasonControl", apiValue: apiValue({ projectionStatus: "unavailable", projectedFullUSD: null, reason: "line\nbreak" }) },
-    { label: "ReasonLong", apiValue: apiValue({ projectionStatus: "unavailable", projectedFullUSD: null, reason: "x".repeat(161) }) },
-  ]
-  const windows = JSON.parse(h.eval(`JSON.stringify(usageWindows(${JSON.stringify(cases.map(item => ({ percent: 42, label: item.label, apiValue: item.apiValue })))}))`))
-  for (const w of windows) assert.equal(w.apiValue, undefined, `${w.label}: contract violation rejected whole`)
-  assert.equal(windows[0].percent, 42, "good quota fields survive every rejection")
-  const kept = JSON.parse(h.eval(`JSON.stringify(usageWindows([{ percent: 42, apiValue: ${JSON.stringify(apiValue({ junkUSD: 999, totalUSD: "many" }))} }]))`))[0].apiValue
-  assert.deepEqual(new Set(Object.keys(kept)), new Set(["currency", "basis", "complete", "projectionStatus", "trackingSince", "observedAt", "spanMs", "observedUSD", "projectedFullUSD", "quotaDeltaPercent", "reason", "records", "pricedRecords", "unpricedRecords", "partialRecords"]), "whitelisted keys only")
-  assert.equal(kept.complete, false, "normalized payload carries the backend complete:false literal")
-  assert.equal(kept.observedUSD, 12.34)
-  assert.equal(kept.projectedFullUSD, 45.6)
-  h.renderProvider([{ label: "Bad", percent: 42, apiValue: apiValue({ currency: "EUR" }) }, { label: "Good", percent: 42, apiValue: apiValue() }])
-  const render = h.text("#quota-estimates")
-  assert.match(render, /not tracked yet/)
-  assert.match(render, /Observed API value ≈ USD 12[.,]34/, "a valid block beside a rejected one still renders")
-  assert.doesNotMatch(render, /999|many/)
-})
-
-test("a dollar value clock mismatched by even one minute — older or future — is not presented as current", async () => {
-  const h = await renderHarness()
-  const T = Date.now()
-  h.renderProvider([{
-    label: "Daily", percent: 42,
-    apiValue: apiValue({ observedAt: T - 60000, trackingSince: T - 60000 - 47 * 60000 }),
-  }], { observedAt: T })
-  const text = h.text("#quota-estimates")
-  assert.match(text, /Observed API value unavailable · stale value observation/, "one minute behind fails exact equality")
-  assert.doesNotMatch(text, /≈ USD/)
-  assert.doesNotMatch(text, /Estimated full allowance ≈/)
-  const g = await renderHarness()
-  const F = Date.now()
-  g.renderProvider([{
-    label: "Daily", percent: 42,
-    apiValue: apiValue({ observedAt: F + 60000, trackingSince: F + 60000 - 47 * 60000 }),
-  }], { observedAt: F })
-  const gtext = g.text("#quota-estimates")
-  assert.match(gtext, /Observed API value unavailable · stale value observation/, "future unequal clock also suppressed")
-  assert.doesNotMatch(gtext, /≈ USD/)
-})
-
-test("providers without numeric quota windows render no API values and the tab makes no network calls", async () => {
-  const h = await renderHarness()
-  h.renderProvider([{ label: "Requests", remaining: 5, apiValue: apiValue() }])
-  assert.match(h.text("#quota-estimates"), /No quota estimates yet/)
-  const T = Date.now()
-  h.renderProvider([{ label: "Daily", percent: 42, apiValue: apiValue({ observedAt: T, trackingSince: T - 47 * 60000 }) }, { label: "Weekly", percent: 10, apiValue: apiValue({ observedUSD: 3, observedAt: T, trackingSince: T - 47 * 60000 }) }], { observedAt: T })
-  assert.match(h.text("#quota-estimates"), /Observed API value ≈ USD 3 · 10 of 10 records priced/)
-  assert.equal(h.fetchCalls(), 0, "rendering stays off the wire")
-})
-
-test("quota page spacing: tabs to tiles 24px, and the green notes get the page's 26px top margin", async () => {
-  const page = await readPage()
-  const style = page.slice(page.indexOf("<style>"), page.indexOf("</style>"))
-  assert.match(style, /#quota-providers,#quota-estimates\{margin-top:24px\}/)
-  assert.match(style, /#quota-panel-estimates \.note\{margin-top:26px\}/)
-  // the rule lives after .tab-panel so it wins by source order, and touches no other page
-  assert.ok(style.indexOf(".tab-panel{min-width:0}") < style.indexOf("#quota-providers,#quota-estimates{margin-top:24px}"))
-  assert.doesNotMatch(style, /\busage-grid\{[^}]*margin-top/)
+  assert.match(panel, /not a bill/)
+  assert.match(panel, /never add their estimates together/)
+  assert.match(panel, /not limited to 90 days/)
+  assert.match(panel, /shown as a gap, never as zero/)
+  assert.match(panel, /API-price equivalents/)
+  assert.match(panel, /no historical backfill/)
+  assert.doesNotMatch(panel, /Past windows|over the last 7 window lengths/, "obsolete observation-chart wording is gone")
 })

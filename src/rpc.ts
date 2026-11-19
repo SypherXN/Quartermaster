@@ -62,6 +62,7 @@ export const QUARTERMASTER_RPC = Rpc.define({
     status: { input: object({}), output },
     quotaHistory: {
       input: object({
+        kind: { type: "string", enum: ["points", "windows"] },
         sourceID: string,
         windowName: string,
         from: { type: "integer", minimum: 0 },

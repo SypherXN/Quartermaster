@@ -58,7 +58,7 @@ var fixtureEstimate=(cutoffAt)=>({status:'estimated',cutoffPercent:100,ratePerMi
 
 // Provider ids stay slash-free: modelParts treats the text before the first '/' as the provider.
 
-test("strategy selects expose all five pick-by values and round-trip a choice", async () => {
+test("strategy selects expose all six pick-by values and round-trip a choice", async () => {
   const h = await routingHarness()
   const result = JSON.parse(h.run(`(()=>{
     draft={categories:{w:['alpha/m']}}
@@ -75,23 +75,25 @@ test("strategy selects expose all five pick-by values and round-trip a choice", 
   })()`))
   assert.deepEqual(result.options, [
     "in-order|In order", "reset-soonest|Reset soonest", "pace|Balanced pace",
-    "weighted-pace|Weighted pace", "window-protection|Window protection",
+    "weighted-pace|Weighted pace", "weighted-priority|Weighted by pace and priority", "window-protection|Window protection",
   ])
   assert.equal(result.weighted, "weighted-pace")
   assert.equal(result.protection, "window-protection")
   assert.equal(result.shown, "window-protection", "sync() reads the saved pick back")
 })
 
-test("saved options keep the new pick.by values and reject unknown ones with all five listed", async () => {
+test("saved options keep the new pick.by values and reject unknown ones with all six listed", async () => {
   const h = await routingHarness()
   h.run(`draft={plans:{p:['alpha/m']},categories:{w:['alpha/m']}};writeCategoryPick('w','window-protection',[])`)
   const kept = JSON.parse(h.run(`JSON.stringify(editedOptions().categories.w.pick)`))
   assert.deepEqual(kept, { by: "window-protection" }, "the saved config carries window-protection through normalization")
-  const both = JSON.parse(h.run(`JSON.stringify(['weighted-pace','window-protection'].map(by=>normalizeCategories({c:{models:['alpha/m'],pick:{by}}}).c.pick.by))`))
-  assert.deepEqual(both, ["weighted-pace", "window-protection"])
+  const both = JSON.parse(h.run(`JSON.stringify(['weighted-pace','weighted-priority','window-protection'].map(by=>normalizeCategories({c:{models:['alpha/m'],pick:{by}}}).c.pick.by))`))
+  assert.deepEqual(both, ["weighted-pace", "weighted-priority", "window-protection"])
+  const weights = JSON.parse(h.run(`JSON.stringify([{'alpha/m':2},{}].map(weights=>normalizeCategories({c:{models:['alpha/m'],pick:{by:'weighted-priority',weights}}}).c.pick))`))
+  assert.deepEqual(weights, [{ by: "weighted-priority", weights: { "alpha/m": 2 } }, { by: "weighted-priority" }])
   let message = ""
   try { h.run(`normalizeCategories({c:{models:['alpha/m'],pick:{by:'weighted'}}})`) } catch (error) { message = error.message }
-  assert.match(message, /must be in-order, reset-soonest, pace, weighted-pace or window-protection/)
+  assert.match(message, /must be in-order, reset-soonest, pace, weighted-pace, weighted-priority or window-protection/)
 })
 
 test("typeahead category suggestions label the two new strategies", async () => {
@@ -256,6 +258,21 @@ test("same-provider model variants do not inflate the weighted share", async () 
   assert.match(groups, /m2 · v2/, "the variant row still renders its variant label")
 })
 
+test("weighted priority shares use positional or strongest explicit model weights", async () => {
+  const h = await routingHarness()
+  h.run(`
+    saved={categories:{mix:{models:['alpha/m1','beta/m1','alpha/m2'],pick:{by:'weighted-priority'}}}}
+    usageData=['alpha','beta'].map(id=>fixtureSource(id,[{label:'5h',percent:40,resetsAt:Date.now()+4*3600000}]))
+    paintRouting()
+  `)
+  assert.match(h.text("#routing-groups"), /67%/)
+  assert.match(h.text("#routing-groups"), /33%/)
+  h.run(`saved.categories.mix.pick.weights={'alpha/m2':4};paintRouting()`)
+  assert.match(h.text("#routing-groups"), /80%/)
+  assert.match(h.text("#routing-groups"), /20%/)
+  assert.match(h.text("#routing-strategies"), /No category uses in order/)
+})
+
 test("zero-weight providers drop out of the weighted shares without changing the balanced card", async () => {
   const h = await routingHarness()
   h.run(`
@@ -275,9 +292,10 @@ test("zero-weight providers drop out of the weighted shares without changing the
     "the category preview also filters the zero weight: full shows — (never matched here), room shows 100%")
 })
 
-test("static wiring: both strategy selects and the page note carry the five strategies; no network calls", async () => {
+test("static wiring: both strategy selects and the page note carry the strategies; no network calls", async () => {
   const page = await readPage()
   assert.equal(page.split("value:'weighted-pace',text:'Weighted pace'").length - 1, 2, "slot control and plan pick select both list it")
+  assert.equal(page.split("value:'weighted-priority',text:'Weighted by pace and priority'").length - 1, 2)
   assert.equal(page.split("value:'window-protection',text:'Window protection'").length - 1, 2)
   assert.match(page, /Weighted pace spreads new assignments across providers in proportion to their fresh pace/)
   assert.match(page, /window protection ranks by that pace times a risk factor/i)

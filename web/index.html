@@ -93,6 +93,25 @@ p+p{margin-top:8px}
 .bar-fill{height:100%;background:var(--green);min-width:0}
 .bar-row:nth-child(2n) .bar-fill{background:var(--accent)}
 .chart-foot{border-top:1px solid var(--line);padding-top:16px;margin-top:24px;font-size:11px;color:var(--muted)}
+.window-card .panel-head p{overflow-wrap:anywhere}
+.wh-current{padding:16px 0 4px;margin-top:16px;border-top:1px solid var(--line)}
+.wh-current .hint{margin:4px 0 0}
+.wh-amount{font:34px/1.15 Georgia,serif;color:var(--ink);margin:6px 0 2px;overflow-wrap:anywhere}
+.wh-amount.wh-none{font-size:22px;color:var(--muted)}
+.wh-history{padding-top:16px;margin-top:16px;border-top:1px solid var(--line);min-width:0}
+.wh-history h3{font:11px var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin:0 0 10px}
+.wh-region{min-width:0}
+.wh-region .hint{margin:8px 0 0}
+.wh-plot{border:1px solid var(--line);background:#f8f6ea;padding:6px;min-width:0}
+.wh-svg{display:block;width:100%;height:auto;max-height:200px}
+.wh-mark{cursor:pointer}
+.wh-readout{font-size:12px;margin:8px 0 0;overflow-wrap:anywhere}
+.wh-error{color:#76581d}
+.wh-region button{margin-top:10px;min-height:36px}
+.wh-region button[aria-disabled=true]{opacity:.6;cursor:progress}
+.wh-details{margin-top:12px;min-width:0}
+.wh-details summary{cursor:pointer;font-size:12px;font-weight:700;width:fit-content;padding:4px 0}
+.wh-details .ledger-wrap{overflow-x:auto;margin-top:8px}
 .route-item{padding:15px 0;border-bottom:1px solid var(--line)}
 .route-item:first-child{padding-top:0}
 .route-item:last-child{border:0;padding-bottom:0}
@@ -531,7 +550,7 @@ details.plan[open]>summary{margin-bottom:18px}
    <div class="page-head"><div><div class="eyebrow"><span class="register-index" aria-hidden="true">06</span>Provider quota</div><h1 id="quota-heading">Quota.</h1><p>Provider windows from the latest snapshot. A missing percent or reset stays unknown.</p></div><button id="refresh-quota" type="button" class="head-action">↻ &nbsp; Refresh quota</button></div>
   <div class="tab-strip" role="tablist" aria-label="Quota views"><button type="button" class="tab" role="tab" id="quota-tab-usage" aria-selected="true" aria-controls="quota-panel-usage" tabindex="0"><span class="register-index" aria-hidden="true">01</span>Usage</button><button type="button" class="tab" role="tab" id="quota-tab-estimates" aria-selected="false" aria-controls="quota-panel-estimates" tabindex="-1"><span class="register-index" aria-hidden="true">02</span>Estimates</button></div>
   <div class="tab-panel" id="quota-panel-usage" role="tabpanel" aria-labelledby="quota-tab-usage" tabindex="0"><div id="quota-providers" class="usage-grid"></div><p id="quota-status" class="status-line" role="status" aria-live="polite">Quota loads with this page.</p></div>
-  <div class="tab-panel" id="quota-panel-estimates" role="tabpanel" aria-labelledby="quota-tab-estimates" tabindex="-1" hidden><div class="note"><strong id="quota-estimates-heading">Read estimates as hints, not decisions.</strong> An estimate assumes the recent observed pace continues and is informational only; it informs routing only when a category picks Window protection, and until then nothing here reroutes traffic or saves settings. Automatic routing draws on a provider's available quota until 100%, or until the provider reports a limit earlier. That is not a guarantee that all remaining quota is usable, and nothing here bypasses a reported limit. The reset time is reported by the quota source, never guessed. A forecast needs at least 15 minutes of fresh authenticated history (at least two samples) and holds only while the recent rate does. Unconfigured, free and local providers with no numeric quota percent get no estimate.</div><div class="note"><strong>About API values.</strong> Dollar figures here are current API-price equivalents seen in telemetry — not subscription bills or the whole account. A window's dollar value snapshots when it resets or maxes; snapshots are retained for 90 days, and still older data becomes a cumulative summary. This pane shows each window's current value only, never that history, and nested quota windows overlap, so their values must not be summed. Collection starts with tracking and may miss other clients, compaction and gaps, with no historical backfill. Missing or partial model pricing leaves a known subtotal but blocks the full-allowance projection (aliases often go unpriced). The full allowance otherwise extrapolates the recent USD cost per percentage point — not a fixed provider budget.</div><div id="quota-estimates" class="usage-grid"></div></div>
+  <div class="tab-panel" id="quota-panel-estimates" role="tabpanel" aria-labelledby="quota-tab-estimates" tabindex="-1" hidden><div class="note"><strong id="quota-estimates-heading">One estimate per quota window.</strong> Each card shows the current estimate for its open window and a chart of the estimates saved when earlier windows closed. An estimate is the approximate API-priced value of a full window, projected from the recent cost per percentage point of quota used. It is not a bill or a provider budget, and it is informational only: nothing here reroutes traffic or saves settings. Windows overlap, so never add their estimates together.</div><div class="note"><strong>About saved estimates.</strong> When a window closes, its last valid estimate is saved with the time it was taken. Saved windows are kept and are not limited to 90 days. The close is found from quota observations, so the exact end time is not known, and a window with no estimate is shown as a gap, never as zero. Dollar figures are API-price equivalents of usage seen in telemetry. Collection starts with tracking and may miss other clients, compaction and gaps, with no historical backfill, so an estimate is only as complete as the usage seen. Missing or partial model pricing leaves a window without an estimate.</div><div id="quota-estimates" class="usage-grid"></div></div>
 </section>
 <footer class="footer"><span>QUARTERMASTER <span aria-hidden="true">/</span> MODEL SUPPLY OFFICE</span><span>Local data. Explicit actions. No background inference.</span></footer>
 </main></div></div>
@@ -589,6 +608,8 @@ function mount(selector,...children){const node=document.querySelector(selector)
 function empty(title,detail){return h('div',{class:'empty'},h('strong',{text:title}),h('span',{text:detail}))}
 function number(value){return typeof value==='number'&&Number.isFinite(value)?value.toLocaleString(undefined,{maximumFractionDigits:2}):'—'}
 function known(value){return typeof value==='number'&&Number.isFinite(value)}
+// A positive amount below one cent must not round to a literal "0": zero means exactly zero.
+function money(value){return typeof value==='number'&&Number.isFinite(value)&&value>0&&value<0.01?'<0.01':number(value)}
 function stat(label,value,detail,accent=false){return h('div',{class:`stat${accent?' accent':''}`},h('div',{class:'eyebrow',text:label}),h('div',{class:'number',text:value}),h('p',{text:detail}))}
 function timeText(timestamp,now=Date.now()){
   if(!known(timestamp)||timestamp<=0)return 'Time unknown'
@@ -1408,6 +1429,7 @@ function slotStrategyControl(label,getName,refresh){
     h('option',{value:'reset-soonest',text:'Reset soonest'}),
     h('option',{value:'pace',text:'Balanced pace'}),
     h('option',{value:'weighted-pace',text:'Weighted pace'}),
+    h('option',{value:'weighted-priority',text:'Weighted by pace and priority'}),
     h('option',{value:'window-protection',text:'Window protection'}))
   select.hidden=true
   return {node:select,sync(){const name=getName();select.hidden=!name;select.value=name?(categoryPick(draft.categories[name]).by||'in-order'):''}}
@@ -1432,10 +1454,11 @@ function attachModelCombo(input,commit){
   }
   function pick(item){input.value=item.value;closeOpen();commit(item.value)}
   function build(){
-    const needle=(input.value||'').trim().toLowerCase()
-    const hit=(...texts)=>!needle||texts.some(text=>text.toLowerCase().includes(needle))
     const models=catalogModels()
     const catalogIds=new Set(models.map(model=>`${model.providerID}/${model.id}`))
+    // A field holding a complete catalog id lists everything, so another model can be picked.
+    const needle=catalogIds.has((input.value||'').trim())?'':(input.value||'').trim().toLowerCase()
+    const hit=(...texts)=>!needle||texts.some(text=>text.toLowerCase().includes(needle))
     const groups=[['Categories',[]],['Preferred',[]],['Catalog',[]]]
     for(const name of Object.keys(draft?.categories||{})){
       const label=`@${name}`
@@ -1454,7 +1477,7 @@ function attachModelCombo(input,commit){
       groups[1][1].push({label:`${value} · not in catalog`,value})
     }
     options=[];menu.replaceChildren()
-    let left=40
+    let left=200
     for(const [heading,items] of groups){
       if(!items.length)continue
       const slice=items.slice(0,left)
@@ -1489,7 +1512,10 @@ function attachModelCombo(input,commit){
     else if(event.key==='Escape'){if(opened){event.preventDefault();closeOpen()}}
   })
   input.addEventListener('blur',closeOpen)
-  input.addEventListener('focus',()=>{if(!menu.classList.contains('open'))open()})
+  input.addEventListener('focus',()=>{
+    if(!menu.classList.contains('open'))open()
+    if(catalogModels().some(model=>`${model.providerID}/${model.id}`===input.value.trim()))input.select()
+  })
   return wrap
 }
 function catalogSuggestions(){
@@ -1518,26 +1544,6 @@ function estimateFresh(source){
   const observedAt=source?epoch(source.observedAt)??epoch(source.checkedAt):undefined
   const now=Date.now()
   return source?.stale!==true&&source?.authenticated!==false&&observedAt!==undefined&&observedAt<=now&&now-observedAt<=5*60000
-}
-function estimateLine(window,source){
-  // Display only: the gateway computes the forecast; the page just words it.
-  // Every estimate is a claim about fresh observations, so freshness gates ALL states.
-  if(!known(window.percent))return ''
-  const estimate=window.estimate
-  if(!estimate||!known(estimate.cutoffPercent))return estimateFresh(source)?'Estimate · insufficient history (needs at least 15 min of fresh observations)':'Estimate unavailable · stale quota'
-  if(!estimateFresh(source))return 'Estimate unavailable · stale quota'
-  const cutoff=Math.round(estimate.cutoffPercent)
-  if(estimate.status==='cutoff-reached')return known(window.percent)&&window.percent<cutoff?'Estimate out of date':`Routing cutoff reached (${cutoff}%)`
-  if(estimate.status==='no-recent-usage')return 'No recent quota increase; estimate unavailable'
-  if(estimate.status==='stale')return 'Estimate unavailable · stale quota'
-  if(estimate.status!=='estimated'||estimate.ratePerMinute===undefined||estimate.cutoffAt===undefined)return 'Estimate · insufficient history (needs at least 15 min of fresh observations)'
-  const cutoffAt=epoch(estimate.cutoffAt),reset=epoch(window.resetsAt)
-  if(cutoffAt<=Date.now())return known(window.percent)&&window.percent>=cutoff?`Routing cutoff reached (${cutoff}%)`:'Estimate out of date'
-  if(reset!==undefined&&reset<=Date.now())return 'Estimate out of date' // the reset passed, so this forecast is from before it; wait for a fresh quota read
-  if(reset!==undefined&&reset<=cutoffAt)return `Estimate · reset expected before ${cutoff}% cutoff at recent usage rate`
-  const span=estimate.spanMs!==undefined?` over ${estimateSpan(estimate.spanMs)}`:''
-  const rate=estimate.ratePerMinute<0.01?`rate less than 0.01 percentage points/min${span}`:`about ${number(estimate.ratePerMinute)} percentage points/min${span}`
-  return `Estimate · ${cutoff}% cutoff ≈ ${timeText(cutoffAt)} · if the recent rate holds (${rate})`
 }
 function paintUsage(){
  const sources=(usageData||[]).filter(item=>typeof item?.providerID==='string'&&item.providerID)
@@ -1574,73 +1580,272 @@ function paintUsage(){
  paintUsageEstimates()
 }
 
-function estimateBasis(window){
-  const e=window.estimate
-  if(!e)return ''
-  const parts=[]
-  if(known(e.sampleCount)&&e.sampleCount>0)parts.push(`${number(e.sampleCount)} sample${e.sampleCount===1?'':'s'}`)
-  if(known(e.spanMs)&&e.spanMs>0)parts.push(`${estimateSpan(e.spanMs)} span`)
-  return parts.length?`estimate basis · ${parts.join(' · ')}`:''
+// Per-window saved estimates. One kind=windows fetch per sourceID+windowName per cache window (HISTORY_TTL_MS),
+// shared by every repaint; failures are cached too so the pane never retries in a loop.
+const HISTORY_TTL_MS=60000
+const WINDOW_HISTORY_PAGE_LIMIT=20
+const windowHistoryCache=new Map()
+function svgNode(tag,attrs,text){
+ // createElementNS is the only way to build SVG in a browser; the fallback keeps the page
+ // loadable in the test harnesses, whose mock document implements createElement only.
+ const node=document.createElementNS?document.createElementNS('http://www.w3.org/2000/svg',tag):document.createElement(tag)
+ for(const [key,value] of Object.entries(attrs??{}))node.setAttribute(key,String(value))
+ if(text!=null)node.textContent=text
+ return node
 }
+function historyKey(sourceID,windowName){return JSON.stringify([sourceID,windowName])}
 function apiValueStale(window,source){
-  // Backend proves currency-dollar freshness by exact clock equality with the quota observation;
-  // anything unequal — older or future — is suppressed, never presented as current.
-  const value=window?.apiValue
-  if(!value)return false
-  const valueAt=epoch(value.observedAt)
-  const sourceAt=source?epoch(source.observedAt)??epoch(source.checkedAt):undefined
-  return valueAt===undefined||sourceAt===undefined||valueAt!==sourceAt
+ // Backend proves currency-dollar freshness by exact clock equality with the quota observation;
+ // anything unequal — older or future — is suppressed, never presented as current.
+ const value=window?.apiValue
+ if(!value)return false
+ const valueAt=epoch(value.observedAt)
+ const sourceAt=source?epoch(source.observedAt)??epoch(source.checkedAt):undefined
+ return valueAt===undefined||sourceAt===undefined||valueAt!==sourceAt
 }
-function apiValueText(window,source){
-  // Observed API-equivalent cash for this window; stale observations show nothing current.
-  const value=window.apiValue
-  if(!value)return estimateFresh(source)?'Observed API value · not tracked yet':'Observed API value unavailable · stale quota'
-  if(!estimateFresh(source))return 'Observed API value unavailable · stale quota'
-  if(apiValueStale(window,source))return 'Observed API value unavailable · stale value observation'
-  if(value.observedUSD==null)return 'Observed API value · unpriced (no priced work recorded yet)'
-  const parts=[]
-  if(value.observedUSD===0)parts.push('zero priced work so far')
-  if(known(value.pricedRecords))parts.push(known(value.records)?`${number(value.pricedRecords)} of ${number(value.records)} records priced`:`${number(value.pricedRecords)} records priced`)
-  if(known(value.partialRecords)&&value.partialRecords>0)parts.push(`${number(value.partialRecords)} partial`)
-  if(known(value.spanMs)&&value.spanMs>0)parts.push(`${estimateSpan(value.spanMs)} track span`)
-  return `Observed API value ≈ ${value.currency} ${number(value.observedUSD)}`+(parts.length?` · ${parts.join(' · ')}`:'')
+// The single current figure for an open window: the full-allowance projection, or the reason there is none.
+function currentEstimate(window,source){
+ const value=window.apiValue
+ if(!estimateFresh(source))return {state:'unavailable',reason:'Stale quota reading, so no current estimate is shown. Saved windows below are unaffected.'}
+ if(!value)return {state:'unavailable',reason:'Not tracked yet.'}
+ if(apiValueStale(window,source))return {state:'unavailable',reason:'The estimate does not match the latest quota reading.'}
+ if(value.projectionStatus==='estimated'&&known(value.projectedFullUSD))return {state:'estimate',amount:value.projectedFullUSD,value}
+ return {state:'unavailable',reason:value.reason||'No estimate recorded yet.',value}
 }
-function apiValueForecastText(window,source){
-  const value=window.apiValue
-  if(!value||!estimateFresh(source)||apiValueStale(window,source))return ''
-  if(value.projectionStatus==='estimated')return `Estimated full allowance ≈ ${value.currency} ${number(value.projectedFullUSD)} · approximate; recent USD per percentage point, not a provider budget`
-  return `Estimated full allowance unavailable${value.reason?` — ${value.reason}`:''}`
+function windowRowClock(value){return Number.isSafeInteger(value)&&value>=0&&value<=8640000000000000}
+function windowHistoryRow(raw,sourceID,windowName){
+ const percent=value=>known(value)&&value>=0&&value<=100
+ const clock=windowRowClock
+ if(!raw||raw.version!==1||raw.sourceID!==sourceID||raw.windowName!==windowName||
+  !clock(raw.lastObservedAt)||!clock(raw.nextObservedAt)||raw.nextObservedAt<=raw.lastObservedAt||
+  !percent(raw.lastPercent)||!percent(raw.nextPercent)||
+  !(raw.resetsAt===null||clock(raw.resetsAt))||!(raw.nextResetsAt===null||clock(raw.nextResetsAt))||
+  typeof raw.resetEstimated!=='boolean'||typeof raw.deadlineCrossed!=='boolean'||
+  (raw.deadlineCrossed?raw.resetsAt===null||raw.resetsAt<=raw.lastObservedAt||raw.resetsAt>raw.nextObservedAt:raw.nextPercent>=raw.lastPercent))return null
+ const value=usageApiValue({apiValue:raw.finalEstimate})
+ const finalEstimate=value?.projectionStatus==='estimated'&&value.projectedFullUSD!==null&&value.observedAt<=raw.lastObservedAt?value:undefined
+ // An unavailable outcome keeps only a clean reason; legacy cash/maxed values and private points never enter the view.
+ const rawReason=raw.finalEstimate&&typeof raw.finalEstimate==='object'?raw.finalEstimate.reason:undefined
+ const reason=!finalEstimate&&typeof rawReason==='string'&&rawReason.trim()&&rawReason.length<=160&&!/[\u0000-\u001f\u007f]/.test(rawReason)?rawReason:undefined
+ const anchor=windowRowClock(raw.instanceAnchorAt)&&raw.instanceAnchorAt<=raw.lastObservedAt?raw.instanceAnchorAt:undefined
+ return {sourceID,windowName,lastObservedAt:raw.lastObservedAt,nextObservedAt:raw.nextObservedAt,resetEstimated:raw.resetEstimated,deadlineCrossed:raw.deadlineCrossed,...(finalEstimate?{finalEstimate}:{}),...(reason?{reason}:{}),...(anchor!==undefined?{instanceAnchorAt:anchor}:{})}
+}
+function windowHistoryFill(entry){
+ entry.boxes=entry.boxes.filter(box=>box.isConnected)
+ for(const box of entry.boxes){
+  const active=document.activeElement
+  const focusKey=active&&box.contains?.(active)?active.getAttribute?.('data-wh-focus'):null
+  box.replaceChildren(...windowHistoryBody(entry))
+  // A repaint must not drop the user's place: put focus back on the same control.
+  if(focusKey)box.querySelector?.(`[data-wh-focus="${focusKey}"]`)?.focus?.()
+ }
+}
+// Loads the first page, refreshes the newest loaded page, or (more=true) appends the next page. Rows are
+// immutable once saved, so pages merge by durable row identity and a failure never discards loaded rows.
+function windowHistoryRequest(entry,more=false,force=false){
+ if(entry.inflight)return entry.inflight
+ if(more){if(!entry.nextCursor)return}
+ else if(!force&&(entry.state==='ok'&&entry.nextCursor||Date.now()-entry.at<HISTORY_TTL_MS))return
+ const cursor=more?entry.nextCursor:entry.tailCursor
+ entry.busy=true
+ windowHistoryFill(entry)
+ entry.inflight=(async()=>{
+  const query=`kind=windows&sourceID=${encodeURIComponent(entry.sourceID)}&windowName=${encodeURIComponent(entry.windowName)}&limit=${WINDOW_HISTORY_PAGE_LIMIT}${cursor?`&cursor=${encodeURIComponent(cursor)}`:''}`
+  const response=await fetch(`/api/quota-history?${query}`,{cache:'no-store',credentials:'same-origin'})
+  if(!response.ok)throw Error(`Saved windows HTTP ${response.status}`)
+  const body=await response.json()
+  if(body?.status==='unavailable'){
+   if(entry.rows.length)entry.failure=more?'append':'refresh';else entry.state='unavailable'
+   return
+  }
+  if(body?.status!=='ok'||!Array.isArray(body.windows)||body.windows.length>WINDOW_HISTORY_PAGE_LIMIT||
+   !(body.nextCursor===null||typeof body.nextCursor==='string'&&body.nextCursor.length>0&&body.nextCursor.length<=64&&body.nextCursor!==cursor))throw Error('Invalid saved windows page')
+  const rows=body.windows.map(raw=>windowHistoryRow(raw,entry.sourceID,entry.windowName)).filter(Boolean)
+  const merged=new Map(entry.rows.map(row=>[row.lastObservedAt,row]))
+  for(const row of rows)merged.set(row.lastObservedAt,row)
+  // Rejected rows are counted once per page read, so a refresh of the same page cannot inflate the count.
+  const skippedBy=entry.skippedBy||{}
+  skippedBy[cursor??'']=body.windows.length-rows.length+(known(body.dropped)?body.dropped:0)
+  Object.assign(entry,{state:'ok',failure:null,rows:[...merged.values()].sort((a,b)=>a.lastObservedAt-b.lastObservedAt),nextCursor:body.nextCursor,tailCursor:cursor,skipped:Object.values(skippedBy).reduce((sum,count)=>sum+count,0),skippedBy})
+ })().catch(()=>{if(entry.rows.length)entry.failure=more?'append':'refresh';else entry.state='error'}).finally(()=>{entry.inflight=null;entry.busy=false;entry.at=Date.now();windowHistoryFill(entry)})
+ return entry.inflight
+}
+function windowRowDetail(row){
+ const date=at=>new Date(at).toLocaleString()
+ const boundary=row.deadlineCrossed?(row.resetEstimated?'estimated reset':'reported reset'):'inferred reset'
+ const value=row.finalEstimate?.projectedFullUSD
+ const parts=[`Window closed between the quota observations at ${date(row.lastObservedAt)} and ${date(row.nextObservedAt)} (${boundary}; the exact end is not known).`]
+ parts.push(known(value)?`Saved estimate ≈ USD ${money(value)}, taken from the observation at ${date(row.finalEstimate.observedAt)}. API-equivalent, not billed.`:`No estimate saved${row.reason?`: ${row.reason}`:' (no estimate was recorded for this window)'}.`)
+ if(row.instanceAnchorAt!==undefined)parts.push(`Tracked from ${date(row.instanceAnchorAt)}, the first observation of this window, not the provider's start time.`)
+ return parts.join(' ')
+}
+// Plots only saved closed-window estimates, one mark per loaded row, evenly spaced oldest to newest.
+// A window without an estimate is a dashed gap marker: never zero, never interpolated across.
+function windowChart(entry){
+ const rows=entry.rows
+ const values=rows.map(row=>row.finalEstimate?.projectedFullUSD)
+ const pricedValues=values.filter(known)
+ const W=640,H=176,R=16,T=12,B=34
+ const hi=Math.max(...pricedValues,0.01)
+ const axisLabels=[`USD ${money(hi)}`,'USD 0']
+ const L=Math.max(56,16+6*Math.max(...axisLabels.map(text=>text.length)))
+ const x0=L+12,x1=W-R-12
+ const x=index=>rows.length>1?x0+index/(rows.length-1)*(x1-x0):(x0+x1)/2
+ const y=value=>T+(1-value/hi)*(H-T-B)
+ const label=`Saved estimates for ${entry.windowName} on ${entry.sourceID}: ${number(pricedValues.length)} of ${number(rows.length)} loaded closed windows have an estimate${pricedValues.length?`, from USD ${money(Math.min(...pricedValues))} to USD ${money(Math.max(...pricedValues))}`:''}. Y axis: USD per full window. X axis: closed windows, oldest first.`
+ const svg=svgNode('svg',{viewBox:`0 0 ${W} ${H}`,role:'img','aria-label':label,class:'wh-svg'})
+ const muted={'font-size':10,fill:'var(--muted)'}
+ svg.append(svgNode('line',{x1:L,y1:H-B,x2:W-R,y2:H-B,stroke:'var(--line)'}),svgNode('line',{x1:L,y1:T,x2:L,y2:H-B,stroke:'var(--line)'}))
+ svg.append(svgNode('text',{...muted,x:L-5,y:T+4,'text-anchor':'end'},axisLabels[0]),svgNode('text',{...muted,x:L-5,y:H-B+3,'text-anchor':'end'},axisLabels[1]))
+ svg.append(svgNode('text',{...muted,x:L,y:H-16},new Date(rows[0].lastObservedAt).toLocaleDateString()),svgNode('text',{...muted,x:W-R,y:H-16,'text-anchor':'end'},new Date(rows[rows.length-1].lastObservedAt).toLocaleDateString()))
+ svg.append(svgNode('text',{...muted,x:(L+W-R)/2,y:H-3,'text-anchor':'middle'},`Closed windows, oldest first (${number(rows.length)})`))
+ let run=[]
+ const flush=()=>{if(run.length>1)svg.append(svgNode('polyline',{points:run.join(' '),fill:'none',stroke:'var(--accent)','stroke-width':2}));run=[]}
+ rows.forEach((row,index)=>{if(known(values[index]))run.push(`${x(index).toFixed(1)},${y(values[index]).toFixed(1)}`);else flush()})
+ flush()
+ const readout=h('p',{class:'wh-readout','aria-live':'polite'})
+ const marks=[]
+ let selected=rows.findIndex(row=>row.lastObservedAt===entry.selected)
+ if(selected<0)selected=rows.length-1
+ const select=index=>{
+  selected=Math.min(rows.length-1,Math.max(0,index))
+  entry.selected=rows[selected].lastObservedAt
+  readout.textContent=`Window ${number(selected+1)} of ${number(rows.length)} loaded. ${windowRowDetail(rows[selected])}`
+  marks.forEach((mark,i)=>{mark.setAttribute('data-selected',String(i===selected));mark.firstChild?.setAttribute?.('stroke-width',i===selected?3:0)})
+ }
+ rows.forEach((row,index)=>{
+  const cx=x(index).toFixed(1)
+  const mark=svgNode('g',{class:'wh-mark','data-index':index,'data-estimate':known(values[index])?'saved':'none'})
+  if(known(values[index]))mark.append(svgNode('circle',{cx,cy:y(values[index]).toFixed(1),r:rows.length===1?5:3.5,fill:'var(--accent)',stroke:'var(--ink)','stroke-width':0}))
+  else mark.append(svgNode('line',{x1:cx,y1:T,x2:cx,y2:H-B,stroke:'var(--muted)','stroke-width':1.5,'stroke-dasharray':'3 4'}))
+  mark.append(svgNode('rect',{x:Number(cx)-12,y:T,width:24,height:H-T-B,fill:'transparent'}))
+  mark.append(svgNode('title',{},`${new Date(row.lastObservedAt).toLocaleString()} · ${known(values[index])?`≈ USD ${money(values[index])}`:'no estimate saved'}`))
+  mark.addEventListener('click',()=>select(index))
+  marks.push(mark);svg.append(mark)
+ })
+ select(selected)
+ const keys={ArrowLeft:()=>selected-1,ArrowRight:()=>selected+1,Home:()=>0,End:()=>rows.length-1}
+ const wrap=h('div',{class:'wh-plot',role:'group',tabindex:'0','data-wh-focus':'plot','aria-label':`Saved estimates chart for ${entry.windowName}. Use the left and right arrow keys, Home and End to read each closed window.`,onKeydown:event=>{
+  if(!keys[event.key])return
+  event.preventDefault();select(keys[event.key]())
+ }},svg)
+ return [wrap,readout]
+}
+function windowHistoryBody(entry){
+ const rows=entry.rows
+ const action=(text,more)=>h('button',{type:'button','data-wh-focus':'more','aria-disabled':entry.busy?'true':'false',text:entry.busy?'Loading…':text,onClick:()=>{if(!entry.busy)windowHistoryRequest(entry,more,true)}})
+ if(!rows.length){
+  if(entry.state==='error')return [h('p',{class:'hint',role:'status',text:'Saved window estimates could not be loaded.'}),action('Try again',false)]
+  if(entry.state==='unavailable')return [h('p',{class:'hint',text:'Saved window estimates are unavailable for this source.'})]
+  if(entry.state==='ok'&&!entry.busy)return [h('p',{class:'hint',text:`No closed window saved yet. An estimate is saved here when a ${entry.windowName} window closes.${entry.skipped>0?` ${number(entry.skipped)} saved item${entry.skipped===1?'':'s'} could not be shown.`:''}`})]
+  return [h('p',{class:'hint',role:'status',text:'Loading saved windows…'})]
+ }
+ const nodes=[]
+ if(rows.some(row=>known(row.finalEstimate?.projectedFullUSD)))nodes.push(...windowChart(entry))
+ else nodes.push(h('p',{class:'hint',text:'None of the loaded closed windows has a saved estimate, so there is nothing to chart. Details are listed below.'}))
+ const date=at=>new Date(at).toLocaleDateString()
+ const status=[`Showing ${number(rows.length)} closed window${rows.length===1?'':'s'}, oldest first (${date(rows[0].lastObservedAt)} to ${date(rows[rows.length-1].lastObservedAt)}).`]
+ if(entry.nextCursor)status.push('Newer windows are not loaded yet.')
+ if(entry.skipped>0)status.push(`${number(entry.skipped)} saved item${entry.skipped===1?'':'s'} could not be shown.`)
+ nodes.push(h('p',{class:'hint wh-status',role:'status',text:status.join(' ')}))
+ if(entry.failure)nodes.push(h('p',{class:'hint wh-error',role:'status',text:entry.failure==='append'?'Newer windows could not be loaded. The windows above are still shown.':'The latest check for saved windows failed. The windows above are still shown.'}))
+ // Each failure keeps its own retry, and a forced refresh is reachable: a refresh never appends.
+ if(entry.failure==='append')nodes.push(action('Retry loading newer windows',true))
+ else if(entry.failure==='refresh')nodes.push(action('Retry checking for saved windows',false))
+ else if(entry.nextCursor)nodes.push(action('Load newer windows',true))
+ const body=rows.map(row=>{
+  const value=row.finalEstimate?.projectedFullUSD
+  return h('tr',{},h('td',{text:`${new Date(row.lastObservedAt).toLocaleString()} – ${new Date(row.nextObservedAt).toLocaleString()}`}),h('td',{text:row.deadlineCrossed?(row.resetEstimated?'Estimated reset':'Reported reset'):'Inferred reset'}),h('td',{class:'num',text:known(value)?`USD ${money(value)}`:'No estimate'}),h('td',{text:known(value)?new Date(row.finalEstimate.observedAt).toLocaleString():row.reason||'—'}))
+ })
+ const table=h('table',{class:'ledger'},h('caption',{class:'hint',text:'Closed windows, oldest first. The close falls somewhere between the two quota observations listed.'}),h('thead',{},h('tr',{},h('th',{scope:'col',text:'Closed between'}),h('th',{scope:'col',text:'Boundary'}),h('th',{scope:'col',class:'num',text:'Saved estimate'}),h('th',{scope:'col',text:'Estimated at / reason'}))),h('tbody',{},...body))
+ const details=h('details',{class:'wh-details'},h('summary',{'data-wh-focus':'details',text:`Window details (${number(rows.length)})`}),h('div',{class:'ledger-wrap'},table))
+ if(entry.detailsOpen)details.open=true
+ details.addEventListener('toggle',()=>{entry.detailsOpen=details.open})
+ nodes.push(details)
+ return nodes
+}
+function windowHistoryRegion(card){
+ const {sourceID,windowName}=card
+ const box=h('div',{class:'wh-region','data-source':sourceID,'data-window':windowName})
+ if(!windowName||!sourceID){box.append(h('p',{class:'hint',text:'Saved estimates are unavailable: this source or window has no stable name.'}));return box}
+ const key=historyKey(sourceID,windowName)
+ let entry=windowHistoryCache.get(key)
+ if(!entry){entry={sourceID,windowName,state:'idle',rows:[],nextCursor:null,tailCursor:null,failure:null,skipped:0,skippedBy:{},busy:false,at:-Infinity,detailsOpen:false,selected:null,boxes:[],inflight:null};windowHistoryCache.set(key,entry)}
+ entry.boxes.push(box)
+ box.replaceChildren(...windowHistoryBody(entry))
+ // Request when the card is actually showing; a hidden tab asks nothing until it is opened.
+ if(estimatesVisible())Promise.resolve().then(()=>windowHistoryRequest(entry))
+ return box
+}
+function estimatesVisible(){
+ const panel=document.querySelector?.('#quota-panel-estimates')
+ return !panel||!(panel.hidden||panel.closest?.('[hidden]'))
+}
+// Aliases reading one source can disagree on staleness or observation; pick one deterministically:
+// fresh over stale, then a window carrying a value, then the latest observation, then the first seen.
+function betterSnapshot(candidate,current){
+ const fresh=item=>estimateFresh(item.source)?1:0
+ if(fresh(candidate)!==fresh(current))return fresh(candidate)>fresh(current)
+ const valued=item=>item.window.apiValue?1:0
+ if(valued(candidate)!==valued(current))return valued(candidate)>valued(current)
+ const at=item=>epoch(item.source?.observedAt)??epoch(item.source?.checkedAt)??0
+ return at(candidate)>at(current)
+}
+function windowCards(){
+ // One card per (sourceID, windowName). Provider aliases that read the same source share it.
+ const cards=new Map()
+ for(const source of usageData||[]){
+  if(typeof source?.providerID!=='string'||!source.providerID)continue
+  const provider=catalogData?.providers.find(item=>item.id===source.providerID)
+  const providerName=provider?.name||source.providerID
+  const sourceID=typeof source.sourceID==='string'?source.sourceID:''
+  for(const window of source.windows||[]){
+   if(!known(window.percent))continue
+   const windowName=window.label&&window.label!=='Quota window'?window.label:''
+   const key=sourceID&&windowName?historyKey(sourceID,windowName):JSON.stringify(['provider',source.providerID,window.label])
+   const existing=cards.get(key)
+   if(existing){
+    if(!existing.providers.includes(providerName))existing.providers.push(providerName)
+    if(betterSnapshot({source,window},existing))Object.assign(existing,{source,window})
+    continue
+   }
+   cards.set(key,{sourceID,windowName,source,window,providers:[providerName]})
+  }
+ }
+ return [...cards.values()]
+}
+function windowCardNode(card){
+ const {source,window,sourceID,windowName}=card
+ const current=currentEstimate(window,source)
+ const fresh=estimateFresh(source)
+ const head=h('div',{class:'panel-head'},h('div',{},h('h2',{text:window.label||'Quota window'}),h('p',{class:'mono',text:sourceID?`Source ${sourceID}`:'Source not identified'}),h('p',{class:'hint',text:`Provider${card.providers.length===1?'':'s'}: ${card.providers.join(', ')}`})),h('span',{class:`badge ${fresh?'neutral':'amber'}`,text:fresh?'Fresh quota':'Stale quota'}))
+ const now=h('div',{class:'wh-current','data-current-state':current.state},h('div',{class:'eyebrow',text:'Current estimate · this window'}))
+ if(current.state==='estimate'){
+  now.append(h('div',{class:'wh-amount','data-role':'current-amount',text:`USD ${money(current.amount)}`}),h('p',{class:'hint',text:'Projected full-window API value. Approximate, not billed.'}))
+  const value=current.value,facts=[]
+  if(known(value.pricedRecords)&&known(value.records))facts.push(`${number(value.pricedRecords)} of ${number(value.records)} records priced`)
+  if(known(value.spanMs)&&value.spanMs>0)facts.push(`${estimateSpan(value.spanMs)} tracked`)
+  if(facts.length)now.append(h('p',{class:'hint',text:facts.join(' · ')}))
+ }else now.append(h('div',{class:'wh-amount wh-none','data-role':'current-amount',text:'No estimate'}),h('p',{class:'hint','data-role':'current-reason',text:current.reason}))
+ now.append(h('p',{class:'hint',text:`${number(window.percent)}% used · ${known(window.resetsAt)?`provider reset ${timeText(window.resetsAt)}${window.resetEstimated?' (estimated by the source)':''}`:'provider reset time unknown'}`}))
+ if(source.observedAt)now.append(h('p',{class:'hint',text:`Quota observed ${timeText(source.observedAt)}${source.authenticated===false?' · not authenticated':''}`}))
+ const history=h('div',{class:'wh-history'},h('h3',{text:'Saved window estimates'}),windowHistoryRegion(card))
+ return h('section',{class:'panel window-card','data-source':sourceID,'data-window':windowName},head,now,history)
 }
 function paintUsageEstimates(){
- const sources=(usageData||[]).filter(item=>typeof item?.providerID==='string'&&item.providerID)
- const cards=[]
- for(const source of sources){
-  const id=source.providerID
-  const provider=catalogData?.providers.find(item=>item.id===id)
-  const windows=(source.windows||[]).filter(window=>known(window.percent))
-  if(!windows.length)continue
-  const card=h('section',{class:'panel'},h('div',{class:'panel-head'},h('div',{},h('h2',{text:provider?.name||id}),h('p',{class:'mono',text:id})),h('span',{class:`badge ${source.stale?'amber':'neutral'}`,text:source.stale?'Stale quota':'Estimates'})))
-  const quota=h('div',{class:'quota'})
-  for(const window of windows){
-   const row=h('div',{class:'quota-window'},h('div',{class:'bar-label'},h('strong',{text:window.label||'Quota window'}),h('span',{class:'mono',text:`${number(window.percent)}% used`})))
-   const fill=h('div',{class:'bar-fill'});fill.setAttribute('style',`width:${Math.max(0,Math.min(100,window.percent))}%`)
-   row.append(h('div',{class:'bar-track','aria-hidden':'true'},fill))
-   const estimate=estimateLine(window,source)
-   if(estimate)row.append(h('p',{class:'time',text:estimate}))
-   const basis=estimateBasis(window)
-   if(basis)row.append(h('p',{class:'hint',text:basis}))
-   row.append(h('p',{class:'hint',text:apiValueText(window,source)}))
-   const allowance=apiValueForecastText(window,source)
-   if(allowance)row.append(h('p',{class:'hint',text:allowance}))
-   row.append(h('p',{class:'hint',text:known(window.resetsAt)?`Provider reset reported for ${timeText(window.resetsAt)}${window.resetEstimated?' (estimated by the source)':''}`:'Provider reset reported time unknown'}))
-   if(source.observedAt)row.append(h('p',{class:'hint',text:source.authenticated===false?`Quota observed ${timeText(source.observedAt)} · not authenticated, no forecast`:`Quota observed ${timeText(source.observedAt)}${estimateFresh(source)?' · fresh observation':' · too stale to forecast (needs an observation within the last 5 minutes)'}`}))
-   quota.append(row)
-  }
-  card.append(quota)
-  cards.push(card)
- }
+ const cards=windowCards().map(windowCardNode)
+ // A repaint rebuilds the pane; keep the keyboard user on the same control of the same card.
+ const active=document.activeElement
+ const focusKey=active?.getAttribute?.('data-wh-focus')
+ const focusHost=focusKey?active.closest?.('.window-card'):null
+ const hostSource=focusHost?.getAttribute('data-source'),hostWindow=focusHost?.getAttribute('data-window')
  mount('#quota-estimates',...(cards.length?cards:[empty('No quota estimates yet.','Estimates appear once a provider reports numeric quota windows. Unconfigured, free and local providers without a numeric percent never get one.')]))
-
+ // Sibling repaints can leave old regions behind; none are connected until the completed tree is mounted.
+ for(const entry of windowHistoryCache.values())entry.boxes=entry.boxes.filter(box=>box.isConnected)
+ if(focusKey){
+  const host=Array.from(document.querySelectorAll?.('#quota-estimates .window-card')||[]).find(node=>node.getAttribute('data-source')===hostSource&&node.getAttribute('data-window')===hostWindow)
+  host?.querySelector?.(`[data-wh-focus="${focusKey}"]`)?.focus?.()
+ }
 }
 // Routing reads what the next request would do: categories ordered by their pick
 // policy against the live quota snapshot, and plans expanded in place.
@@ -1653,7 +1858,7 @@ function modelParts(entry){
 }
 function categoryModelsOf(category){return Array.isArray(category)?category:Array.isArray(category?.models)?category.models:[]}
 function categoryPickOf(category){return !Array.isArray(category)&&category?.pick&&typeof category.pick==='object'?category.pick:{}}
-function strategyLabel(by){return by==='pace'?'balanced pace':by==='reset-soonest'?'reset soonest':by==='weighted-pace'?'weighted pace':by==='window-protection'?'window protection':'in order'}
+function strategyLabel(by){return by==='pace'?'balanced pace':by==='reset-soonest'?'reset soonest':by==='weighted-pace'?'weighted pace':by==='weighted-priority'?'weighted pace and priority':by==='window-protection'?'window protection':'in order'}
 function routingSources(){
  const map=new Map()
  for(const source of usageData||[]){if(typeof source?.providerID==='string'&&source.providerID)map.set(source.providerID,source)}
@@ -1800,7 +2005,7 @@ function routingProtectionCard(rows){
 }
 function routingInOrderCard(){
  const categories=saved?.categories&&typeof saved.categories==='object'?saved.categories:{}
- const rows=Object.entries(categories).filter(([,category])=>{const by=categoryPickOf(category).by;return by!=='pace'&&by!=='reset-soonest'&&by!=='weighted-pace'&&by!=='window-protection'})
+ const rows=Object.entries(categories).filter(([,category])=>{const by=categoryPickOf(category).by;return by!=='pace'&&by!=='reset-soonest'&&by!=='weighted-pace'&&by!=='weighted-priority'&&by!=='window-protection'})
  const card=h('section',{class:'panel'},h('div',{class:'panel-head'},h('div',{},h('h2',{text:'In order'}),h('p',{text:'Every model is tried top to bottom in the order the category lists it. Nothing is reordered by quota, so two models on one provider stay in the sequence you wrote.'})),h('span',{class:'badge neutral',text:'in order'})))
  if(!rows.length){card.append(empty('No category uses in order.','Pick In order on a category below.'));return card}
  const body=rows.map(([name,category])=>h('tr',{},h('td',{class:'mono',text:`@${name}`}),h('td',{class:'mono',text:chainLabel(categoryModelsOf(category))})))
@@ -1815,12 +2020,12 @@ function routingCategoryCard(name,category){
  if(!rows.length){card.append(empty('No models in this category.','Add one on the Plans page.'));return card}
  // Weighted pace previews each provider's slice of the fresh pace; one provider's weight
  // is counted once no matter how many of its models or variants the category lists.
- const weights=new Map()
- if(pick.by==='weighted-pace')for(const row of rows){const value=row.clock.freshPace?.value;if(known(value)&&value>0&&!weights.has(row.providerID))weights.set(row.providerID,value)}
- const weightTotal=pick.by==='weighted-pace'?[...weights.values()].reduce((sum,value)=>sum+value,0):0
+ const weights=new Map(), weighted=pick.by==='weighted-pace'||pick.by==='weighted-priority'
+ if(weighted)for(const [index,row] of rows.entries()){const value=row.clock.freshPace?.value;if(known(value)&&value>0){const priority=pick.by==='weighted-priority'?(pick.weights?pick.weights[row.id]??1:0.5**index):1;weights.set(row.providerID,Math.max(weights.get(row.providerID)||0,value*priority))}}
+ const weightTotal=weighted?[...weights.values()].reduce((sum,value)=>sum+value,0):0
  const shareOfProvider=id=>{const weight=weights.get(id);return weight!==undefined&&weightTotal>0?Math.round(weight/weightTotal*100):undefined}
  const cols=[['#','num'],['Model',''],['Resets in','num'],['Pace %/min','num']]
- if(pick.by==='weighted-pace')cols.push(['Share','num'])
+ if(weighted)cols.push(['Share','num'])
  if(pick.by==='window-protection')cols.push(['Risk','num'],['Adjusted %/min','num'])
  const body=rows.map((row,position)=>{
   const window=row.clock.pace||row.clock.soonest
@@ -1828,20 +2033,20 @@ function routingCategoryCard(name,category){
   if(!row.clock.known)notes.push('no quota source')
   else if(row.clock.stale)notes.push('stale quota')
   if(known(window?.percent)&&window.percent>=100)notes.push('quota fully used')
-  if((pick.by==='weighted-pace'||pick.by==='window-protection')&&row.clock.known&&!row.clock.freshPace)notes.push('no fresh pace')
-  if(position===0&&pick.by!=='weighted-pace'&&pick.by!=='window-protection')notes.unshift('next pick')
+   if((weighted||pick.by==='window-protection')&&row.clock.known&&!row.clock.freshPace)notes.push('no fresh pace')
+   if(position===0&&!weighted&&pick.by!=='window-protection')notes.unshift('next pick')
   const line=[window?.label||'',known(window?.percent)?`${number(window.percent)}% used`:'',...notes].filter(Boolean).join(' · ')
   const label=row.variant?`${row.id} · ${row.variant}`:row.id
-  const shownPace=pick.by==='weighted-pace'||pick.by==='window-protection'?row.clock.freshPace||row.clock.pace:row.clock.pace
+   const shownPace=weighted||pick.by==='window-protection'?row.clock.freshPace||row.clock.pace:row.clock.pace
   const cells=[h('td',{class:'num',text:String(position+1)}),h('td',{},h('div',{},h('span',{class:'mono',text:label})),h('div',{class:'hint',text:line||'no window'})),h('td',{class:'num',text:row.clock.soonest?routingTime(row.clock.soonest.resetsAt):'—',title:row.clock.soonest?timeText(row.clock.soonest.resetsAt):''}),h('td',{class:'num mono',text:known(shownPace?.value)?shownPace.value.toFixed(3):'—'})]
-  if(pick.by==='weighted-pace'){const share=shareOfProvider(row.providerID);cells.push(h('td',{class:'num',text:share===undefined?'—':`${share}%`}))}
+   if(weighted){const share=shareOfProvider(row.providerID);cells.push(h('td',{class:'num',text:share===undefined?'—':`${share}%`}))}
   if(pick.by==='window-protection'){
    const risk=row.clock.freshPace?row.clock.factor:undefined, score=protectionScore(row.clock)
    cells.push(h('td',{class:'num mono',text:risk===undefined?'—':`×${Number(risk.toPrecision(3))}`}),h('td',{class:'num mono',text:score===undefined?'—':score.toFixed(3)}))
   }
   return h('tr',{},...cells)
  })
- card.append(h('div',{class:'ledger-wrap'},h('table',{class:'ledger'},h('caption',{class:'hint',text:pick.by==='pace'?'Ordered by remaining room per minute of the tightest window, most first. Pace is percent of a window per minute.':pick.by==='reset-soonest'?'Ordered by the window that resets first. Ties fall to used quota, then the provider path, then file order.':pick.by==='weighted-pace'?'Weighted pace reproducibly draws each new assignment per session, agent, plan and hour in proportion to providers\' fresh sustainable pace — not a new lottery every call — and a session idle under an hour keeps its provider; the drawn winner is the gateway\'s, not shown here. Share is each provider\'s slice of that pace — one provider counts once, however many of its models are listed, and within a provider the declared order stands.':pick.by==='window-protection'?'Ranks by sustainable pace times a risk factor from usable fresh forecasts; missing or unusable forecasts keep the neutral ×1, and rows without fresh pace sort last. Full evidence is on the Window protection card above.':'Ordered as listed. Nothing is reordered by quota, so models on one provider stay in the order you wrote.'}),h('thead',{},h('tr',{},...cols.map(([label,cls])=>h('th',{scope:'col',class:cls,text:label})))),h('tbody',{},...body))))
+  card.append(h('div',{class:'ledger-wrap'},h('table',{class:'ledger'},h('caption',{class:'hint',text:pick.by==='pace'?'Ordered by remaining room per minute of the tightest window, most first. Pace is percent of a window per minute.':pick.by==='reset-soonest'?'Ordered by the window that resets first. Ties fall to used quota, then the provider path, then file order.':pick.by==='weighted-priority'?'Share is each provider’s fresh pace multiplied by its strongest model’s priority weight. Without explicit weights, each position halves the weight; with any explicit weights, unlisted models use 1. The gateway draws the winner.':pick.by==='weighted-pace'?'Weighted pace reproducibly draws each new assignment per session, agent, plan and hour in proportion to providers\' fresh sustainable pace — not a new lottery every call — and a session idle under an hour keeps its provider; the drawn winner is the gateway\'s, not shown here. Share is each provider\'s slice of that pace — one provider counts once, however many of its models are listed, and within a provider the declared order stands.':pick.by==='window-protection'?'Ranks by sustainable pace times a risk factor from usable fresh forecasts; missing or unusable forecasts keep the neutral ×1, and rows without fresh pace sort last. Full evidence is on the Window protection card above.':'Ordered as listed. Nothing is reordered by quota, so models on one provider stay in the order you wrote.'}),h('thead',{},h('tr',{},...cols.map(([label,cls])=>h('th',{scope:'col',class:cls,text:label})))),h('tbody',{},...body))))
  return card
 }
 function paintRouting(){
@@ -2057,13 +2262,13 @@ function normalizePlanModel(model){
 }
 function categoryModels(value){return Array.isArray(value)?value:Array.isArray(value?.models)?value.models:[]}
 function categoryPick(value){const pick=Array.isArray(value)?null:value?.pick;return pick&&typeof pick==='object'&&!Array.isArray(pick)?pick:{}}
-function normalizeCategoryPick(name,pick){
+function normalizeCategoryPick(name,pick,models){
   if(pick===undefined)return undefined
   if(!pick||typeof pick!=='object'||Array.isArray(pick))throw Error(`Category ${name} pick must be an object`)
-  const out={}
+  const out={...pick}
   for(const key of Object.keys(pick)){
     if(key==='by'){
-      if(pick.by!=='in-order'&&pick.by!=='reset-soonest'&&pick.by!=='pace'&&pick.by!=='weighted-pace'&&pick.by!=='window-protection')throw Error(`Category ${name} pick by must be in-order, reset-soonest, pace, weighted-pace or window-protection`)
+      if(pick.by!=='in-order'&&pick.by!=='reset-soonest'&&pick.by!=='pace'&&pick.by!=='weighted-pace'&&pick.by!=='weighted-priority'&&pick.by!=='window-protection')throw Error(`Category ${name} pick by must be in-order, reset-soonest, pace, weighted-pace, weighted-priority or window-protection`)
       out.by=pick.by
     }else if(key==='path'){
       if(!Array.isArray(pick.path))throw Error(`Category ${name} pick path must be a list of provider IDs`)
@@ -2072,7 +2277,19 @@ function normalizeCategoryPick(name,pick){
         return item
       })
       if(path.length)out.path=path
-    }else throw Error(`Category ${name} pick only takes by and path`)
+      else delete out.path
+    }else if(key==='weights'){
+      delete out.weights
+      if(pick.by!=='weighted-priority')continue
+      if(!pick.weights||typeof pick.weights!=='object'||Array.isArray(pick.weights))throw Error(`Category ${name} weights must be an object`)
+      const ids=new Set(models.map(model=>modelBits(model).id)), weights=Object.create(null)
+      for(const [id,weight] of Object.entries(pick.weights)){
+        if(!ids.has(id))continue
+        if(typeof weight!=='number'||!Number.isFinite(weight)||weight<=0)throw Error(`Category ${name} weight for ${id} must be a positive number`)
+        weights[id]=weight
+      }
+      if(Object.keys(weights).length)out.weights=weights
+    }
   }
   return Object.keys(out).length?out:undefined
 }
@@ -2087,7 +2304,7 @@ function normalizeCategories(categories){
     const models=raw.map(normalizeModel)
     if(Array.isArray(value)){out[name]=models;continue}
     if(!value||typeof value!=='object')throw Error(`Category ${name} must be a list of models or an object with models`)
-    const pick=normalizeCategoryPick(name,value.pick)
+    const pick=normalizeCategoryPick(name,value.pick,models)
     out[name]=pick?{models,pick}:{models}
   }
   return out
@@ -2549,10 +2766,13 @@ function writeCategoryModel(name,index,id,variant){
 }
 function writeCategoryPick(name,by,path){
   const value=draft.categories[name], models=categoryModels(value)
-  const pick={}
+  const pick={...categoryPick(value)}
   if(by)pick.by=by
+  else delete pick.by
   if(Array.isArray(path)&&path.length)pick.path=path
-  if(!pick.by&&!pick.path)draft.categories[name]=models
+  else delete pick.path
+  if(by!=='weighted-priority')delete pick.weights
+  if(!Object.keys(pick).length)draft.categories[name]=models
   else if(Array.isArray(value))draft.categories[name]={models,pick}
   else{value.models=models;value.pick=pick}
 }
@@ -2592,12 +2812,31 @@ function renderCategories(){
         idInput.setAttribute('aria-invalid',String(nested))
         strategy.sync()
         if(!nested){writeCategoryModel(name,index,value,modelBits(models[index]).variant);refresh()}
+        refreshVariant()
       })
-      const variantInput=h('input',{type:'text','aria-label':`${name} variant ${index+1}`,value:bits.variant,placeholder:'Exact variant (optional)',onInput:()=>{writeCategoryModel(name,index,modelBits(models[index]).id,variantInput.value);refresh()}})
-      const suggestions=assistVariant(idInput,variantInput,`category-${encodeURIComponent(name)}-${index}`)
-      card.append(suggestions)
+      const variantInput=h('select',{'aria-label':`${name} variant ${index+1}`,onChange:()=>{writeCategoryModel(name,index,modelBits(models[index]).id,variantInput.value);refresh()}})
+      const refreshVariant=()=>{
+        const variant=modelBits(models[index]).variant
+        const variants=catalogModels().find(item=>`${item.providerID}/${item.id}`===idInput.value)?.variants||[]
+        variantInput.replaceChildren(h('option',{value:'',text:'default (no variant)'}),...variants.map(value=>h('option',{value,text:value})),...(variant&&!variants.includes(variant)?[h('option',{value:variant,text:variant})]:[]))
+        variantInput.value=variant||''
+      }
+      variantRefreshers.push(refreshVariant);refreshVariant()
       strategy.sync()
+      const weightInput=pick.by==='weighted-priority'?h('input',{type:'number',min:'0',step:'any',placeholder:'auto','aria-label':`${bits.id||`${name} model ${index+1}`} priority weight`,value:pick.weights?.[bits.id]??'',style:'width:5.5em',onFocus:()=>{
+        const id=modelBits(models[index]).id
+        weightInput.setAttribute('aria-label',`${id||`${name} model ${index+1}`} priority weight`)
+        weightInput.value=categoryPick(draft.categories[name]).weights?.[id]??''
+      },onInput:()=>{
+        const current=categoryPick(draft.categories[name]), id=modelBits(models[index]).id
+        const weights={...current.weights}
+        if(weightInput.value==='')delete weights[id]
+        else weights[id]=Number(weightInput.value)
+        if(Object.keys(weights).length)current.weights=weights
+        else delete current.weights
+      }}):null
       card.append(h('div',{class:'row'},h('span',{text:String(index+1)}),comboModel,variantInput,h('span',{},
+        weightInput,
         strategy.node,
         index?h('button',{type:'button',text:'Earlier',onClick:()=>moveItem(models,index,-1)}):null,
         index<models.length-1?h('button',{type:'button',text:'Later',onClick:()=>moveItem(models,index,1)}):null,
@@ -2609,12 +2848,14 @@ function renderCategories(){
       h('option',{value:'reset-soonest',text:'Reset soonest'}),
       h('option',{value:'pace',text:'Balanced pace'}),
       h('option',{value:'weighted-pace',text:'Weighted pace'}),
+      h('option',{value:'weighted-priority',text:'Weighted by pace and priority'}),
       h('option',{value:'window-protection',text:'Window protection'}))
     pickSelect.value=pick.by||'in-order'
     const pathInput=h('input',{type:'text','aria-label':`${name} provider path`,placeholder:'Provider tie-break, comma separated',value:(pick.path||[]).join(', '),onInput:()=>{
       writeCategoryPick(name,categoryPick(draft.categories[name]).by||'',pathInput.value.split(',').map(item=>item.trim()).filter(Boolean))
     }})
     card.append(h('div',{class:'category-policy'},pickSelect,pathInput))
+    if(pick.by==='weighted-priority')card.append(h('p',{class:'hint',text:'Without weights, each position halves the weight. If you set any weight, unlisted models use 1.'}))
     card.append(h('div',{class:'toolbar'},
       h('button',{type:'button',text:'Add model',onClick:()=>{models.push('');renderBoard()}}),
       h('button',{type:'button',text:'Remove category',onClick:()=>{delete draft.categories[name];renderBoard()}}),
@@ -3362,6 +3603,8 @@ function selectQuotaView(name){
     if(panel){panel.hidden=view!==name;panel.tabIndex=view===name?0:-1}
     if(tab){tab.setAttribute('aria-selected',String(view===name));tab.tabIndex=view===name?0:-1}
   }
+  // The saved-window charts only ask the gateway once their cards are showing.
+  if(name==='estimates')paintUsageEstimates()
 }
 for(const [index,view] of quotaViews.entries()){
   const tab=document.getElementById(`quota-tab-${view}`)

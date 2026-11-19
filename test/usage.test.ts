@@ -1,7 +1,9 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import type { Context } from "@opencode/plugin/promise/plugin"
-import { normalizeUsageSnapshot, readUsageStatus, USAGE_RPC } from "../src/usage.ts"
+import {
+  normalizeUsageSnapshot, readUsageStatus, USAGE_RPC,
+} from "../src/usage.ts"
 import { buildQuotaEligibility } from "../src/eligibility.ts"
 import { parseConfig } from "../src/config.ts"
 
@@ -112,7 +114,7 @@ function rpcContext(status: (input: unknown, options?: { signal?: AbortSignal })
   } as unknown as Pick<Context, "rpc">
 }
 
-test("reads status with an empty input and abort signal, never forcing refresh", async () => {
+test("reads status with an empty input and abort signal while every source is fresh", async () => {
   let input: unknown
   let signal: AbortSignal | undefined
   const ctx = rpcContext(async (received, options) => {
@@ -125,6 +127,122 @@ test("reads status with an empty input and abort signal, never forcing refresh",
   assert.deepEqual(input, {})
   assert.ok(signal instanceof AbortSignal)
   assert.equal(result.status, "ok")
+})
+
+test("a stale source asks for one refresh and keeps the newer reading per source", async () => {
+  const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString()
+  const stale = (checkedAt: string) => ({ ...source(), checkedAt })
+
+  const inputs: unknown[] = []
+  let call = 0
+  const ctx = rpcContext(async (input) => {
+    inputs.push(input)
+    call += 1
+    if (call === 1) {
+      return {
+        schemaVersion: 1,
+        updatedAt: minutesAgo(10),
+        sources: { go: stale(minutesAgo(10)), codex: stale(minutesAgo(8)), cursor: stale(minutesAgo(0)) },
+        models: { go: {} },
+      }
+    }
+    // The poll refreshed go but lost codex, so the merge must keep the cached codex.
+    return {
+      schemaVersion: 1,
+      updatedAt: new Date().toISOString(),
+      sources: { go: stale(minutesAgo(0)), codex: stale(minutesAgo(30)), cursor: stale(minutesAgo(30)) },
+      models: { go: {} },
+    }
+  })
+
+  const result = await readUsageStatus(ctx)
+  assert.equal(result.status, "ok")
+  if (result.status !== "ok") return
+  assert.deepEqual(inputs, [{}, { refresh: true }])
+  assert.equal(result.snapshot.sources.go.stale, false, "the refreshed source replaces the stale reading")
+  assert.equal(result.snapshot.sources.codex.stale, true, "a source the poll lost keeps the older observation")
+})
+
+test("a stale source whose refresh fails keeps the cached snapshot", async () => {
+  const old = new Date(Date.now() - 10 * 60_000).toISOString()
+  let call = 0
+  const ctx = rpcContext(async () => {
+    call += 1
+    if (call > 1) throw new Error("refresh failed")
+    return {
+      schemaVersion: 1,
+      updatedAt: old,
+      sources: { go: { ...source(), checkedAt: old }, codex: { ...source(), checkedAt: old }, cursor: { ...source(), checkedAt: old } },
+      models: { go: {} },
+    }
+  })
+
+  const result = await readUsageStatus(ctx)
+  assert.equal(result.status, "ok")
+  if (result.status !== "ok") return
+  assert.equal(result.snapshot.sources.go.stale, true)
+  assert.equal(call, 2)
+})
+
+test("an equal-clock refresh cannot degrade a fresh source into stale", async () => {
+  // A poll for one stale source re-reports another at the same observation clock,
+  // now with an error. The cached fresh, limited reading must survive, and the
+  // equal-clock path must still accept a genuine freshness recovery.
+  const staleGo = new Date(Date.now() - 10 * 60_000).toISOString()
+  let call = 0
+  const ctx = rpcContext(async () => {
+    call += 1
+    if (call === 1) {
+      return {
+        schemaVersion: 1,
+        updatedAt: time,
+        sources: { go: { ...source(), checkedAt: staleGo }, codex: source("limited"), cursor: source("unknown") },
+        models: { go: {} },
+      }
+    }
+    return {
+      schemaVersion: 1,
+      updatedAt: time,
+      sources: {
+        go: { ...source(), checkedAt: staleGo, error: "poll failed" },
+        codex: { ...source("limited"), error: "poll failed" },
+        cursor: source("unknown"),
+      },
+      models: { go: {} },
+    }
+  })
+
+  const result = await readUsageStatus(ctx)
+  assert.equal(result.status, "ok")
+  if (result.status !== "ok") return
+  assert.equal(call, 2)
+  assert.equal(result.snapshot.sources.go.stale, true, "the poll's failed observation still wins for its own clock")
+  assert.equal(result.snapshot.sources.codex.stale, false, "an equal-clock failure does not replace fresh evidence")
+  assert.equal(result.snapshot.sources.codex.availability, "limited", "and the limit stays visible to routing")
+
+  // Equal clock, but the newer reading is the healthy one: recovery is accepted.
+  let recovery = 0
+  const recovering = rpcContext(async () => {
+    recovery += 1
+    return recovery === 1
+      ? {
+        schemaVersion: 1,
+        updatedAt: time,
+        sources: { go: { ...source(), checkedAt: staleGo }, codex: { ...source("limited"), error: "poll failed" }, cursor: source("unknown") },
+        models: { go: {} },
+      }
+      : {
+        schemaVersion: 1,
+        updatedAt: time,
+        sources: { go: { ...source(), checkedAt: staleGo }, codex: source("limited"), cursor: source("unknown") },
+        models: { go: {} },
+      }
+  })
+  const recovered = await readUsageStatus(recovering)
+  assert.equal(recovered.status, "ok")
+  if (recovered.status !== "ok") return
+  assert.equal(recovered.snapshot.sources.codex.stale, false, "an equal-clock success clears an earlier failure")
+  assert.equal(recovered.snapshot.sources.codex.error, null)
 })
 
 test("missing RPC and timeout are explicit and bounded", async () => {

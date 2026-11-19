@@ -11,7 +11,7 @@ import {
   type QuotaHistoryResult,
 } from "../src/quota-history.ts"
 import { QUARTERMASTER_RPC, registerQuartermasterRpc } from "../src/rpc.ts"
-import { QuotaValueTracker } from "../src/quota-values.ts"
+import { QuotaValueTracker, VALUE_REASON_RESTARTED, type QuotaApiValue } from "../src/quota-values.ts"
 import type { UsageReadResult, UsageSnapshot, UsageSource, UsageSourceID, UsageWindow } from "../src/usage.ts"
 
 const MIN = 60_000
@@ -62,6 +62,7 @@ function fakeStorage(options: {
   pageSize?: number
   failGet?: (key: string) => boolean
   failSet?: (key: string, value: unknown) => boolean
+  failScan?: (prefix: string) => boolean
 } = {}) {
   const map = new Map<string, unknown>()
   const faults = { set: 0, remove: 0 }
@@ -82,6 +83,7 @@ function fakeStorage(options: {
       map.delete(key)
     },
     scan: async ({ prefix, after, limit }: { prefix: string; after?: string; limit?: number }) => {
+      if (options.failScan?.(prefix)) throw new Error("scan failed")
       const keys = [...map.keys()]
         .filter((key) => key.startsWith(prefix) && (after === undefined || key > after))
         .sort()
@@ -977,4 +979,833 @@ test("status suppresses frozen dollars when a newer observation could not be arc
   } finally {
     await routing.dispose()
   }
+})
+
+const claudeWindows = (percent: number): UsageWindow[] => [
+  { name: "5h", usedPercent: percent, state: "ok", resetsAt: null },
+  { name: "7d", usedPercent: 47, state: "ok", resetsAt: null },
+]
+
+function claudeFixture(storage: never) {
+  const config = parseConfig({ usageSources: { "claude-agent": "claude-agent" } })
+  // A fresh set of objects over the same storage is a plugin restart.
+  const start = () => {
+    const tracker = new QuotaValueTracker(config)
+    const history = new QuotaHistory(storage, () => t0)
+    const estimates = new QuotaEstimates()
+    const observe = async (at: number, percent: number, now = at) => {
+      const usage = usageAt(at, percent, { sourceID: "claude-agent", windows: claudeWindows(percent) })
+      estimates.observe(usage, now)
+      const plan = await tracker.prepare(usage, now, new Map())
+      return history.record(usage, estimates, now, new Set(["claude-agent"]), plan)
+    }
+    return { tracker, history, observe }
+  }
+  return { start }
+}
+
+test("a restarted process seeds a window from the observation clock already in the archive", async () => {
+  const { storage, map } = fakeStorage()
+  const fixture = claudeFixture(storage)
+  const first = fixture.start()
+  assert.equal(await first.observe(t0, 10), true)
+  const stored = structuredClone(map.get(pointKeyFor("claude-agent", "5h", t0))) as { apiValue?: unknown }
+  assert.ok(stored.apiValue, "the first process archived a value")
+
+  // Restart: the usage source re-reports the same checkedAt, so no new point is written.
+  const second = fixture.start()
+  assert.equal(second.tracker.latestValue("claude-agent", "5h"), undefined)
+  assert.equal(await second.observe(t0, 10, t0 + 3 * MIN), false)
+  for (const name of ["5h", "7d"]) {
+    assert.equal(second.tracker.latestValue("claude-agent", name)?.observedAt, t0, `${name} is valued after restart`)
+  }
+  assert.equal(pointKeys(map).length, 2, "no duplicate point")
+  assert.deepEqual(map.get(pointKeyFor("claude-agent", "5h", t0)), stored, "an archived value is never rewritten")
+
+  // The seed is committed but uncorroborated: the token buffer was not live at the
+  // seeded clock, so the next fresh observation reanchors (reason: restarted)
+  // instead of pairing the full quota delta with an undercounted spend.
+  assert.equal(second.tracker.latestValue("claude-agent", "5h")?.reason, VALUE_REASON_RESTARTED)
+  assert.equal(await second.observe(t0 + 5 * MIN, 11), true)
+  assert.equal(await second.observe(t0 + 10 * MIN, 12), true)
+  const page = await second.history.query({ sourceID: "claude-agent", windowName: "5h" }) as QuotaHistoryResult
+  assert.equal(page.points.length, 3)
+  assert.equal(page.points[1].apiValue?.reason, VALUE_REASON_RESTARTED)
+  assert.equal(page.points[1].apiValue?.trackingSince, t0 + 5 * MIN)
+  assert.equal(page.points[1].apiValue?.spanMs, 0)
+  assert.equal(page.points[2].apiValue?.trackingSince, t0 + 5 * MIN)
+  assert.equal(page.points[2].apiValue?.spanMs, 5 * MIN)
+})
+
+test("a cached clock is seeded once and never rewrites the point on later reads", async () => {
+  const { storage, map } = fakeStorage()
+  const fixture = claudeFixture(storage)
+  const first = fixture.start()
+  await first.observe(t0, 10)
+  const second = fixture.start()
+  await second.observe(t0, 10, t0 + MIN)
+  const before = structuredClone(map.get(pointKeyFor("claude-agent", "7d", t0)))
+  const latest = second.tracker.latestValue("claude-agent", "7d")
+  await second.observe(t0, 10, t0 + 2 * MIN)
+  await second.observe(t0, 10, t0 + 3 * MIN)
+  assert.deepEqual(map.get(pointKeyFor("claude-agent", "7d", t0)), before)
+  assert.deepEqual(second.tracker.latestValue("claude-agent", "7d"), latest)
+})
+
+test("an archived point written before values existed gains its apiValue and the tracker is committed", async () => {
+  const { storage, map } = fakeStorage()
+  for (const name of ["5h", "7d"]) seedSeries(map, "claude-agent", name, [t0])
+  const { tracker, history, observe } = claudeFixture(storage).start()
+  assert.equal(await observe(t0, 50), false)
+  for (const name of ["5h", "7d"]) {
+    assert.equal(tracker.latestValue("claude-agent", name)?.observedAt, t0)
+  }
+  const page = await history.query({ sourceID: "claude-agent", windowName: "5h" }) as QuotaHistoryResult
+  assert.equal(page.points.length, 1)
+  assert.equal(page.points[0].apiValue?.observedAt, t0)
+  assert.equal(page.points[0].apiValue?.trackingSince, t0)
+})
+
+test("a point that survived a crash is reused and still commits the tracker", async () => {
+  const { storage, map } = fakeStorage()
+  for (const name of ["5h", "7d"]) {
+    seedSeries(map, "claude-agent", name, [t0 - 10 * MIN])
+    // The point landed but the head write never did.
+    map.set(pointKeyFor("claude-agent", name, t0), storedPoint("claude-agent", name, t0))
+  }
+  const { tracker, history, observe } = claudeFixture(storage).start()
+  assert.equal(await observe(t0, 50), false)
+  for (const name of ["5h", "7d"]) {
+    assert.equal(tracker.latestValue("claude-agent", name)?.observedAt, t0)
+  }
+  const page = await history.query({ sourceID: "claude-agent", windowName: "7d" }) as QuotaHistoryResult
+  assert.equal(page.points.length, 2)
+  assert.equal(page.points[1].observedAt, t0)
+  assert.equal(page.points[1].apiValue?.observedAt, t0)
+  // The reused point is a seed, so the next observation reanchors rather than
+  // trusting a buffer that was not live when that point was written.
+  assert.equal(await observe(t0 + 5 * MIN, 51), true)
+  const next = await history.query({ sourceID: "claude-agent", windowName: "7d" }) as QuotaHistoryResult
+  assert.equal(next.points[2].apiValue?.trackingSince, t0 + 5 * MIN)
+  assert.equal(next.points[2].apiValue?.reason, VALUE_REASON_RESTARTED)
+})
+
+test("a window with no plan this read stays unseeded and is valued on the next read", async () => {
+  const { storage, map } = fakeStorage()
+  for (const name of ["5h", "7d"]) seedSeries(map, "claude-agent", name, [t0])
+  const config = parseConfig({ usageSources: { "claude-agent": "claude-agent" } })
+  const tracker = new QuotaValueTracker(config)
+  const history = new QuotaHistory(storage, () => t0)
+  const estimates = new QuotaEstimates()
+  const usage = usageAt(t0, 50, { sourceID: "claude-agent", windows: claudeWindows(50) })
+  estimates.observe(usage, t0)
+  await history.record(usage, estimates, t0, new Set(["claude-agent"]), undefined)
+  assert.equal(tracker.latestValue("claude-agent", "5h"), undefined)
+  await history.record(usage, estimates, t0, new Set(["claude-agent"]), await tracker.prepare(usage, t0, new Map()))
+  assert.equal(tracker.latestValue("claude-agent", "5h")?.observedAt, t0)
+})
+
+test("a same-clock seed never rewrites a stored apiValue and is not repeated on later reads", async () => {
+  const { storage, map } = fakeStorage()
+  seedSeries(map, "go", "weekly", [t0])
+  const apiValue = (observedUSD: number) => ({
+    currency: "USD" as const,
+    basis: "api-equivalent-not-billed" as const,
+    observedUSD,
+    projectedFullUSD: observedUSD * 10,
+    projectionStatus: "estimated" as const,
+    reason: null,
+    trackingSince: t0 - 20 * MIN,
+    observedAt: t0,
+    spanMs: 20 * MIN,
+    quotaDeltaPercent: 10,
+    records: 1, pricedRecords: 1, unpricedRecords: 0, partialRecords: 0,
+    complete: false as const,
+  })
+  map.set(pointKeyFor("go", "weekly", t0), { ...storedPoint("go", "weekly", t0), apiValue: apiValue(5) })
+  const before = structuredClone(map.get(pointKeyFor("go", "weekly", t0)))
+  let seeds = 0
+  let commits = 0
+  const values = {
+    valueFor: (_sourceID: string, _windowName: string, _at: number, options?: { seed?: boolean }) => {
+      if (options?.seed === true) seeds += 1
+      return { apiValue: apiValue(7), apiValueSnapshots: [], commit: () => { commits += 1 } }
+    },
+  }
+  const history = new QuotaHistory(storage, () => t0)
+  const estimates = new QuotaEstimates()
+  const usage = usageAt(t0, 50)
+  estimates.observe(usage, t0)
+  for (let read = 0; read < 3; read += 1) {
+    assert.equal(await history.record(usage, estimates, t0 + read * MIN, undefined, values), false)
+  }
+  assert.equal(seeds, 1, "the cached clock is seeded exactly once")
+  assert.equal(commits, 1, "the tracker is committed exactly once")
+  assert.deepEqual(map.get(pointKeyFor("go", "weekly", t0)), before, "the stored point is not rewritten")
+  assert.equal(pointKeys(map).length, 1, "no duplicate point")
+})
+
+// ---- closed-window archive ----
+const windowKeyFor = (sourceID: string, windowName: string, at: number) =>
+  `routing/quota-history-v1/windows/${encodeURIComponent(JSON.stringify([sourceID, windowName]))}/${String(at).padStart(16, "0")}`
+const windowKeys = (map: Map<string, unknown>) =>
+  [...map.keys()].filter((key) => key.startsWith("routing/quota-history-v1/windows/"))
+
+test("one durable current checkpoint retains its observed anchor through moves, restarts and compaction", async () => {
+  const { storage, map } = fakeStorage()
+  const { record: rec, windows } = windowHarness(storage)
+  let history = new QuotaHistory(storage, () => t0 + DAY)
+  for (let i = 0; i < 20; i++) {
+    const at = t0 + i * MIN
+    await rec(history, at, 40 + i, { resetsAt: t0 + DAY + i * MIN, resetEstimated: i % 2 === 0 })
+    const before = structuredClone([...map])
+    const current = await history.currentCheckpoint("go", "weekly", at)
+    assert.equal(current?.instanceAnchorAt, t0)
+    assert.equal(current?.apiValue?.observedAt, at)
+    assert.deepEqual([...map], before, "checkpoint reads never persist or maintain")
+    history = new QuotaHistory(storage, () => t0 + DAY)
+  }
+  assert.equal([...map.keys()].filter((key) => key.startsWith("routing/quota-history-v1/series/")).length, 1)
+  assert.equal(await history.currentCheckpoint("codex", "weekly", t0 + 19 * MIN), undefined)
+  assert.equal(await history.currentCheckpoint("go", "weekly", t0), undefined)
+  await rec(history, t0 + 20 * MIN, 1)
+  const row = (await windows(history)).windows![0]
+  assert.equal(row.instanceAnchorAt, t0)
+  assert.equal((await history.currentCheckpoint("go", "weekly", t0 + 20 * MIN))?.instanceAnchorAt, t0 + 20 * MIN)
+  const frozen = structuredClone(map.get(windowKeyFor("go", "weekly", t0 + 19 * MIN)))
+  await history.compact(t0 + 100 * DAY)
+  assert.equal(pointKeys(map).length, 0)
+  assert.equal((await history.currentCheckpoint("go", "weekly", t0 + 20 * MIN))?.apiValue?.observedAt, t0 + 20 * MIN)
+  assert.deepEqual(map.get(windowKeyFor("go", "weekly", t0 + 19 * MIN)), frozen)
+})
+
+test("checkpoint visibility follows durable head writes and pending closures through rebound repair", async () => {
+  for (const stage of ["windows", "points", "series"]) {
+    let fail = false
+    const { storage, map } = fakeStorage({ failSet: (key) => fail && key.startsWith(`routing/quota-history-v1/${stage}/`) })
+    const { record: rec, windows } = windowHarness(storage)
+    let history = new QuotaHistory(storage, () => t0 + DAY)
+    await rec(history, t0, 50)
+    fail = true
+    await assert.rejects(rec(history, t0 + MIN, 2))
+    assert.equal(await history.currentCheckpoint("go", "weekly", t0 + MIN), undefined, stage)
+    if (stage === "points") assert.equal(await history.currentCheckpoint("go", "weekly", t0), undefined, "closed before point")
+    fail = false
+    history = new QuotaHistory(storage, () => t0 + DAY)
+    await rec(history, t0 + 2 * MIN, 60) // rebound: row, point and repair are separate durable checkpoints
+    const expectedAnchor = stage === "series" ? t0 + MIN : stage === "points" ? t0 + 2 * MIN : t0
+    assert.equal((await history.currentCheckpoint("go", "weekly", t0 + 2 * MIN))?.instanceAnchorAt, expectedAnchor)
+    assert.equal((await windows(history)).windows!.length, stage === "windows" ? 0 : 1)
+    assert.equal(windowKeys(map).length, stage === "windows" ? 0 : 1)
+  }
+})
+
+test("checkpoint seed failures retry, corrupt optional money is stripped, and legacy frozen rows are never upgraded", async () => {
+  let fail = false
+  const { storage, map } = fakeStorage({ failSet: (key) => fail && key.startsWith("routing/quota-history-v1/series/") })
+  seedSeries(map, "go", "weekly", [t0])
+  const { record: rec, windows } = windowHarness(storage)
+  const history = new QuotaHistory(storage, () => t0 + DAY)
+  fail = true
+  await rec(history, t0, 50)
+  assert.equal((await history.currentCheckpoint("go", "weekly", t0))?.apiValue, undefined)
+  fail = false
+  await rec(history, t0, 50)
+  assert.equal((await history.currentCheckpoint("go", "weekly", t0))?.apiValue?.projectedFullUSD, usdAt(t0) * 10)
+  const head = map.get(seriesKeyFor("go", "weekly")) as Record<string, unknown>
+  map.set(seriesKeyFor("go", "weekly"), { ...head, currentValue: { ...apiAt(t0, 0), observedAt: t0 + 1 } })
+  assert.equal((await history.currentCheckpoint("go", "weekly", t0))?.apiValue, undefined)
+  const old = { version: 1, sourceID: "go", windowName: "weekly", lastObservedAt: t0 - MIN, nextObservedAt: t0,
+    lastPercent: 50, nextPercent: 10, resetsAt: null, nextResetsAt: null, resetEstimated: false, deadlineCrossed: false }
+  map.set(windowKeyFor("go", "weekly", t0 - MIN), old)
+  const row = (await windows(history)).windows![0]
+  assert.equal(row.instanceAnchorAt, undefined)
+  assert.equal(row.finalEstimateReason, "No estimate recorded")
+  assert.deepEqual(map.get(windowKeyFor("go", "weekly", t0 - MIN)), old)
+})
+
+test("two overlapping current windows recover without repricing; closure freezes the last valid projection", async (t) => {
+  let now = t0
+  t.mock.method(Date, "now", () => now)
+  const config = parseConfig({ fetchApiPrices: false, usageSources: { openai: "codex", other: "go" }, tokenRates: [
+    { providerID: "openai", modelID: "m", inputPerMillion: 1, outputPerMillion: 1, currency: "USD", source: "test", asOf: 1 },
+    { providerID: "other", modelID: "m", inputPerMillion: 1, outputPerMillion: 1, currency: "USD", source: "test", asOf: 1 },
+  ] })
+  const { storage, map } = fakeStorage()
+  let tracker = new QuotaValueTracker(config, t0)
+  let history = new QuotaHistory(storage, () => now)
+  const estimates = new QuotaEstimates()
+  const data = (at: number, short: number, long: number) => usageAt(at, short, { sourceID: "codex", windows: [
+    { name: "5h", usedPercent: short, state: "ok", resetsAt: null },
+    { name: "7d", usedPercent: long, state: "ok", resetsAt: null },
+  ] })
+  const observe = async (at: number, short: number, long: number) => {
+    now = at
+    const usage = data(at, short, long)
+    estimates.observe(usage, at)
+    await history.record(usage, estimates, at, undefined, await tracker.prepare(usage, at, new Map()))
+  }
+  const token = (id: string, at: number, provider = "openai", input = 1_000_000) => ({
+    hostEventID: id, completedAt: at, providerID: provider, modelID: "m", variant: null,
+    counts: { input, output: 0, cacheRead: 0, cacheWrite: 0 }, partial: false, usageStatus: "reported",
+  } as never)
+  await observe(t0, 20, 30)
+  tracker.addTokenRecord(token("one", t0 + 5 * MIN))
+  tracker.addTokenRecord(token("other-source", t0 + 5 * MIN, "other", 9_000_000))
+  await observe(t0 + 10 * MIN, 25, 32)
+  await observe(t0 + 20 * MIN, 30, 34)
+  const short = (await history.currentCheckpoint("codex", "5h", now))!
+  const long = (await history.currentCheckpoint("codex", "7d", now))!
+  assert.equal(short.apiValue?.projectedFullUSD, 10)
+  assert.equal(long.apiValue?.projectedFullUSD, 25)
+  assert.equal(short.instanceAnchorAt, t0)
+  assert.equal(long.instanceAnchorAt, t0)
+  tracker = new QuotaValueTracker(config, now + 1)
+  history = new QuotaHistory(storage, () => now)
+  config.tokenRates![0].inputPerMillion = 10 // Must not reprice the recovered clock.
+  const routing = await registerAgentRouting({
+    model: { list: async () => ({ data: [] }) }, storage,
+    rpc: () => ({ status: async () => { throw new Error("not needed") } }),
+    agent: { transform: async () => ({ dispose: async () => {} }), reload: async () => {} },
+  } as never, config, data(now, 30, 34), undefined, undefined, tracker)
+  try {
+    const status = await routing!.status() as any
+    assert.deepEqual(status.sources.openai.windows[0].apiValue, short.apiValue)
+    assert.equal(status.sources.openai.windows[0].instanceAnchorAt, t0)
+    now += 6 * MIN
+    assert.equal((await routing!.status() as any).sources.openai.windows[0].apiValue, undefined)
+  } finally { await routing!.dispose() }
+  await observe(t0 + 27 * MIN, 32, 35)
+  assert.equal((await history.currentCheckpoint("codex", "5h", now))?.apiValue?.reason, VALUE_REASON_RESTARTED)
+  await observe(t0 + 30 * MIN, 1, 36)
+  const key = windowKeyFor("codex", "5h", t0 + 27 * MIN)
+  const frozen = structuredClone(map.get(key))
+  assert.deepEqual((frozen as any).finalEstimate, short.apiValue)
+  assert.equal((await history.currentCheckpoint("codex", "5h", now))?.instanceAnchorAt, now)
+  assert.equal((await history.currentCheckpoint("codex", "7d", now))?.instanceAnchorAt, t0)
+  tracker.addTokenRecord(token("late", t0 + 10 * MIN, "openai", 100_000_000))
+  tracker.removeTokenRecords([token("one", t0 + 5 * MIN)])
+  config.tokenRates![0].inputPerMillion = 100
+  await observe(t0 + 35 * MIN, 2, 37)
+  assert.deepEqual(map.get(key), frozen)
+  assert.equal((await history.currentCheckpoint("codex", "5h", now))?.apiValue?.observedUSD, null)
+})
+
+// Distinct per observation minute, so a row can prove which point it copied.
+const usdAt = (at: number) => Math.floor(at / MIN) % 997 + 1
+const apiAt = (observedAt: number, observedUSD: number) => ({
+  currency: "USD" as const,
+  basis: "api-equivalent-not-billed" as const,
+  observedUSD,
+  projectedFullUSD: observedUSD * 10,
+  projectionStatus: "estimated" as const,
+  reason: null,
+  trackingSince: observedAt - 20 * MIN,
+  observedAt,
+  spanMs: 20 * MIN,
+  quotaDeltaPercent: 10,
+  records: 1, pricedRecords: 1, unpricedRecords: 0, partialRecords: 0,
+  complete: false as const,
+})
+const unavailableAt = (at: number): QuotaApiValue => ({
+  ...apiAt(at, 1), projectedFullUSD: null, projectionStatus: "unavailable", reason: "API prices unavailable",
+})
+const maxedAt = (at: number) => ({ event: "maxed" as const, segmentID: `qseg:${at}`, capturedAt: at, value: apiAt(at, usdAt(at)) })
+
+function windowHarness(storage: never, snapshots: Record<number, unknown[]> = {}, apiValues: Record<number, QuotaApiValue> = {}) {
+  const estimates = new QuotaEstimates()
+  const values = {
+    valueFor: (_sourceID: string, _windowName: string, at: number) => ({
+      apiValue: apiValues[at] ?? apiAt(at, usdAt(at)), apiValueSnapshots: snapshots[at] ?? [], commit: () => {},
+    }),
+  }
+  const record = (history: QuotaHistory, at: number, percent: number, options: Parameters<typeof usageAt>[2] = {}) => {
+    const usage = usageAt(at, percent, options)
+    estimates.observe(usage, at)
+    return history.record(usage, estimates, at, undefined, values as never)
+  }
+  const windows = async (history: QuotaHistory, extra: Record<string, unknown> = {}) => {
+    const page = await history.query({ kind: "windows", sourceID: "go", windowName: "weekly", ...extra }) as QuotaHistoryResult
+    assert.equal(page.status, "ok")
+    return page
+  }
+  return { record, windows, storage }
+}
+
+test("a failed previous-point read aborts closure; absent or malformed values stay absent", async () => {
+  for (const mode of ["read-failure", "missing", "malformed"] as const) {
+    let fail = false
+    const { storage, map } = fakeStorage({ failGet: (key) => fail && key === pointKeyFor("go", "weekly", t0) })
+    const { record: rec, windows } = windowHarness(storage)
+    const history = new QuotaHistory(storage, () => t0 + MIN)
+    await rec(history, t0, 70)
+    const previous = structuredClone(map.get(pointKeyFor("go", "weekly", t0))) as Record<string, unknown>
+    const head = structuredClone(map.get(seriesKeyFor("go", "weekly")))
+    if (mode === "read-failure") {
+      fail = true
+      await assert.rejects(rec(history, t0 + MIN, 2))
+      assert.equal(windowKeys(map).length, 0)
+      assert.equal(pointKeys(map).length, 1)
+      assert.deepEqual(map.get(seriesKeyFor("go", "weekly")), head)
+      fail = false
+    } else if (mode === "missing") map.delete(pointKeyFor("go", "weekly", t0))
+    else map.set(pointKeyFor("go", "weekly", t0), { ...previous, apiValue: { observedUSD: 0 } })
+    await rec(history, t0 + MIN, 2)
+    const row = (await windows(history)).windows![0]
+    if (mode === "read-failure") assert.deepEqual(row.apiValue, previous.apiValue)
+    else assert.equal("apiValue" in row, false, mode)
+  }
+})
+
+test("max alone closes nothing and never decides the window number", async () => {
+  const { storage, map } = fakeStorage()
+  const hit = t0 + MIN
+  const reset = t0 + 3 * MIN
+  const { record: rec, windows } = windowHarness(storage, {
+    [hit]: [maxedAt(hit)],
+    [hit + MIN]: [maxedAt(hit + MIN)], // a restarted tracker reports the limit again
+  })
+  let history = new QuotaHistory(storage, () => reset)
+  await rec(history, t0, 80, { resetsAt: reset })
+  await rec(history, hit, 100, { resetsAt: reset })
+  history = new QuotaHistory(storage, () => reset)
+  await rec(history, hit + MIN, 100, { resetsAt: reset })
+  assert.equal(windowKeys(map).length, 0, "reaching the limit, even twice, is not a window boundary")
+  await rec(history, reset, 10)
+  const rows = (await windows(history)).windows!
+  assert.equal(rows.length, 1)
+  assert.equal("maxed" in rows[0], false)
+  // The number is the last valid estimate before the boundary, not the one at the limit.
+  assert.deepEqual(rows[0].finalEstimate, apiAt(hit + MIN, usdAt(hit + MIN)))
+  assert.notEqual(rows[0].finalEstimate?.projectedFullUSD, apiAt(hit, usdAt(hit)).projectedFullUSD)
+})
+
+test("a projection on a point that survived a failed head write is recovered before a newer reset", async () => {
+  let fail = false
+  const { storage, map } = fakeStorage({ failSet: (key) => fail && key.startsWith("routing/quota-history-v1/series/") })
+  const hit = t0 + MIN
+  const { record: rec, windows } = windowHarness(storage)
+  let history = new QuotaHistory(storage, () => t0 + 3 * MIN)
+  await rec(history, t0, 90)
+  fail = true
+  await assert.rejects(rec(history, hit, 100))
+  fail = false
+  history = new QuotaHistory(storage, () => t0 + 3 * MIN)
+  await rec(history, t0 + 2 * MIN, 2)
+  const rows = (await windows(history)).windows!
+  assert.equal(rows.length, 1)
+  assert.deepEqual(rows[0].apiValue, apiAt(hit, usdAt(hit)))
+  assert.deepEqual(rows[0].finalEstimate, apiAt(hit, usdAt(hit)))
+  assert.equal(windowKeys(map).length, 1)
+})
+
+test("a row survives a failed boundary point and a newer retry without being rewritten", async () => {
+  let fail = false
+  const { storage, map } = fakeStorage({ failSet: (key) => fail && key.startsWith("routing/quota-history-v1/points/") })
+  const { record: rec, windows } = windowHarness(storage)
+  let history = new QuotaHistory(storage, () => t0 + 3 * MIN)
+  await rec(history, t0, 50)
+  fail = true
+  await assert.rejects(rec(history, t0 + MIN, 2))
+  const frozen = structuredClone(map.get(windowKeyFor("go", "weekly", t0)))
+  fail = false
+  history = new QuotaHistory(storage, () => t0 + 3 * MIN)
+  // Definition: a window is closed once its closing row is stored, even if the
+  // observation that proved it never became a point. That 2% read is history, so
+  // the rebound is the first durable point of the next cycle and the row is frozen.
+  assert.equal(await rec(history, t0 + 2 * MIN, 55), true)
+  await rec(history, t0 + 3 * MIN, 60)
+  assert.deepEqual(map.get(windowKeyFor("go", "weekly", t0)), frozen)
+  assert.deepEqual((await windows(history)).windows, [frozen])
+  assert.equal((frozen as { nextObservedAt: number }).nextObservedAt, t0 + MIN, "the failed observation proved it")
+  const points = await history.query({ sourceID: "go", windowName: "weekly" }) as QuotaHistoryResult
+  assert.deepEqual(points.points.map((point) => [point.observedAt, point.cycleBoundary]),
+    [[t0, false], [t0 + 2 * MIN, true], [t0 + 3 * MIN, false]])
+})
+
+test("50% then a failed 2% then 1% closes exactly one window and the next point is the new cycle", async () => {
+  let fail = false
+  const { storage, map } = fakeStorage({ failSet: (key) => fail && key.startsWith("routing/quota-history-v1/points/") })
+  const { record: rec, windows } = windowHarness(storage)
+  let history = new QuotaHistory(storage, () => t0 + 5 * MIN)
+  await rec(history, t0, 50)
+  fail = true
+  await assert.rejects(rec(history, t0 + MIN, 2))
+  fail = false
+  history = new QuotaHistory(storage, () => t0 + 5 * MIN)
+  assert.equal(await rec(history, t0 + 2 * MIN, 1), true)
+  assert.equal(await rec(history, t0 + 3 * MIN, 3), true)
+  assert.equal(windowKeys(map).length, 1)
+  const row = (await windows(history)).windows![0]
+  assert.equal(row.lastObservedAt, t0)
+  assert.equal(row.nextPercent, 2)
+  const points = await history.query({ sourceID: "go", windowName: "weekly" }) as QuotaHistoryResult
+  assert.deepEqual(points.points.map((point) => point.cycleBoundary), [false, true, false])
+})
+
+test("closed-window queries page and range by lastObservedAt, skip malformed rows, and never compact", async () => {
+  const { storage, map } = fakeStorage({ pageSize: 1 })
+  const { record: rec, windows } = windowHarness(storage)
+  const history = new QuotaHistory(storage, () => t0 + 100 * DAY)
+  for (const [i, percent] of [90, 80, 70, 60].entries()) await rec(history, t0 + i * MIN, percent)
+  const original = structuredClone(map)
+  const first = (original.get(windowKeyFor("go", "weekly", t0))) as Record<string, unknown>
+  const badKey = windowKeyFor("go", "weekly", t0 - 1)
+  map.set(badKey, { ...first, lastObservedAt: t0 - 1, nextObservedAt: t0 - 2 })
+  const wrongKey = windowKeyFor("go", "weekly", t0 - 2)
+  map.set(wrongKey, first)
+  // Poison the fold checkpoint: window queries must not even try compaction.
+  map.set(cumulativeKeyFor("go", "weekly"), { version: 1, broken: true })
+  const before = structuredClone(map)
+  const one = await windows(history, { limit: 1 })
+  assert.equal(one.windows?.length, 1)
+  assert.equal(one.windows?.[0].lastObservedAt, t0)
+  assert.equal(one.nextCursor, String(t0))
+  const two = await windows(history, { limit: 1, cursor: one.nextCursor })
+  assert.equal(two.windows?.[0].lastObservedAt, t0 + MIN)
+  assert.equal(two.nextCursor, String(t0 + MIN))
+  const three = await windows(history, { limit: 1, cursor: two.nextCursor })
+  assert.equal(three.windows?.[0].lastObservedAt, t0 + 2 * MIN)
+  assert.equal(three.nextCursor, null)
+  assert.deepEqual((await windows(history, { from: t0 + MIN, to: t0 + MIN })).windows, two.windows)
+  assert.deepEqual((await windows(history, { from: t0 + 3 * MIN })).windows, [])
+  assert.deepEqual((await windows(history, { cursor: String(Number.MAX_SAFE_INTEGER) })).windows, [])
+  assert.deepEqual(map, before, "no maintenance, mutation, or deletion")
+})
+
+test("windows RPC validates kind and bounds and uses the existing method", async () => {
+  const query = { kind: "windows", sourceID: "go", windowName: "weekly", from: 1, to: 2, limit: 1, cursor: "0" }
+  assert.deepEqual(quotaHistoryQueryFromInput(query), { ok: true, query })
+  assert.deepEqual(quotaHistoryQueryFromInput({ kind: "points" }), { ok: true, query: {} })
+  const { storage } = fakeStorage()
+  const history = new QuotaHistory(storage, () => t0)
+  const fixture = rpcFixture({ quotaHistory: (input: never) => history.query(input) })
+  await fixture.register()
+  const result = await fixture.client().quotaHistory(query)
+  assert.equal(result.apiVersion, 1)
+  assert.equal(result.status, "ok")
+  assert.deepEqual(result.windows, [])
+  for (const invalid of [
+    { kind: "windows" }, { kind: "windows", sourceID: "go" },
+    { ...query, kind: "closed" }, { ...query, kind: null },
+    { ...query, from: 3 }, { ...query, to: NaN },
+    { ...query, from: Number.MAX_SAFE_INTEGER + 1 },
+    { ...query, limit: 1_001 }, { ...query, cursor: "01" },
+    { ...query, cursor: "9007199254740992" }, { ...query, catalogCursor: "x" },
+  ]) {
+    assert.equal(quotaHistoryQueryFromInput(invalid).ok, false)
+    await assert.rejects(fixture.client().quotaHistory(invalid), { code: "invalid_input" })
+  }
+})
+
+test("closed windows use the previous durable value even when the tracker restarts at reset", async () => {
+  const { storage, map } = fakeStorage()
+  const fixture = claudeFixture(storage)
+  const first = fixture.start()
+  await first.observe(t0, 80)
+  const previous = structuredClone(map.get(pointKeyFor("claude-agent", "5h", t0))) as { apiValue: unknown }
+  const second = fixture.start()
+  await second.observe(t0 + MIN, 2)
+  const page = await second.history.query({ kind: "windows", sourceID: "claude-agent", windowName: "5h" }) as QuotaHistoryResult
+  assert.equal(page.windows?.length, 1)
+  assert.deepEqual(page.windows?.[0].apiValue, previous.apiValue)
+  assert.equal(page.windows?.[0].deadlineCrossed, false)
+  assert.deepEqual(map.get(pointKeyFor("claude-agent", "5h", t0)), previous)
+})
+
+test("window scan failure returns unavailable rather than an empty archive", async () => {
+  const { storage } = fakeStorage({ failScan: (prefix) => prefix.startsWith("routing/quota-history-v1/windows/") })
+  assert.deepEqual(await new QuotaHistory(storage).query({ kind: "windows", sourceID: "go", windowName: "weekly" }), {
+    status: "unavailable", reason: "storage-unavailable",
+  })
+})
+
+test("a closed window survives a restart and the 90-day fold exactly once, with its evidence", async () => {
+  const { storage, map } = fakeStorage()
+  let clock = t0
+  const old = t0 - 100 * DAY
+  const { record: rec, windows } = windowHarness(storage)
+  let history = new QuotaHistory(storage, () => clock)
+  await rec(history, old, 40, { resetsAt: old + 60 * MIN })
+  assert.equal(windowKeys(map).length, 0, "the first observation closes nothing")
+  // A bare percentage drop: inferred, a rolling window does this without any reset.
+  assert.equal(await rec(history, old + 10 * MIN, 30, { resetsAt: old + 60 * MIN }), true)
+  history = new QuotaHistory(storage, () => clock) // restart
+  assert.equal(await rec(history, old + 10 * MIN, 30, { resetsAt: old + 60 * MIN }), false)
+  assert.equal(await rec(history, old + 20 * MIN, 35, { resetsAt: old + 60 * MIN }), true)
+  // The reported deadline falls between two observations with no drop: real evidence.
+  assert.equal(await rec(history, old + 70 * MIN, 36, { resetsAt: old + 120 * MIN, resetEstimated: true }), true)
+  assert.equal(await rec(history, old + 71 * MIN, 37, { resetsAt: old + 120 * MIN, resetEstimated: true }), true)
+  assert.equal(windowKeys(map).length, 2)
+
+  const before = await windows(history)
+  assert.deepEqual(before.points, [])
+  assert.deepEqual(before.catalog, [])
+  assert.equal(before.cumulative, null)
+  assert.equal(before.nextCursor, null)
+  assert.equal(before.metadata.rangeAppliesTo, "windows")
+  const [inferred, crossed] = before.windows!
+  assert.deepEqual(inferred, {
+    version: 1, sourceID: "go", windowName: "weekly",
+    lastObservedAt: old, nextObservedAt: old + 10 * MIN,
+    instanceAnchorAt: old,
+    lastPercent: 40, nextPercent: 30,
+    resetsAt: old + 60 * MIN, resetEstimated: false, nextResetsAt: old + 60 * MIN,
+    deadlineCrossed: false,
+    apiValue: apiAt(old, usdAt(old)),
+    finalEstimate: apiAt(old, usdAt(old)),
+  })
+  assert.equal(crossed.deadlineCrossed, true)
+  assert.equal(crossed.resetEstimated, false, "the closed window's own deadline was not estimated")
+  assert.equal(crossed.lastObservedAt, old + 20 * MIN)
+  assert.equal(crossed.nextObservedAt, old + 70 * MIN)
+  assert.equal(crossed.resetsAt, old + 60 * MIN)
+  assert.equal(crossed.nextResetsAt, old + 120 * MIN)
+  assert.equal(crossed.nextPercent, 36)
+  assert.equal(crossed.apiValue?.observedUSD, usdAt(old + 20 * MIN))
+
+  // Everything raw is now older than 90 days: points fold, closed windows stay.
+  const rows = windowKeys(map).map((key) => structuredClone(map.get(key)))
+  const points = await history.query({ sourceID: "go", windowName: "weekly" }) as QuotaHistoryResult
+  assert.equal(points.points.length, 0)
+  assert.equal(points.cumulative?.observations, 5)
+  assert.equal("windows" in points, false, "the default points response is unchanged")
+  assert.equal(pointKeys(map).length, 0)
+  assert.deepEqual(windowKeys(map).map((key) => map.get(key)), rows)
+  clock += DAY
+  await history.compact(clock)
+  assert.deepEqual((await windows(history)).windows, before.windows)
+})
+
+test("a failed row, point or head write around a boundary retries onto exactly one frozen row", async () => {
+  for (const failing of ["windows", "points", "series"] as const) {
+    let fail = false
+    const { storage, map } = fakeStorage({
+      failSet: (key) => fail && key.startsWith(`routing/quota-history-v1/${failing}/`),
+    })
+    const { record: rec, windows } = windowHarness(storage)
+    const history = new QuotaHistory(storage, () => t0 + 30 * MIN)
+    await rec(history, t0, 50)
+    fail = true
+    await assert.rejects(rec(history, t0 + 10 * MIN, 20), undefined, failing)
+    fail = false
+    // The row is durable ahead of the point and the point ahead of the head.
+    assert.equal(windowKeys(map).length, failing === "windows" ? 0 : 1, failing)
+    assert.equal(pointKeys(map).length, failing === "series" ? 2 : 1, failing)
+
+    // A restart retries the same observation, then carries on.
+    const restarted = new QuotaHistory(storage, () => t0 + 30 * MIN)
+    await rec(restarted, t0 + 10 * MIN, 20)
+    await rec(restarted, t0 + 15 * MIN, 25)
+    await rec(restarted, t0 + 15 * MIN, 25)
+    assert.equal(windowKeys(map).length, 1, failing)
+    const page = await windows(restarted)
+    assert.equal(page.windows?.length, 1, failing)
+    assert.equal(page.windows?.[0].lastObservedAt, t0, failing)
+    assert.equal(page.windows?.[0].nextObservedAt, t0 + 10 * MIN, failing)
+    assert.equal(page.windows?.[0].apiValue?.observedUSD, usdAt(t0), "frozen at the previous point, not the new one")
+    assert.equal(pointKeys(map).length, 3, failing)
+  }
+})
+
+test("the window number is the latest valid pre-boundary projection, not the first max or observed subtotal", async () => {
+  for (const crash of [false, true]) {
+    let fail = false
+    const { storage, map } = fakeStorage({ failSet: (key) => fail && key.startsWith("routing/quota-history-v1/series/") })
+    const hit = t0 + MIN
+    const lastEstimateAt = t0 + 2 * MIN
+    const finalAt = t0 + 3 * MIN
+    const projections: Record<number, QuotaApiValue> = {
+      [t0]: apiAt(t0, 3), [hit]: apiAt(hit, 5),
+      [lastEstimateAt]: apiAt(lastEstimateAt, 8), [finalAt]: unavailableAt(finalAt),
+      [t0 + 4 * MIN]: apiAt(t0 + 4 * MIN, 999), // must not select a post-reset estimate
+    }
+    const { record: rec, windows } = windowHarness(storage, { [hit]: [{ ...maxedAt(hit), value: projections[hit] }] }, projections)
+    let history = new QuotaHistory(storage, () => t0 + 5 * MIN)
+    await rec(history, t0, 80)
+    await rec(history, hit, 100)
+    fail = crash
+    if (crash) await assert.rejects(rec(history, lastEstimateAt, 100))
+    else await rec(history, lastEstimateAt, 100)
+    fail = false
+    history = new QuotaHistory(storage, () => t0 + 5 * MIN)
+    await rec(history, finalAt, 100)
+    assert.deepEqual((map.get(seriesKeyFor("go", "weekly")) as { latestEstimate: unknown }).latestEstimate,
+      projections[lastEstimateAt], "survives head repair and an unavailable final point")
+    await rec(history, t0 + 4 * MIN, 2)
+    const row = (await windows(history)).windows![0]
+    assert.equal(row.apiValue?.projectionStatus, "unavailable", "compatibility metadata remains the final point")
+    assert.deepEqual(row.finalEstimate, projections[lastEstimateAt])
+    assert.equal(row.finalEstimate?.projectedFullUSD, 80)
+    assert.equal(row.finalEstimate?.observedAt, lastEstimateAt)
+    assert.notEqual(row.finalEstimate?.projectedFullUSD, projections[hit].projectedFullUSD, "not the estimate at the limit")
+    const frozen = structuredClone(map.get(windowKeyFor("go", "weekly", finalAt)))
+    projections[lastEstimateAt] = apiAt(lastEstimateAt, 99)
+    await rec(history, t0 + 4 * MIN, 2)
+    await history.compact(t0 + 100 * DAY)
+    assert.deepEqual(map.get(windowKeyFor("go", "weekly", finalAt)), frozen, "no repricing or folding mutation")
+  }
+})
+
+test("a cycle with no valid projection stays unavailable and cannot borrow the prior cycle's estimate", async () => {
+  const { storage, map } = fakeStorage()
+  const { record: rec, windows } = windowHarness(storage, {}, {
+    [t0]: apiAt(t0, 10),
+    [t0 + MIN]: unavailableAt(t0 + MIN), [t0 + 2 * MIN]: unavailableAt(t0 + 2 * MIN),
+  })
+  const history = new QuotaHistory(storage, () => t0 + 3 * MIN)
+  await rec(history, t0, 50)
+  await rec(history, t0 + MIN, 10)
+  await rec(history, t0 + 2 * MIN, 20)
+  assert.equal("latestEstimate" in (map.get(seriesKeyFor("go", "weekly")) as object), false)
+  await rec(history, t0 + 3 * MIN, 2)
+  const rows = (await windows(history)).windows!
+  assert.equal(rows[0].finalEstimate?.projectedFullUSD, 100)
+  assert.equal("finalEstimate" in rows[1], false, "unavailable, never zero or previous-cycle projection")
+})
+
+test("a real tracker closes its segment at a durable boundary when the reset point failed and the percentage rebounds", async () => {
+  let fail = false
+  const { storage, map } = fakeStorage({ failSet: (key) => fail && key.startsWith("routing/quota-history-v1/points/") })
+  const config = parseConfig({ usageSources: { openai: "codex" }, tokenRates: [{
+    providerID: "openai", modelID: "m", inputPerMillion: 10, outputPerMillion: 20,
+    currency: "USD", source: "test", asOf: 1,
+  }] })
+  const tracker = new QuotaValueTracker(config)
+  const estimates = new QuotaEstimates()
+  const history = new QuotaHistory(storage, () => t0 + 20 * MIN)
+  const observe = async (at: number, percent: number) => {
+    const usage = usageAt(at, percent, { sourceID: "codex" })
+    estimates.observe(usage, at)
+    return history.record(usage, estimates, at, undefined, await tracker.prepare(usage, at, new Map()))
+  }
+  const token = (id: string, at: number, input: number) => tracker.addTokenRecord({
+    hostContractVersion: "2.0.18", hostEventID: id, sourceEvent: "session.step.ended",
+    hostSessionID: "s", hostMessageID: id, hostProjectID: "p", parentSessionID: null,
+    hostAgentID: null, providerID: "openai", modelID: "m", variant: null,
+    completedAt: at, counts: { input, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+    usageStatus: "reported", partial: false,
+  } as never)
+  await observe(t0, 20)
+  token("old", t0 + 5 * MIN, 1_000_000)
+  await observe(t0 + 10 * MIN, 40)
+  await observe(t0 + 16 * MIN, 50)
+  const last = tracker.latestValue("codex", "weekly")!
+  assert.equal(last.projectionStatus, "estimated")
+  fail = true
+  await assert.rejects(observe(t0 + 17 * MIN, 2))
+  const key = windowKeyFor("codex", "weekly", t0 + 16 * MIN)
+  const frozen = structuredClone(map.get(key))
+  fail = false
+  // 50% -> failed 2% -> 60% inside the 15-minute gap: the 60% read is the first
+  // durable point of the new cycle. The tracker must not carry the old segment.
+  token("new", t0 + 18 * MIN, 2_000_000)
+  await observe(t0 + 19 * MIN, 60)
+  const current = tracker.latestValue("codex", "weekly")!
+  assert.equal(current.trackingSince, t0 + 19 * MIN)
+  assert.equal(current.observedUSD, null, "the interval before the boundary belongs to neither segment")
+  assert.deepEqual(map.get(key), frozen)
+  const points = await history.query({ sourceID: "codex", windowName: "weekly" }) as QuotaHistoryResult
+  const first = points.points[points.points.length - 1]
+  assert.equal(first.observedAt, t0 + 19 * MIN)
+  assert.equal(first.cycleBoundary, true)
+  const resets = (first.apiValueSnapshots ?? []).filter((snapshot) => snapshot.event === "reset")
+  assert.equal(resets.length, 1, "exactly one reset snapshot")
+  assert.deepEqual(resets[0].value, last)
+  const head = map.get(seriesKeyFor("codex", "weekly")) as Record<string, unknown>
+  assert.equal("latestEstimate" in head, false, "no estimate carried over from the old cycle")
+  const page = await history.query({ kind: "windows", sourceID: "codex", windowName: "weekly" }) as QuotaHistoryResult
+  assert.equal(page.windows?.length, 1)
+  assert.equal(page.windows?.[0].nextObservedAt, t0 + 17 * MIN)
+  assert.deepEqual(page.windows?.[0].finalEstimate, last)
+  assert.equal(windowKeys(map).length, 1)
+})
+
+test("a same-clock legacy seed checkpoints its frozen point value on the existing head", async () => {
+  for (const boundary of [false, true]) {
+    const { storage, map } = fakeStorage()
+    seedSeries(map, "go", "weekly", [t0])
+    const headBefore = structuredClone(map.get(seriesKeyFor("go", "weekly")))
+    const next = t0 + MIN
+    const { record: rec, windows } = windowHarness(storage, {}, { [next]: unavailableAt(next) })
+    const history = new QuotaHistory(storage, () => t0 + 5 * MIN)
+    // The stored point predates values: persist its value and checkpoint together.
+    assert.equal(await rec(history, t0, 50), false)
+    assert.deepEqual(map.get(seriesKeyFor("go", "weekly")), { ...(headBefore as object), instanceAnchorAt: t0,
+      currentValue: apiAt(t0, usdAt(t0)), latestEstimate: apiAt(t0, usdAt(t0)) })
+    assert.deepEqual((map.get(pointKeyFor("go", "weekly", t0)) as { apiValue: unknown }).apiValue, apiAt(t0, usdAt(t0)))
+
+    // A newer clock is an ordinary advance. Its own value is unavailable, so the
+    // last valid estimate is the one the seed gave the previous durable point.
+    assert.equal(await rec(history, next, boundary ? 10 : 60), true)
+    if (boundary) {
+      assert.deepEqual((await windows(history)).windows![0].finalEstimate, apiAt(t0, usdAt(t0)))
+    } else {
+      assert.deepEqual((map.get(seriesKeyFor("go", "weekly")) as { latestEstimate: unknown }).latestEstimate, apiAt(t0, usdAt(t0)))
+    }
+  }
+})
+
+test("a boundary point that failed with no value plan is valued on retry and does not wedge", async () => {
+  let fail = false
+  const { storage, map } = fakeStorage({ failSet: (key) => fail && key.startsWith("routing/quota-history-v1/points/") })
+  const { record: rec, windows } = windowHarness(storage)
+  const history = new QuotaHistory(storage, () => t0 + 5 * MIN)
+  await rec(history, t0, 50)
+  // The failed attempt has no plan at all (usage for the tracker was unavailable).
+  const bare = new QuotaEstimates()
+  const failed = usageAt(t0 + MIN, 10)
+  bare.observe(failed, t0 + MIN)
+  fail = true
+  await assert.rejects(history.record(failed, bare, t0 + MIN))
+  fail = false
+  assert.equal(windowKeys(map).length, 1)
+  assert.equal(await rec(history, t0 + 2 * MIN, 12), true, "the retry is not blocked by missing recovery evidence")
+  const points = await history.query({ sourceID: "go", windowName: "weekly" }) as QuotaHistoryResult
+  assert.equal(points.points[1].cycleBoundary, true)
+  assert.deepEqual(points.points[1].apiValue, apiAt(t0 + 2 * MIN, usdAt(t0 + 2 * MIN)))
+  assert.equal((await windows(history)).windows?.length, 1)
+})
+
+test("a damaged row at the closure key is neither rewritten nor wedges the series", async () => {
+  for (const percent of [60, 10]) {
+    const { storage, map } = fakeStorage()
+    seedSeries(map, "go", "weekly", [t0])
+    const damaged = { version: 1, sourceID: "go", windowName: "weekly", lastObservedAt: t0, nextPercent: "bad" }
+    map.set(windowKeyFor("go", "weekly", t0), structuredClone(damaged))
+    const { record: rec, windows } = windowHarness(storage)
+    const history = new QuotaHistory(storage, () => t0 + 5 * MIN)
+    assert.equal(await rec(history, t0 + MIN, percent), true, `percent ${percent}`)
+    assert.equal(await rec(history, t0 + 2 * MIN, percent + 1), true, `percent ${percent}`)
+    assert.deepEqual(map.get(windowKeyFor("go", "weekly", t0)), damaged, "touched nothing")
+    assert.deepEqual((await windows(history)).windows, [], "a damaged row is skipped by reads")
+    const points = await history.query({ sourceID: "go", windowName: "weekly" }) as QuotaHistoryResult
+    assert.deepEqual(points.points.map((point) => point.cycleBoundary), [false, true, false])
+  }
+  // A failed read of the key is not "no closure": it aborts rather than guessing.
+  const { storage, map } = fakeStorage({ failGet: (key) => key === windowKeyFor("go", "weekly", t0) })
+  seedSeries(map, "go", "weekly", [t0])
+  const { record: rec } = windowHarness(storage)
+  await assert.rejects(rec(new QuotaHistory(storage, () => t0), t0 + MIN, 10))
+  assert.equal(pointKeys(map).length, 1)
+})
+
+test("the first durable point of a new cycle starts its own estimate, not the closed window's", async () => {
+  let fail = false
+  const { storage, map } = fakeStorage({ failSet: (key) => fail && key.startsWith("routing/quota-history-v1/points/") })
+  const boundary = t0 + MIN
+  const rebound = t0 + 2 * MIN
+  const { record: rec, windows } = windowHarness(storage, {}, { [rebound]: unavailableAt(rebound) })
+  const history = new QuotaHistory(storage, () => t0 + 4 * MIN)
+  await rec(history, t0, 80, { resetsAt: boundary })
+  fail = true
+  await assert.rejects(rec(history, boundary, 100))
+  fail = false
+  await rec(history, rebound, 100)
+  assert.equal("latestEstimate" in (map.get(seriesKeyFor("go", "weekly")) as object), false)
+  await rec(history, t0 + 3 * MIN, 2)
+  const rows = (await windows(history)).windows!
+  assert.equal(rows.length, 2)
+  assert.deepEqual(rows[0].finalEstimate, apiAt(t0, usdAt(t0)))
+  assert.equal("finalEstimate" in rows[1], false, "the failed point's estimate is not history, and the old one is not borrowed")
 })

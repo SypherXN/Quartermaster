@@ -5,7 +5,10 @@ import type { Agent } from "@opencode/plugin"
 import type { AgentEditor } from "@opencode/plugin/promise/agent"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import { expandPlan, expandPlans, type ModelRef, type PlanOrder, type QuartermasterConfig } from "./config.ts"
-import { orderCategory, orderCategoryByPace, orderCategoryByProtectedPace, orderCategoryByWeightedPace } from "./decision.ts"
+import {
+  orderCategory, orderCategoryByPace, orderCategoryByProtectedPace, orderCategoryByWeightedPace,
+  orderCategoryByWeightedPriority,
+} from "./decision.ts"
 import { buildQuotaEligibility, quotaClocks, quotaFreshPaces, quotaPaces, quotaProtectedPaces } from "./eligibility.ts"
 import { classifyRetryFailure, FailureCooldowns, type FailureReport, type SuccessReport } from "./failures.ts"
 import { applyLocalHealth, LocalHealth } from "./local-health.ts"
@@ -219,6 +222,8 @@ export async function registerAgentRouting(
       switch (category.pick?.by) {
         case "weighted-pace":
           return orderCategoryByWeightedPace(category, quotaFreshPaces(config.usageSources, usage, now), seed)
+        case "weighted-priority":
+          return orderCategoryByWeightedPriority(category, quotaFreshPaces(config.usageSources, usage, now), seed)
         case "window-protection":
           return orderCategoryByProtectedPace(category, quotaProtectedPaces(config.usageSources, usage, estimates, now))
         case "pace":
@@ -574,20 +579,23 @@ export async function registerAgentRouting(
     // One order for both the reported plan and the recommendation: same session,
     // agent, plan and hour must produce the same evidence.
     const order = planOrderFor({ sessionID, agentID, planID }, now)
-    const plan = planID === undefined ? undefined : expandPlan(config.plans[planID], config.categories, order)
+    const entries = planID !== undefined && Object.hasOwn(config.plans, planID) ? config.plans[planID] : undefined
+    const plan = entries === undefined ? undefined : expandPlan(entries, config.categories, order)
     const mode = !agentID ? "unknown" : !bound ? "unbound" : ownershipRead !== "ok" ? "unknown"
       : ownership?.agent === agentID && ownership.mode === "manual" ? "manual" : "automatic"
     // Read the sticky record without refreshing it; diagnostics are not activity, and
     // selectAgentModel applies the idle cutoff.
     const sticky = mode === "automatic" && agentID ? stickyFor(sessionID, agentID, view.model) : undefined
     // Snapshot-only: refresh/select/status can adopt options, persist pins or reload agents.
-    const recommendation = explainSelection(selectAgentModel(
-      config, agentID ?? "", registry, failures.apply(baseSnapshot(), registry, now), now,
-      agentID ? pins.get(agentID) : undefined,
-      (model) => leases.peekBlocks(sessionID, model),
-      order,
-      sticky,
-    ))
+    const recommendation = explainSelection(plan === undefined
+      ? { status: "no-plan", reason: { code: "no-plan" }, skipped: [] }
+      : selectAgentModel(
+        config, agentID ?? "", registry, failures.apply(baseSnapshot(), registry, now), now,
+        agentID ? pins.get(agentID) : undefined,
+        (model) => leases.peekBlocks(sessionID, model),
+        order,
+        sticky,
+      ))
     const observed = lastPrimaryModels.get(sessionID)
     const failureObservation = failureObservations.get(sessionID)
     const quotaConfigured = Object.keys(config.usageSources).length > 0
@@ -1068,20 +1076,22 @@ export async function registerAgentRouting(
       ...currentPlans,
       status: "ok",
       updatedAt: currentUsage.snapshot.updatedAt,
-      sources: Object.fromEntries(Object.entries(config.usageSources).map(([providerID, sourceID]) => {
+      sources: Object.fromEntries(await Promise.all(Object.entries(config.usageSources).map(async ([providerID, sourceID]) => {
         const source = currentUsage.snapshot.sources[sourceID as UsageSourceID]
         if (!source) return [providerID, { sourceID, authenticated: false, checkedAt: null, stale: true, availability: "unknown", nextAvailableAt: null, windows: [] }]
         const stale = freshObservationAt(source, Date.now()) === undefined
-        return [providerID, { sourceID, authenticated: source.authenticated, checkedAt: source.checkedAt, stale: source.stale, availability: source.availability, nextAvailableAt: source.nextAvailableAt, windows: source.windows.map((window) => {
+        return [providerID, { sourceID, authenticated: source.authenticated, checkedAt: source.checkedAt, stale: source.stale, availability: source.availability, nextAvailableAt: source.nextAvailableAt, windows: await Promise.all(source.windows.map(async (window) => {
           const { name, usedPercent, state, resetsAt, resetEstimated } = window
           const estimate = typeof usedPercent === "number"
             ? stale ? estimates.stale() : estimates.estimate(sourceID as UsageSourceID, window)
             : undefined
-          const apiValue = !stale && quotaValues ? quotaValues.latestValue(sourceID, name) : undefined
-          const frozenValue = apiValue !== undefined && apiValue.observedAt === source.checkedAt ? apiValue : undefined
-          return { name, usedPercent, state, resetsAt, ...(resetEstimated === undefined ? {} : { resetEstimated }), ...(estimate ? { estimate } : {}), ...(frozenValue ? { apiValue: frozenValue } : {}) }
-        }) }]
-      })),
+          const checkpoint = source.checkedAt === null ? undefined : await history.currentCheckpoint(sourceID, name, source.checkedAt)
+          const frozenValue = stale ? undefined : checkpoint?.apiValue
+          return { name, usedPercent, state, resetsAt, ...(resetEstimated === undefined ? {} : { resetEstimated }), ...(estimate ? { estimate } : {}),
+            ...(checkpoint ? { instanceAnchorAt: checkpoint.instanceAnchorAt } : {}),
+            ...(frozenValue ? { apiValue: frozenValue } : {}) }
+        })) }]
+      }))),
     }
   }
 

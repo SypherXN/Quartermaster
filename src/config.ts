@@ -49,12 +49,21 @@ export interface CategoryPick {
    * provider stay in the sequence you wrote. `reset-soonest` drains the window
    * about to expire; `pace` ranks the tightest remaining budget per minute;
    * `weighted-pace` races providers in proportion to that pace for independent
-   * session assignments, with a reproducible context/hour draw; `window-protection` is
-   * `pace` with providers held back when a fresh forecast exhausts before reset.
+   * session assignments, with a reproducible context/hour draw; `weighted-priority`
+   * is the same draw with each model's place (or its `weights` number) multiplying
+   * its weight, so the list states a preference usage can still overturn;
+   * `window-protection` is `pace` with providers held back when a fresh forecast
+   * exhausts before reset.
    */
-  by?: "in-order" | "reset-soonest" | "pace" | "weighted-pace" | "window-protection"
+  by?: "in-order" | "reset-soonest" | "pace" | "weighted-pace" | "weighted-priority" | "window-protection"
   /** Provider IDs, most preferred first, used to break a tie the clock cannot. */
   path?: string[]
+  /**
+   * `weighted-priority` weights, keyed `providerID/modelID`. A model not listed
+   * keeps 1; without any weights each step down the list keeps half of the one
+   * above it.
+   */
+  weights?: Record<string, number>
 }
 
 export interface CategoryDef {
@@ -171,18 +180,41 @@ function categoryFrom(value: unknown, path: string): CategoryDef {
   if (item.pick === undefined) return { models }
   const pick = record(item.pick, `${path}.pick`)
   for (const key of Object.keys(pick)) {
-    if (key !== "by" && key !== "path") throw new Error(`${path}.pick.${key}: unknown field`)
+    if (key !== "by" && key !== "path" && key !== "weights") throw new Error(`${path}.pick.${key}: unknown field`)
   }
-  const pickStrategies = ["in-order", "reset-soonest", "pace", "weighted-pace", "window-protection"] as const
+  const pickStrategies = ["in-order", "reset-soonest", "pace", "weighted-pace", "weighted-priority", "window-protection"] as const
   const by = pick.by === undefined ? undefined : pick.by as (typeof pickStrategies)[number]
   if (by !== undefined && !pickStrategies.includes(by)) {
-    throw new Error(`${path}.pick.by: expected in-order, reset-soonest, pace, weighted-pace or window-protection`)
+    throw new Error(`${path}.pick.by: expected in-order, reset-soonest, pace, weighted-pace, weighted-priority or window-protection`)
   }
   const path2 = pick.path === undefined ? undefined : providerPath(pick.path, `${path}.pick.path`)
+  const weights = pick.weights === undefined ? undefined : priorityWeights(pick.weights, models, `${path}.pick.weights`)
   // A path without a strategy changes nothing, so it is kept inert rather than
   // rejected: the page stores it while the strategy reads "as listed".
-  if (by === undefined && path2 === undefined) return { models }
-  return { models, pick: { ...(by === undefined ? {} : { by }), ...(path2 === undefined ? {} : { path: path2 }) } }
+  if (by === undefined && path2 === undefined && weights === undefined) return { models }
+  return {
+    models,
+    pick: {
+      ...(by === undefined ? {} : { by }),
+      ...(path2 === undefined ? {} : { path: path2 }),
+      ...(weights === undefined ? {} : { weights }),
+    },
+  }
+}
+
+/** `weighted-priority` weights: a positive finite number per listed model. */
+function priorityWeights(value: unknown, models: readonly ModelRef[], path: string): Record<string, number> {
+  const entries = Object.entries(record(value, path))
+  const known = new Set(models.map((model) => `${model.providerID}/${model.modelID}`))
+  const weights: Record<string, number> = {}
+  for (const [key, weight] of entries) {
+    if (!known.has(key)) throw new Error(`${path}.${key}: not a model in this category`)
+    if (typeof weight !== "number" || !Number.isFinite(weight) || weight <= 0) {
+      throw new Error(`${path}.${key}: expected a positive number`)
+    }
+    weights[key] = weight
+  }
+  return weights
 }
 
 function categoriesFrom(value: unknown): Record<string, CategoryDef> {

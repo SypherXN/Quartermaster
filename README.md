@@ -106,7 +106,7 @@ Use one Quartermaster registration per config document. The highest-priority reg
 
 Confirm the handling process with `/qm-status` or the immediate diagnostic RPC below, then correlate its PID with host process ownership. A host name of `cli` can also describe an OpenChamber-managed child; neither that label nor matching session IDs proves which server handled the chat. An unbound `build` agent is expected to stay on its host model: select an already defined bound agent rather than adding bindings implicitly. Missing RPC/commands mean checking plugin loading and location scope before diagnosing selection.
 
-Quota integration is optional: verify `opencode-usage.status({})` exposes `go`, `codex` or `cursor`, then deliberately map actual provider IDs through `usageSources`; absent maps report `unconfigured`, not available quota. For NInfer, verify the configured loopback GET endpoint (for example `http://127.0.0.1:8080/v1/models`) in the receiving runtime; a stopped server reports offline. Do not start inference, exhaust quotas, recover credentials or change maps merely to obtain a passing test. Jev Auto and custom reviewer generation are separate paths, not substitutes for native bound-agent admission proof.
+Quota integration is optional: verify `opencode-usage.status({})` exposes `go`, `codex` or `cursor`, then deliberately map actual provider IDs through `usageSources` (`opencode-go -> go`, OAuth `openai -> codex`, `cursor -> cursor`, `anthropic -> claude-agent`); absent maps report `unconfigured`, not available quota. A stale configured source gets one forced refresh per read, with its own ten-second budget; a failed or slow poll keeps the cached reading, and a newer observation replaces an older one per source. For NInfer, verify the configured loopback GET endpoint (for example `http://127.0.0.1:8080/v1/models`) in the receiving runtime; a stopped server reports offline. Do not start inference, exhaust quotas, recover credentials or change maps merely to obtain a passing test. Jev Auto and custom reviewer generation are separate paths, not substitutes for native bound-agent admission proof.
 
 ## Development
 
@@ -130,6 +130,8 @@ All settings belong in `quartermaster.jsonc` next to the OpenCode config that re
 - **Categories:** `categories` maps a name to a non-empty, ordered list of
   models, in the same two forms plans accept, or to
   `{ "models": [...], "pick": { "by": "reset-soonest", "path": [...] } }`.
+  `pick` also accepts `weights`, a `providerID/modelID` to number map used by
+  `weighted-priority`.
   A plan may write `"@name"` (or `{ "category": "name" }`) in place of a model
   and gets the members inline at that position, so editing the category
   reaches every plan that names it. Categories hold models only, never other
@@ -146,7 +148,12 @@ All settings belong in `quartermaster.jsonc` next to the OpenCode config that re
   per session, agent, plan and hour; calls without a session share that context's
   draw rather than taking a new draw per call. `pick.by: "window-protection"`
   reduces pace when fresh observed consumption would exhaust a window before
-  its reported reset. Both new strategies require authenticated, error-free
+  its reported reset. `pick.by: "weighted-priority"` is the same draw with the
+  model's place in the category multiplying its weight, so the list states a
+  preference that usage can still overturn. Set explicit numbers with
+  `pick.weights`, keyed `providerID/modelID`; a model left out keeps `1`, and
+  without any weights each step down the list keeps half the weight of the one
+  above it. Both new strategies require authenticated, error-free
   quota observations no older than five minutes; missing evidence sorts last.
   Automatic
   routing keeps the exact model (and variant) it last assigned or confirmed at
@@ -171,8 +178,9 @@ All settings belong in `quartermaster.jsonc` next to the OpenCode config that re
     Forecasts stay separate from reported resets. Only the opt-in
     `window-protection` strategy uses them to adjust ranking, never eligibility;
    stale readings, changing windows and insufficient history suppress projections.
-   A separate archive keeps observed window readings and their forecasts for 90 days;
-   older readings roll into cumulative statistics per usage source and window.
+   A separate archive keeps observed window readings and their cutoff forecasts for
+   90 days; older readings roll into cumulative statistics per usage source and window.
+   Closed windows and their saved estimates are kept indefinitely.
    This records observations while Quartermaster is running, not continuous provider
    history: missing observations and unknown resets are not reconstructed.
 - **Health:** `localEndpoints` opts local providers into credential-free,
@@ -244,8 +252,11 @@ All settings belong in `quartermaster.jsonc` next to the OpenCode config that re
 
 Eligibility refreshes at prompt admission, selection/explanation, and safe retry
 selection—not on every dispatch. Quota reads use cached
-`opencode-usage.status({})`; Quartermaster never forces provider polling, apart
-from an enabled recovery probe for a listed model.
+`opencode-usage.status({})`; when any authenticated snapshot source is stale, Quartermaster
+makes one plugin-wide `refresh: true` call with its own
+ten-second budget, and keeps whichever observation is newer per source. Apart
+from that, provider polling happens only through an enabled recovery probe for a
+listed model.
 
 The public `select({ agent, workType? })` RPC uses a known work-type binding
 before the agent binding; an unknown alias falls back to the agent binding.
@@ -377,7 +388,9 @@ It records each distinct fresh reading for configured quota sources, including
 usage percentage, reported reset metadata, observed cycle-boundary hints, and the
 forecast generated with that reading. Cached timestamps are not new readings;
 later forecasts do not replace older ones. Unknown resets stay unknown, and a
-moving rolling-window deadline alone is not counted as a new cycle.
+moving rolling-window deadline alone is not counted as a new cycle. An observed
+boundary also freezes one closed-window row with the last valid estimate and its
+observation clock; that row is never rewritten.
 
 Raw readings and forecasts remain individually available for 90 days. Older
 points fold into a cumulative summary per source and window: observation and
@@ -395,6 +408,9 @@ const page = await archive.quotaHistory({
   sourceID: "codex", windowName: "primary_5h", limit: 200,
 })
 // Continue the same series/range with cursor: page.nextCursor when non-null.
+const saved = await archive.quotaHistory({
+  kind: "windows", sourceID: "codex", windowName: "primary_5h", limit: 20,
+})
 ```
 
 Catalog pages list source/window pairs without raw points; series pages return
@@ -404,6 +420,19 @@ only; cumulative totals are explicitly unfiltered. A point page contains at most
 1,000 observations (200 by default), ordered by observation time. This API is
 data for future plots, not a chart; collection starts with observed readings and
 does not backfill times when Quartermaster was not running.
+
+`kind: "windows"` returns saved closed windows for exactly one source and window,
+ordered by `lastObservedAt` with a strictly-after timestamp cursor; here `from`,
+`to` and `cursor` all apply to `lastObservedAt`. Such a page has no raw points,
+no cumulative row and no catalog, and it never folds or deletes anything. Closed
+rows are kept indefinitely, while the raw diagnostic points remain on the
+90-day fold. Each row carries observed boundary evidence, `nextObservedAt` and
+the optional `instanceAnchorAt` (the first durable observation of that cycle,
+never a claimed provider start). `finalEstimate` is the full frozen
+API-equivalent value; only its `projectedFullUSD` is an amount, and an
+unavailable window is a row with no usable amount and a truthful reason
+(`finalEstimateReason`, or `finalEstimate.reason`), never zero and never the
+observed subtotal or a maxed snapshot.
 
 ### Usage API equivalents
 
@@ -444,13 +473,18 @@ show them as unavailable.
 
 ### API-equivalent quota value
 
-Quota → Estimates also shows the known USD API-equivalent subtotal of tracked
-token usage and, when enough evidence exists, an estimated value of a full
-allowance: `known USD × 100 / observed percentage-point increase`. Projection
-requires at least 15 minutes, a one-point increase, priced work, and no known
-pricing, token-count, cache-price, or attribution gaps. Exact configured USD
-token rates take precedence over catalog prices for quota valuation. Quota
-valuation and Usage's first-write price snapshots share the API price catalog at
+Quota → Estimates shows one current USD estimate per open quota window: the
+approximate API price of a full allowance, `known USD × 100 / observed
+percentage-point increase`, not accumulated spend, a subscription price, or a
+bill. When that window closes its last valid estimate is saved, and each source
+and window gets one historical chart of those saved windows. Only an estimate's
+`projectedFullUSD` is a displayed amount; observed subtotals and maxed snapshots
+are coverage metadata, never chart values, and are never added together.
+Projection requires at least 15 minutes, a one-point increase, priced work, and
+no known pricing, token-count, cache-price, or attribution gaps. Exact
+configured USD token rates take precedence over catalog prices for quota
+valuation. Quota valuation and Usage's first-write price snapshots share the API
+price catalog at
 `https://models.dev/api.json`: an OpenAI model matches the `openai` entry with
 the same ID. Claude Agent's rolling `opus`, `sonnet`, `haiku`, and `fable` aliases
 follow the newest stable version of their family in the API price catalog,
@@ -473,19 +507,34 @@ allowance budgets. Overlapping windows include the same work: do not
 sum them.
 
 Tracking begins at the first fresh reading after startup, using newly persisted
-token records only; it does not reprice old history. Catalog-price changes start
-a new span rather than rewriting earlier values. Restarts, observation gaps
-longer than 15 minutes, invalid readings, pricing/mapping changes, or overflow of
-the 10,000-record memory buffer start a new tracking span. A reset saves the
-previous frozen value without allocating work across its uncertain boundary;
-an observed 100% or rate-limited window saves a maxed snapshot. Unknown or missed
-boundaries are not reconstructed.
+token records only; it does not reprice old history. A source/window cycle is
+identified by its first durable observation (`instanceAnchorAt`), an observation
+time and never a claimed provider start; it changes only when a closure is
+observed. Catalog-price changes start a new tracking span rather than rewriting
+earlier values. Restarts, observation gaps longer than 15 minutes, invalid
+readings, pricing/mapping changes, or overflow of the 10,000-record memory buffer
+start a new tracking span. A restarted process re-displays a value saved for the
+same fresh observation clock without repricing and without resuming aggregation;
+the next newer clock reanchors conservatively with a `restarted` reason. The
+token buffer is never backfilled after a restart.
 
-`quotaHistory` retains these values and reset/maxed snapshots with the raw
-90-day history. Older cumulative USD totals add only closed reset segments'
-known subtotals and remain marked incomplete; maxed snapshots and full-allowance
-projections are non-additive statistics. The Estimates pane shows current values,
-not the archive. Valuation never changes routing or requests inference.
+A window closes when a fresh observation shows a percentage drop or crosses the
+previously reported reset deadline; the exact end falls between the two
+observations and is not invented. Reaching 100% or being rate-limited alone does
+not close it. The saved value is the last valid pre-boundary projection with its
+original observation clock. A window without one is saved as unavailable with its
+reason, never as zero and never with the subtotal or a maxed snapshot. Saving
+freezes the dollars: later records, deletions, price changes and alias upgrades
+do not reprice a closed window, and work in the uncertain boundary gap stays
+unallocated. Closed windows are kept indefinitely and are not limited to 90 days;
+raw observations still fold after 90 days. `quotaHistory` serves both families
+with `kind: "points" | "windows"` (windows need one `sourceID` and `windowName`),
+uses ascending `lastObservedAt` timestamp cursors for windows, and marks the
+closed history as indefinite in its metadata. Older cumulative USD totals add
+only closed reset segments' known subtotals and remain marked incomplete; maxed
+snapshots and full-allowance projections are non-additive statistics. Overlapping
+windows cover the same work, so never add their estimates. Valuation never
+changes routing or requests inference.
 
 ## Native routing boundaries
 

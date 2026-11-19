@@ -33,6 +33,8 @@ function fakeContext(extra: Record<string, unknown> = {}) {
       hook: async () => ({ dispose() {} }),
     },
     storage,
+    // A real context always exposes the catalog; routing registration reads it.
+    model: { list: async () => ({ data: [] }) },
     quartermasterLocalUi: async () => "skipped",
     ...extra,
   }

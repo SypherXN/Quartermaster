@@ -142,6 +142,36 @@ test("stale, unauthenticated, errored and future observations cannot build confi
   assert.equal(cached.estimate("go", usageWindow(40), t0)?.sampleCount, 0)
 })
 
+test("clockless sources preserve history while clocked authentication failures still drop it", () => {
+  const estimates = new QuotaEstimates()
+  const initial = usageAt(t0, 40)
+  assert.equal(initial.status, "ok")
+  if (initial.status !== "ok") return
+  initial.snapshot.sources.codex = { ...initial.snapshot.sources.go }
+  estimates.observe(initial, t0)
+  const codexBefore = estimates.snapshot().series["codex::weekly"]
+  assert.ok(codexBefore)
+  assert.ok(estimates.snapshot().series["go::weekly"])
+
+  const next = usageAt(t0 + MIN, 40, { authenticated: false })
+  assert.equal(next.status, "ok")
+  if (next.status !== "ok") return
+  next.snapshot.sources.codex = {
+    authenticated: false, checkedAt: null, stale: true, error: null, windows: [],
+    nextAvailableAt: null, availability: "unknown",
+  }
+  assert.equal(estimates.observe(next, t0 + MIN), true)
+  assert.deepEqual(estimates.snapshot().series["codex::weekly"], codexBefore)
+  assert.equal(estimates.snapshot().series["go::weekly"], undefined)
+  assert.equal(estimates.observe(next, t0 + MIN), false, "no observation does not change persisted history")
+
+  next.snapshot.sources.codex.checkedAt = t0 + MIN
+  next.snapshot.sources.codex.authenticated = true
+  next.snapshot.sources.codex.error = "provider unavailable"
+  assert.equal(estimates.observe(next, t0 + MIN), true)
+  assert.equal(estimates.snapshot().series["codex::weekly"], undefined, "a clocked error remains evidence to drop history")
+})
+
 test("expired history is pruned and a positive history with no fresh observation stays stale", () => {
   const expired = recorded([{ at: t0 - 70 * MIN, percent: 40 }])
   const before = expired.snapshot()

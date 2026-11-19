@@ -208,7 +208,7 @@ export default Plugin.define({
           console.warn(`[quartermaster] project configuration unavailable: ${error instanceof Error ? error.message : String(error)}`)
         }
       }
-      const quotaValues = new QuotaValueTracker(config)
+      const quotaValues = new QuotaValueTracker(config, Date.now())
       const quotaPriceFor = async (providerID: string, modelID: string) => {
         const list = ctx.model.list.bind(ctx.model) as CatalogModelList
         const table = await readQuotaPriceTable(list, Date.now, {

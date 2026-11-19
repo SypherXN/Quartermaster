@@ -166,16 +166,21 @@ export function normalizeUsageSnapshot(value: unknown, now = Date.now()): UsageR
   }
 }
 
-export async function readUsageStatus(
+// A forced refresh asks the usage plugin to poll its providers, which can take
+// longer than the cached read, so it gets its own budget.
+const USAGE_REFRESH_TIMEOUT_MS = 10_000
+
+async function readOnce(
   ctx: Pick<Context, "rpc">,
-  timeoutMs = USAGE_RPC_TIMEOUT_MS,
+  timeoutMs: number,
+  refresh: boolean,
 ): Promise<UsageReadResult> {
   const controller = new AbortController()
   let timer: ReturnType<typeof setTimeout> | undefined
   let timedOut = false
   try {
     const result = await Promise.race([
-      ctx.rpc(USAGE_RPC).status({}, { signal: controller.signal }),
+      ctx.rpc(USAGE_RPC).status(refresh ? { refresh: true } : {}, { signal: controller.signal }),
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
           timedOut = true
@@ -190,4 +195,55 @@ export async function readUsageStatus(
   } finally {
     if (timer) clearTimeout(timer)
   }
+}
+
+function replacesSource(previous: UsageSource | undefined, source: UsageSource): boolean {
+  const at = source.checkedAt ?? -1
+  const before = previous?.checkedAt ?? -1
+  return !previous || at > before || (at === before && (!source.stale || previous.stale))
+}
+
+/**
+ * Reads the usage snapshot, then asks the plugin to poll providers when a
+ * configured source came back stale. A slow or failing poll degrades to the
+ * cached snapshot and never worse.
+ */
+async function readPluginUsage(
+  ctx: Pick<Context, "rpc">,
+  timeoutMs = USAGE_RPC_TIMEOUT_MS,
+): Promise<UsageReadResult> {
+  const cached = await readOnce(ctx, timeoutMs, false)
+  if (cached.status !== "ok") return cached
+  const sources = Object.values(cached.snapshot.sources)
+  if (!sources.some((source) => source.authenticated && source.stale)) return cached
+
+  const refreshed = await readOnce(ctx, USAGE_REFRESH_TIMEOUT_MS, true)
+  if (refreshed.status !== "ok") return cached
+
+  // Keep whichever reading is newer per source: a failed poll leaves the older
+  // observation marked stale, and a successful one replaces it. On an equal
+  // clock the poll may re-report the same observation as failed, so take it only
+  // when it is not the less usable of the two.
+  const merged = { ...cached.snapshot.sources }
+  for (const [id, source] of Object.entries(refreshed.snapshot.sources)) {
+    const previous = merged[id as UsageSourceID]
+    if (replacesSource(previous, source)) {
+      merged[id as UsageSourceID] = source
+    }
+  }
+  return {
+    status: "ok",
+    snapshot: {
+      updatedAt: Math.max(cached.snapshot.updatedAt, refreshed.snapshot.updatedAt),
+      sources: merged,
+    },
+  }
+}
+
+/** Plugin-only entry point; callers without config keep the original signature. */
+export async function readUsageStatus(
+  ctx: Pick<Context, "rpc">,
+  timeoutMs = USAGE_RPC_TIMEOUT_MS,
+): Promise<UsageReadResult> {
+  return readPluginUsage(ctx, timeoutMs)
 }

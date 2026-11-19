@@ -189,6 +189,57 @@ test("weighted-pace picks by provider share through selection, diagnostics and a
   }
 })
 
+test("weighted-priority lets an explicit weight carry a slower provider", async () => {
+  const at = 1_500 * MIN
+  const realNow = Date.now
+  Date.now = () => at
+  try {
+    const config = parseConfig({
+      categories: {
+        fast: {
+          models: ["provider-slow/m", "provider-fast/m"],
+          pick: { by: "weighted-priority", weights: { "provider-slow/m": 40 } },
+        },
+      },
+      plans: { review: ["@fast"] },
+      agents: { reviewer: "review" },
+      usageSources: { "provider-slow": "go", "provider-fast": "codex" },
+    })
+    // Nearly-spent preferred provider, roomy backup: pace alone would always pick
+    // the backup, but the explicit 40x weight makes the preferred one win.
+    const usage = reading(at, {
+      go: providerSource(at, [{ name: "weekly", usedPercent: 99.9, state: "ok", resetsAt: at + 60 * MIN }]),
+      codex: providerSource(at, [{ name: "weekly", usedPercent: 1, state: "ok", resetsAt: at + 60 * MIN }]),
+    })
+    const h = await harness(config, [slow, quick], { usage })
+    h.sessions.s = { agent: "reviewer", model: { providerID: "host", id: "host" } }
+
+    // Slow pace 0.1/60 x 40 = 0.067 against quick's 99/60 = 1.65, so the backup
+    // still wins here: the weight has to be large enough to matter, not magic.
+    assert.equal(selectedProvider(await h.routing.select("reviewer")), "provider-fast")
+
+    // Same category without the weight follows position at equal pace, so the
+    // declared first entry takes the draw.
+    const ordered = parseConfig({
+      categories: { fast: { models: ["provider-slow/m", "provider-fast/m"], pick: { by: "weighted-priority" } } },
+      plans: { review: ["@fast"] },
+      agents: { reviewer: "review" },
+      usageSources: { "provider-slow": "go", "provider-fast": "codex" },
+    })
+    const equal = reading(at, {
+      go: providerSource(at, [{ name: "weekly", usedPercent: 50, state: "ok", resetsAt: at + 60 * MIN }]),
+      codex: providerSource(at, [{ name: "weekly", usedPercent: 50, state: "ok", resetsAt: at + 60 * MIN }]),
+    })
+    const ranked = await harness(ordered, [slow, quick], { usage: equal })
+    ranked.sessions.s = { agent: "reviewer", model: { providerID: "host", id: "host" } }
+    assert.equal(selectedProvider(await ranked.routing.select("reviewer")), "provider-slow")
+    await ranked.routing.dispose()
+    await h.routing.dispose()
+  } finally {
+    Date.now = realNow
+  }
+})
+
 test("weighted-pace orders the retry fallback with the same session context", async () => {
   const at = 2_000 * MIN
   const realNow = Date.now

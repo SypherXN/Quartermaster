@@ -93,15 +93,30 @@ test("parses a category pick policy and rejects an unknown strategy", () => {
     plans: { review: ["@fast"] },
   })
   assert.deepEqual(ordered.categories.fast.pick, { by: "in-order" })
-  for (const by of ["weighted-pace", "window-protection"]) {
+  for (const by of ["weighted-pace", "weighted-priority", "window-protection"]) {
     assert.deepEqual(
       parseConfig({ categories: { fast: { models: ["provider-a/quick"], pick: { by } } } }).categories.fast.pick,
       { by },
     )
   }
+  // Priority weights ride with the strategy and must name this category's models.
+  assert.deepEqual(
+    parseConfig({
+      categories: { fast: { models: ["provider-a/quick", "provider-b/steady"], pick: { by: "weighted-priority", weights: { "provider-a/quick": 4 } } } },
+    }).categories.fast.pick,
+    { by: "weighted-priority", weights: { "provider-a/quick": 4 } },
+  )
+  assert.throws(
+    () => parseConfig({ categories: { fast: { models: ["provider-a/quick"], pick: { by: "weighted-priority", weights: { "provider-b/absent": 2 } } } } }),
+    /not a model in this category/,
+  )
+  assert.throws(
+    () => parseConfig({ categories: { fast: { models: ["provider-a/quick"], pick: { by: "weighted-priority", weights: { "provider-a/quick": 0 } } } } }),
+    /expected a positive number/,
+  )
   assert.throws(
     () => parseConfig({ categories: { fast: { models: ["provider-a/quick"], pick: { by: "cheapest" } } } }),
-    /expected in-order, reset-soonest, pace, weighted-pace or window-protection/,
+    /expected in-order, reset-soonest, pace, weighted-pace, weighted-priority or window-protection/,
   )
   assert.throws(
     () => parseConfig({ categories: { fast: { models: ["provider-a/quick"], pick: { by: "reset-soonest", other: 1 } } } }),

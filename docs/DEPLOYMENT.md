@@ -88,8 +88,13 @@ ones. No eligible candidate or an unconfirmed switch rejects automatic admission
 
 Usage integration is optional. Map actual provider IDs with `usageSources` only
 after verifying `opencode-usage.status({})`: `opencode-go -> go`, OAuth
-`openai -> codex` (not an API-key account), and `cursor -> cursor`. Do not invent
-quota from an absent mapping. No provider polling or forced refresh is required.
+`openai -> codex` (not an API-key account), `cursor -> cursor`, and
+`anthropic -> claude-agent`. Do not invent quota from an absent mapping. When any
+authenticated snapshot source is stale, Quartermaster makes one plugin-wide
+`refresh: true` call, with its own ten-second budget and no extension of the cached read. A
+failed or slow poll keeps the cached observation; per source, the newer
+observation wins and an equal clock cannot replace a usable reading with a
+failed one.
 `localEndpoints` optionally maps a local provider to its existing loopback
 HTTP(S) GET health URL; probes omit credentials and cache for five seconds.
 A stopped inference server is offline; installation never requires starting it.

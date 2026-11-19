@@ -6,6 +6,15 @@ import type { UsageReadResult, UsageSource, UsageSourceID } from "./usage.ts"
 
 export { QUOTA_BLOCK_PERCENT }
 
+/**
+ * No window is scored over a horizon longer than this. A percentage is only
+ * comparable within one window, so an uncapped monthly window divides a small
+ * remainder by a month and reports a rate no weekly or 5-hour window can match
+ * downwards, which pins every race against that provider. Beyond a week the
+ * difference no longer changes what a router should do, so the urgency saturates.
+ */
+const PACE_HORIZON_MINUTES = 7 * 24 * 60
+
 export type ModuleQuota = "unknown" | "available" | "limited"
 
 /** A fresh source blocks a model when it is already limited or any window is full. */
@@ -94,7 +103,7 @@ function sourcePace(source: UsageSource, now: number): number | undefined {
   let pace: number | undefined
   for (const window of source.windows) {
     if (typeof window.resetsAt !== "number" || typeof window.usedPercent !== "number") continue
-    const minutes = (window.resetsAt - now) / 60_000
+    const minutes = Math.min((window.resetsAt - now) / 60_000, PACE_HORIZON_MINUTES)
     if (minutes <= 0) continue
     const perMinute = (QUOTA_BLOCK_PERCENT - window.usedPercent) / minutes
     if (pace === undefined || perMinute < pace) pace = perMinute
@@ -115,7 +124,7 @@ function strictPace(source: UsageSource, now: number): number | undefined {
     if (typeof percent !== "number" || !Number.isFinite(percent)) continue
     if (percent < 0 || percent > QUOTA_BLOCK_PERCENT) continue
     if (typeof resetsAt !== "number" || !Number.isFinite(resetsAt)) continue
-    const minutes = (resetsAt - now) / 60_000
+    const minutes = Math.min((resetsAt - now) / 60_000, PACE_HORIZON_MINUTES)
     if (!(minutes > 0) || !Number.isFinite(minutes)) continue
     const perMinute = (QUOTA_BLOCK_PERCENT - percent) / minutes
     if (!Number.isFinite(perMinute) || perMinute < 0) continue

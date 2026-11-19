@@ -1,7 +1,10 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import type { CategoryDef, ModelRef } from "../src/config.ts"
-import { orderCategory, orderCategoryByPace, orderCategoryByProtectedPace, orderCategoryByWeightedPace } from "../src/decision.ts"
+import {
+  orderCategory, orderCategoryByPace, orderCategoryByProtectedPace, orderCategoryByWeightedPace,
+  orderCategoryByWeightedPriority, priorityWeight,
+} from "../src/decision.ts"
 
 const model = (providerID: string, modelID: string): ModelRef => ({ providerID, modelID })
 const minute = 60_000
@@ -119,6 +122,99 @@ test("weighted pace is deterministic and a provider races once, not once per mod
   }
   // Two models on provider a must not double its 1:1 weight to 2:1.
   assert.ok(Math.abs(a / seeds - 0.5) < 0.03, `expected about 50% for provider a, saw ${a / seeds}`)
+})
+
+test("weighted priority prefers the earlier entry but still follows usage", () => {
+  const listed = category(
+    [model("preferred", "a"), model("second", "b"), model("third", "c")],
+    { by: "weighted-priority" },
+  )
+  // Half the weight per step: 1, 0.5, 0.25 against equal pace.
+  assert.deepEqual(
+    listed.models.map((entry) => priorityWeight(listed, entry)),
+    [1, 0.5, 0.25],
+  )
+  const equal = pace({ preferred: 1, second: 1, third: 1 })
+  const seeds = 10_000
+  const wins = { preferred: 0, second: 0, third: 0 }
+  for (let index = 0; index < seeds; index++) {
+    const winner = orderCategoryByWeightedPriority(listed, equal, `seed-${index}`)[0]
+    wins[winner.providerID as keyof typeof wins] += 1
+  }
+  // 1 / (1 + 0.5 + 0.25) = 57%, 29%, 14%.
+  assert.ok(Math.abs(wins.preferred / seeds - 0.571) < 0.03, `preferred ${wins.preferred / seeds}`)
+  assert.ok(Math.abs(wins.second / seeds - 0.286) < 0.03, `second ${wins.second / seeds}`)
+  assert.ok(Math.abs(wins.third / seeds - 0.143) < 0.03, `third ${wins.third / seeds}`)
+
+  // Usage still decides: the last entry at four times the pace overtakes.
+  // 4 x 0.25 = 1 against the leader's 1 x 1, so it wins 1 / 2.5.
+  const roomy = pace({ preferred: 1, second: 1, third: 4 })
+  let third = 0
+  for (let index = 0; index < seeds; index++) {
+    if (orderCategoryByWeightedPriority(listed, roomy, `seed-${index}`)[0].providerID === "third") third += 1
+  }
+  assert.ok(Math.abs(third / seeds - 0.4) < 0.03, `expected about 40% on the roomy third, saw ${third / seeds}`)
+})
+
+test("weighted priority takes explicit weights, and an unlisted model keeps 1", () => {
+  const listed = category(
+    [model("top", "a"), model("plain", "b"), model("other", "c")],
+    { by: "weighted-priority", weights: { "top/a": 4 } },
+  )
+  assert.deepEqual(
+    listed.models.map((entry) => priorityWeight(listed, entry)),
+    [4, 1, 1],
+  )
+  const seeds = 10_000
+  const equal = pace({ top: 1, plain: 1, other: 1 })
+  let top = 0
+  for (let index = 0; index < seeds; index++) {
+    if (orderCategoryByWeightedPriority(listed, equal, `seed-${index}`)[0].providerID === "top") top += 1
+  }
+  // 4 / (4 + 1 + 1) = 67%.
+  assert.ok(Math.abs(top / seeds - 0.667) < 0.03, `expected about two thirds on the 4x model, saw ${top / seeds}`)
+
+  // Equal numbers are a tie: the draw splits evenly whatever the list order.
+  const tied = category(
+    [model("first", "a"), model("second", "b")],
+    { by: "weighted-priority", weights: { "first/a": 2, "second/b": 2 } },
+  )
+  let tiedFirst = 0
+  for (let index = 0; index < seeds; index++) {
+    if (orderCategoryByWeightedPriority(tied, pace({ first: 1, second: 1 }), `seed-${index}`)[0].providerID === "first") {
+      tiedFirst += 1
+    }
+  }
+  assert.ok(Math.abs(tiedFirst / seeds - 0.5) < 0.03, `expected an even split between equal weights, saw ${tiedFirst / seeds}`)
+
+  // Equal explicit weights make it exactly weighted-pace: same score, same order.
+  const allOne = category(
+    [model("a", "x"), model("b", "y"), model("c", "z")],
+    { by: "weighted-priority", weights: { "a/x": 1, "b/y": 1, "c/z": 1 } },
+  )
+  const plain = category([model("a", "x"), model("b", "y"), model("c", "z")], { by: "weighted-pace" })
+  const uneven = pace({ a: 0.4, b: 2.5, c: 1 })
+  for (let index = 0; index < 200; index++) {
+    assert.deepEqual(
+      orderCategoryByWeightedPriority(allOne, uneven, `seed-${index}`),
+      orderCategoryByWeightedPace(plain, uneven, `seed-${index}`),
+    )
+  }
+
+  // A provider races once, on its strongest member, so a preferred model is not
+  // diluted by a sibling listed below it.
+  const mixed = category(
+    [model("a", "x"), model("a", "y"), model("b", "z")],
+    { by: "weighted-priority", weights: { "a/x": 3, "b/z": 1 } },
+  )
+  let a = 0
+  for (let index = 0; index < seeds; index++) {
+    if (orderCategoryByWeightedPriority(mixed, pace({ a: 1, b: 1 }), `seed-${index}`)[0].providerID === "a") a += 1
+  }
+  assert.ok(Math.abs(a / seeds - 0.75) < 0.03, `expected about 75% for provider a, saw ${a / seeds}`)
+  // Another strategy's category passes through untouched.
+  const other = category([model("b", "z"), model("a", "x")], { by: "weighted-pace" })
+  assert.deepEqual(orderCategoryByWeightedPriority(other, equal, "seed"), other.models)
 })
 
 test("weighted pace ranks invalid weights last by path then file order", () => {

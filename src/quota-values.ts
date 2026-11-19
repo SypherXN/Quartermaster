@@ -199,8 +199,26 @@ export interface PreparedQuotaValue {
   commit(): void
 }
 
+export interface QuotaValueOptions {
+  /**
+   * The observation is already archived and is only now being seen by this
+   * process (same clock after a restart, or a reused point). The token buffer is
+   * fed live only, so work completed between that clock and process start is
+   * absent; a seed with no prior state is committed but never anchors a span.
+   */
+  seed?: boolean
+  /**
+   * The caller has durably recorded that the previous window closed before this
+   * observation (the archive cannot always see it in the percentage alone, for
+   * example a failed boundary write followed by a rebound). It closes the previous
+   * frozen segment and reanchors exactly like an observed reset, but only for a
+   * series that already has state: with no state there is nothing to close.
+   */
+  boundary?: boolean
+}
+
 export interface QuotaValuePlan {
-  valueFor(sourceID: string, windowName: string, at: number): PreparedQuotaValue | undefined
+  valueFor(sourceID: string, windowName: string, at: number, options?: QuotaValueOptions): PreparedQuotaValue | undefined
   recover(sourceID: string, windowName: string, point: QuotaValueRecovery): void
 }
 
@@ -284,18 +302,24 @@ function mappingSignature(config: QuartermasterConfig): string {
   return JSON.stringify([
     Object.entries(config.usageSources).sort(([a], [b]) => a.localeCompare(b)),
     [...config.quotaExemptModels].sort(),
-    config.tokenRates ?? [],
   ])
 }
 
-function pricingSignature(config: QuartermasterConfig, prices: PriceTable): string {
-  const providers = new Set(Object.keys(config.usageSources))
+// Per source: only the providers mapped to this source can price its records, so
+// a price change for one source's models must not reanchor every other source.
+function pricingSignature(config: QuartermasterConfig, prices: PriceTable, sourceID: string): string {
+  const providers = new Set<string>()
+  for (const [providerID, mapped] of Object.entries(config.usageSources)) {
+    if (mapped === sourceID) providers.add(providerID)
+  }
   const rows: Array<[string, unknown]> = []
   for (const entry of prices) {
-    if (providers.has(entry[0].slice(0, entry[0].indexOf("/")))) rows.push(entry)
+    const slash = entry[0].indexOf("/")
+    if (slash > 0 && providers.has(entry[0].slice(0, slash))) rows.push(entry)
   }
   rows.sort(([a], [b]) => a.localeCompare(b))
-  return JSON.stringify([rows, config.tokenRates ?? []])
+  const rates = (config.tokenRates ?? []).filter((rate) => providers.has(rate.providerID))
+  return JSON.stringify([rows, rates])
 }
 
 function seriesKey(sourceID: string, windowName: string): string {
@@ -366,8 +390,13 @@ export class QuotaValueTracker {
   // fresh observation, so one window's recovery cannot clear another's damage.
   private readonly invalidations = new Map<string, string>()
 
-  constructor(config: QuartermasterConfig) {
+  // Process-start clock. A first observation older than this may be missing
+  // records completed before the live buffer was fed. 0 means none can exist.
+  private readonly startedAt: number
+
+  constructor(config: QuartermasterConfig, startedAt = 0) {
     this.config = config
+    this.startedAt = startedAt
   }
 
   /** Ingest only after a token record is persisted. Ambiguous rows are kept. */
@@ -396,11 +425,12 @@ export class QuotaValueTracker {
       return undefined
     }
     const mapping = mappingSignature(this.config)
-    const pricing = pricingSignature(this.config, prices)
     const rates = rateIndex(this.config.tokenRates ?? [])
     const exempt = new Set(this.config.quotaExemptModels)
     const windows = new Map<string, { sourceID: UsageSourceID; window: UsageWindow; at: number }>()
     const sourceIDs = [...new Set(Object.values(this.config.usageSources))] as UsageSourceID[]
+    const pricing = new Map<string, string>()
+    for (const sourceID of sourceIDs) pricing.set(sourceID, pricingSignature(this.config, prices, sourceID))
     for (const sourceID of sourceIDs) {
       const source = usage.snapshot.sources[sourceID]
       if (!source) continue
@@ -429,10 +459,10 @@ export class QuotaValueTracker {
     }
 
     return {
-      valueFor: (sourceID, windowName, at) => {
+      valueFor: (sourceID, windowName, at, options) => {
         const entry = windows.get(seriesKey(sourceID, windowName))
         if (entry === undefined || entry.at !== at) return undefined
-        return this.planEntry(entry, mapping, pricing, prices, rates, exempt)
+        return this.planEntry(entry, mapping, pricing.get(sourceID) ?? "", prices, rates, exempt, options?.seed === true, options?.boundary === true)
       },
       recover: (sourceID, windowName, point) => this.recover(sourceID, windowName, point),
     }
@@ -455,16 +485,24 @@ export class QuotaValueTracker {
     prices: PriceTable,
     rates: ReadonlyMap<string, TokenRateConfig>,
     exempt: ReadonlySet<string>,
+    seed = false,
+    boundary = false,
   ): PreparedQuotaValue {
     const { sourceID, window, at } = entry
     const windowName = window.name
     const key = seriesKey(sourceID, windowName)
     const state = this.states.get(key)
     const percent = window.usedPercent as number
+    // The same observation clock is one observation, not a new one: replay the
+    // committed value untouched so a re-read can neither drift as late records
+    // arrive nor consume a pending invalidation that a fresh read must still see.
+    if (state !== undefined && at === state.lastObservedAt) {
+      return { apiValue: state.lastValue, apiValueSnapshots: [], commit: () => {} }
+    }
     const pending = this.invalidations.get(key)
     const crossedReset = state !== undefined && state.lastResetsAt !== null &&
       state.lastObservedAt < state.lastResetsAt && at >= state.lastResetsAt
-    const actualReset = state !== undefined && (percent < state.lastPercent || crossedReset)
+    const actualReset = state !== undefined && (percent < state.lastPercent || crossedReset || boundary)
     const changedBasis = state !== undefined && (state.mapping !== mapping || state.pricing !== pricing)
     const gap = state !== undefined && at - state.lastObservedAt > MAX_VALUE_OBSERVATION_GAP_MS
     const invalidated = state !== undefined && (pending !== undefined || gap)
@@ -489,11 +527,18 @@ export class QuotaValueTracker {
       anchorAt = state!.anchorAt
       segmentID = state!.segmentID
     }
-    const force = invalidated
-      ? (pending ?? (gap ? VALUE_REASON_GAP : VALUE_REASON_STALE))
-      : actualReset
-        ? undefined
-        : changedBasis ? VALUE_REASON_BASIS : undefined
+    // A first observation is uncorroborated when it is an explicit seed or its
+    // clock predates this process: the buffer may be missing work completed before
+    // start, so the value reports a restart and the next fresh observation
+    // re-anchors once the buffer is live.
+    const unanchoredSeed = state === undefined && (seed || at < this.startedAt)
+    const force = unanchoredSeed
+      ? VALUE_REASON_RESTARTED
+      : invalidated
+        ? (pending ?? (gap ? VALUE_REASON_GAP : VALUE_REASON_STALE))
+        : actualReset
+          ? undefined
+          : changedBasis ? VALUE_REASON_BASIS : undefined
     const maxTransition = maxedNow && (state === undefined || reanchor || !state.maxed)
     const summary = this.summarize(sourceID, anchorAt, at, prices, rates, exempt)
     const apiValue = buildApiValue(at, anchorPercent, anchorAt, percent, summary, force)
@@ -512,6 +557,7 @@ export class QuotaValueTracker {
         this.states.set(key, next)
         this.latest.set(key, apiValue)
         this.invalidations.delete(key)
+        if (unanchoredSeed) this.markInvalid(key, VALUE_REASON_RESTARTED)
       },
     }
   }

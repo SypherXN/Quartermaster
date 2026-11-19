@@ -127,7 +127,55 @@ export function orderCategoryByWeightedPace(
   pace: QuotaPace,
   seed: string,
 ): readonly ModelRef[] {
-  if (category.pick?.by !== "weighted-pace") return category.models
+  return orderCategoryByProviderWeight(category, "weighted-pace", (model) => pace(model), seed)
+}
+
+/** Each step down the list keeps half the weight of the one above it. */
+const PRIORITY_STEP = 0.5
+
+/**
+ * A model's `weighted-priority` weight before pace is applied: its `pick.weights`
+ * number when the category sets them (an unlisted model keeps 1), otherwise half
+ * the weight of the entry above it, so the first model races twice as hard as
+ * the second and four times as hard as the third.
+ */
+export function priorityWeight(category: CategoryDef, model: Pick<ModelRef, "providerID" | "modelID">): number {
+  const weights = category.pick?.weights
+  const key = `${model.providerID}/${model.modelID}`
+  if (weights !== undefined) return Object.hasOwn(weights, key) ? weights[key]! : 1
+  const index = category.models.findIndex((entry) => entry.providerID === model.providerID && entry.modelID === model.modelID)
+  return PRIORITY_STEP ** Math.max(0, index)
+}
+
+/**
+ * `weighted-priority`: the same weighted race, with the draw weight multiplied by
+ * the model's place in the category. Usage still moves the pick -- a preferred
+ * provider whose quota is nearly gone loses -- but a later entry needs a clearly
+ * better pace to overtake the ones written above it.
+ */
+export function orderCategoryByWeightedPriority(
+  category: CategoryDef,
+  pace: QuotaPace,
+  seed: string,
+): readonly ModelRef[] {
+  return orderCategoryByProviderWeight(
+    category,
+    "weighted-priority",
+    (model) => {
+      const rate = pace(model)
+      return rate === undefined ? undefined : rate * priorityWeight(category, model)
+    },
+    seed,
+  )
+}
+
+function orderCategoryByProviderWeight(
+  category: CategoryDef,
+  by: "weighted-pace" | "weighted-priority",
+  weight: (model: ModelRef) => number | undefined,
+  seed: string,
+): readonly ModelRef[] {
+  if (category.pick?.by !== by) return category.models
   const path = new Map((category.pick.path ?? []).map((provider, index) => [provider, index]))
   const far = Number.MAX_SAFE_INTEGER
   const groups = new Map<string, { members: ModelRef[]; index: number }>()
@@ -141,7 +189,9 @@ export function orderCategoryByWeightedPace(
       providerID,
       members: group.members,
       index: group.index,
-      score: weightedProviderScore(seed, providerID, pace(group.members[0])),
+      // One provider races once, on its strongest member: a provider carrying a
+      // preferred model must not be penalised by the one written below it.
+      score: weightedProviderScore(seed, providerID, strongest(group.members.map(weight))),
     }))
     .sort((left, right) => {
       if (left.score !== right.score) return left.score < right.score ? -1 : 1
@@ -149,4 +199,13 @@ export function orderCategoryByWeightedPace(
       return byPath !== 0 ? byPath : left.index - right.index
     })
     .flatMap((entry) => entry.members)
+}
+
+function strongest(weights: readonly (number | undefined)[]): number | undefined {
+  let best: number | undefined
+  for (const weight of weights) {
+    if (typeof weight !== "number" || !Number.isFinite(weight) || weight <= 0) continue
+    if (best === undefined || weight > best) best = weight
+  }
+  return best
 }

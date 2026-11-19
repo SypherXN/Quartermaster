@@ -138,9 +138,31 @@ counter. Without a session ID, calls share the agent/plan/hour draw; they are no
 independent draws per RPC. Missing, zero or invalid weights follow positive
 weights, using `pick.path` and then file order as fallbacks.
 
-Both this strategy and window protection require authenticated, error-free quota
-observations no older than five minutes, with finite percentages from 0 to 100
-and future resets. Eligibility, pins and exclusive reservations still apply.
+Weighted pace, weighted priority and window protection all require
+authenticated, error-free quota observations no older than five minutes, with
+finite percentages from 0 to 100 and future resets. Eligibility, pins and
+exclusive reservations still apply.
+
+## Weighted priority: prefer the list, still follow usage
+
+`pick.by: "weighted-priority"` is the weighted-pace draw with the model's place
+in the category multiplying its weight:
+
+```text
+weight = pace × priority
+priority = pick.weights["provider/model"] if listed, else 1 when any weight is
+           listed, else 0.5 ^ position in the category
+```
+
+Without `weights`, a three-model category races 1 : 0.5 : 0.25, so the first
+entry wins 57% of independent assignments, the second 29% and the third 14% when
+their pace is equal. A later entry still overtakes when its quota is clearly
+roomier — the third at four times the pace of the first wins 40%. With
+`"weights": { "provider-a/flagship": 4 }`, the flagship races four times as hard
+as each other entry, which is the knob for "one model first, the rest as backup".
+
+A provider races once, on its strongest member, and the members of the winning
+provider keep the order you wrote.
 
 ## Window protection: discount early exhaustion
 

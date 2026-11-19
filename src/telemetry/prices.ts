@@ -87,6 +87,8 @@ const QUOTA_PRICE_EQUIVALENTS: readonly QuotaPriceEquivalent[] = [
   { sourceProvider: "openai", sourceModel: "gpt-6-luna", targetProvider: "opencode", targetModel: "gpt-6-luna" },
   { sourceProvider: "openai", sourceModel: "gpt-6.1-sol", targetProvider: "opencode", targetModel: "gpt-6.1-sol" },
   { sourceProvider: "openai", sourceModel: "gpt-6-astra", targetProvider: "opencode", targetModel: "gpt-6-astra" },
+  { sourceProvider: "openai", sourceModel: "gpt-6.2-sol", targetProvider: "opencode", targetModel: "gpt-6.2-sol" },
+  { sourceProvider: "openai", sourceModel: "gpt-6.2-astra", targetProvider: "opencode", targetModel: "gpt-6.2-astra" },
   {
     sourceProvider: "claude-agent", sourceModel: "opus", sourceName: "Opus 5.5",
     targetProvider: "opencode", targetModel: "claude-opus-5-5", targetName: "Claude Opus 5.5",
