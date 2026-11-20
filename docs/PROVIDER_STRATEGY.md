@@ -123,15 +123,38 @@ takes that model out.
 
 ## Weighted pace: distribute new assignments
 
-`pick.by: "weighted-pace"` uses the same tightest-window budget as pace, but
-turns positive provider weights into a proportional draw rather than always
+`pick.by: "weighted-pace"` weights each provider by the square root of its
+tightest window's remaining headroom, then boosts it while the monthly allowance
+is behind schedule:
+
+```text
+weight = sqrt(headroom) × (1 + monthlyDeficit / 25)
+```
+
+The square root deliberately pulls the split toward equal:
+70 versus 30 headroom gives roughly 60/40 rather than 70/30, while the roomier
+provider still wins more assignments. Window length is excluded: a per-minute
+rate lets a freshly reset 5-hour block outbid a monthly allowance by roughly 100
+times. Positive weights determine a proportional draw rather than always
 choosing the largest one. With weights 1 and 3, independent session assignments
 approach 25% and 75%. These are assignment shares, not token or dollar shares.
 Several models or variants on one provider count as one weight and retain their
 declared order within that provider.
 
+`monthlyDeficit` is how far a provider's `monthly` window sits below the line it
+should already have spent. A monthly allowance is about twice a weekly one, so
+the last week can only consume about half of it: the monthly must be at 50% when
+a week remains, then ramp to 100% at its reset
+(`required = min(100, 50 + max(0, 168 - hoursToReset) × 50/168)`). A provider at
+36% with 140 hours to go is 22 points behind, so its weight is multiplied by
+`1 + 22/25 ≈ 1.89`: against a rival with 50 headroom, its share of assignments
+rises from `sqrt(64) / (sqrt(64) + sqrt(50)) ≈ 53%` to about 68%. A provider with
+no monthly window, or one already at or above the line, keeps its unboosted
+weight. The boost is a nudge, not a guarantee: eligibility and fresh evidence
+still decide whether a model can be used.
+
 The implementation uses weighted rendezvous ordering: each provider gets a
-reproducible hash-derived draw `u`, and the smallest `-ln(u) / pace` wins.
+reproducible hash-derived draw `u`, and the smallest `-ln(u) / weight` wins.
 The seed includes session, agent, plan and clock hour. Repeating diagnostics
 with the same context and evidence does not consume a turn or change a scheduler
 counter. Without a session ID, calls share the agent/plan/hour draw; they are not
@@ -149,15 +172,16 @@ exclusive reservations still apply.
 in the category multiplying its weight:
 
 ```text
-weight = pace × priority
+weight = sqrt(headroom) × (1 + monthlyDeficit / 25) × priority
 priority = pick.weights["provider/model"] if listed, else 1 when any weight is
            listed, else 0.5 ^ position in the category
 ```
 
 Without `weights`, a three-model category races 1 : 0.5 : 0.25, so the first
 entry wins 57% of independent assignments, the second 29% and the third 14% when
-their pace is equal. A later entry still overtakes when its quota is clearly
-roomier — the third at four times the pace of the first wins 40%. With
+their headroom is equal. A later entry still overtakes when its quota is clearly
+roomier — the third at four times the headroom of the first ties the second at
+25%, because the square root halves the headroom lead. With
 `"weights": { "provider-a/flagship": 4 }`, the flagship races four times as hard
 as each other entry, which is the knob for "one model first, the rest as backup".
 
@@ -203,7 +227,8 @@ Categories describe **what a model is for**, not who sells it. A good set:
 | `free` | OpenCode Zen free tier, shared bucket | `reset-soonest` |
 
 Use `pace` for a greedy sustainable-budget ranking when the models are
-interchangeable. Use `weighted-pace` to spread independent new assignments, or
+interchangeable. Use `weighted-pace` to spread independent new assignments by
+the square root of remaining headroom without favoring short windows, or
 `window-protection` to discount providers whose observed trend exhausts early. Use
 `reset-soonest` when you deliberately want to drain a bucket that is about to
 expire — burst jobs, a free tier — and `in-order` where the order encodes

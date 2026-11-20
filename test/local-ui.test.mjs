@@ -280,6 +280,42 @@ test("dashboard gateway exposes allowlisted provider metadata and cached quota d
   assert.equal(JSON.stringify(dashboard).includes(secret), false)
 })
 
+test("dashboard marks quota reused from the last snapshot as cached and fresh quota as not cached", async (t) => {
+  let statusSources = { demo: { sourceID: "codex", authenticated: true, checkedAt: 123, stale: false,
+    availability: "available", windows: [{ name: "5 hours", usedPercent: 30, state: "ok", resetsAt: 789 }] } }
+  const upstream = createServer(async (request, response) => {
+    const url = new URL(request.url, "http://127.0.0.1")
+    response.writeHead(200, { "content-type": "application/json" })
+    if (url.pathname === "/api/location") return response.end(JSON.stringify(locationBody()))
+    if (url.pathname.endsWith("/status")) return response.end(JSON.stringify({ output: { ...plans, updatedAt: 111, sources: statusSources } }))
+    return response.end(JSON.stringify({ output: { status: "unavailable" } }))
+  })
+  await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve))
+  t.after(() => new Promise((resolve, reject) => upstream.close((error) => error ? reject(error) : resolve())))
+  const local = createLocalUiServer({ openCodeURL: `http://127.0.0.1:${upstream.address().port}`, token: "token",
+    projectDirectory: process.cwd(), port: 0 })
+  await new Promise((resolve) => local.listen(0, "127.0.0.1", resolve))
+  t.after(() => new Promise((resolve, reject) => local.close((error) => error ? reject(error) : resolve())))
+  const origin = `http://127.0.0.1:${local.address().port}`
+  const headers = { origin, "sec-fetch-site": "same-origin" }
+  const dashboard = async () => (await fetch(`${origin}/api/dashboard`, { headers })).json()
+
+  const fresh = await dashboard()
+  assert.equal(fresh.availability.cached, false, "a populated host status list is fresh")
+  assert.equal(fresh.availability.sources.demo.windows[0].usedPercent, 30)
+
+  statusSources = {}
+  const reused = await dashboard()
+  assert.equal(reused.availability.cached, true, "an empty host list reuses the old sources and flags them cached")
+  assert.equal(reused.availability.sources.demo.windows[0].usedPercent, 30, "the old observation is still shown")
+
+  statusSources = { demo: { sourceID: "codex", authenticated: true, checkedAt: 456, stale: false,
+    availability: "available", windows: [{ name: "5 hours", usedPercent: 40, state: "ok", resetsAt: 789 }] } }
+  const refreshed = await dashboard()
+  assert.equal(refreshed.availability.cached, false, "a fresh host list clears the cached flag")
+  assert.equal(refreshed.availability.sources.demo.windows[0].usedPercent, 40)
+})
+
 test("provider catalog rejects malformed or cross-project model envelopes", async (t) => {
   let mode = "malformed"
   const upstream = createServer((request, response) => {

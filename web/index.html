@@ -512,7 +512,7 @@ details.plan[open]>summary{margin-bottom:18px}
    <p id="routing-status" class="status-line" role="status" aria-live="polite">Routing reads the latest quota snapshot. Nothing here changes a plan.</p>
    <div class="tab-strip" role="tablist" aria-label="Routing views"><button type="button" class="tab" role="tab" id="routing-tab-strategies" aria-selected="true" aria-controls="routing-panel-strategies" tabindex="0"><span class="register-index" aria-hidden="true">01</span>Strategies</button><button type="button" class="tab" role="tab" id="routing-tab-categories" aria-selected="false" aria-controls="routing-panel-categories" tabindex="-1"><span class="register-index" aria-hidden="true">02</span>Categories</button></div>
    <div class="tab-panel" id="routing-panel-strategies" role="tabpanel" aria-labelledby="routing-tab-strategies" tabindex="0">
-    <div class="note">Reset soonest, balanced pace, weighted pace and window protection rank providers from the live quota snapshot — the same evidence the plugin uses on the next request. Weighted pace spreads new assignments across providers in proportion to their fresh pace; window protection ranks by that pace times a risk factor taken from the fresh forecasts. A provider with no fresh window sorts last. In order ranks nothing: it keeps each category exactly as written.</div>
+    <div class="note">Reset soonest, balanced pace, weighted pace and window protection rank providers from the live quota snapshot — the same evidence the plugin uses on the next request. Weighted pace draws assignments in proportion to the square root of remaining headroom (100 minus the most-used window's percentage), so one provider's lead pulls the split toward equal; each provider counts once and short windows get no extra weight. A provider behind its monthly allowance — about twice a weekly one, so 50% must be spent with a week to go — gets extra share. Window protection ranks by sustainable pace times a risk factor taken from fresh forecasts. A provider with no fresh window sorts last. In order ranks nothing: it keeps each category exactly as written.</div>
     <div id="routing-strategies" class="usage-grid"></div>
    </div>
    <div class="tab-panel" id="routing-panel-categories" role="tabpanel" aria-labelledby="routing-tab-categories" tabindex="-1" hidden>
@@ -1439,7 +1439,7 @@ function slotStrategyControl(label,getName,refresh){
     h('option',{value:'reset-soonest',text:'Reset soonest'}),
     h('option',{value:'pace',text:'Balanced pace'}),
     h('option',{value:'weighted-pace',text:'Weighted pace'}),
-    h('option',{value:'weighted-priority',text:'Weighted by pace and priority'}),
+    h('option',{value:'weighted-priority',text:'Weighted by headroom and priority'}),
     h('option',{value:'window-protection',text:'Window protection'}))
   select.hidden=true
   return {node:select,sync(){const name=getName();select.hidden=!name;select.value=name?(categoryPick(draft.categories[name]).by||'in-order'):''}}
@@ -1868,7 +1868,7 @@ function modelParts(entry){
 }
 function categoryModelsOf(category){return Array.isArray(category)?category:Array.isArray(category?.models)?category.models:[]}
 function categoryPickOf(category){return !Array.isArray(category)&&category?.pick&&typeof category.pick==='object'?category.pick:{}}
-function strategyLabel(by){return by==='pace'?'balanced pace':by==='reset-soonest'?'reset soonest':by==='weighted-pace'?'weighted pace':by==='weighted-priority'?'weighted pace and priority':by==='window-protection'?'window protection':'in order'}
+function strategyLabel(by){return by==='pace'?'balanced pace':by==='reset-soonest'?'reset soonest':by==='weighted-pace'?'weighted pace':by==='weighted-priority'?'weighted headroom and priority':by==='window-protection'?'window protection':'in order'}
 function routingSources(){
  const map=new Map()
  for(const source of usageData||[]){if(typeof source?.providerID==='string'&&source.providerID)map.set(source.providerID,source)}
@@ -1879,6 +1879,7 @@ function sourceUsable(source){
  // (missing authentication is unknown, so not usable), error-free, not stale, and checked
  // within the last five minutes.
  if(!source||typeof source!=='object')return false
+ if(source.cached===true)return false
  if(source.stale===true||source.authenticated!==true)return false
  if(source.error!=null)return false
  const checkedAt=epoch(source.checkedAt)??epoch(source.observedAt)
@@ -1900,7 +1901,7 @@ function protectionScore(clock){
  return clock.freshPace?clock.freshPace.value*(clock.factor??1):undefined
 }
 function providerClock(source){
- let soonest, pace, freshPace, worstFactor
+ let soonest, pace, freshPace, freshHeadroom, monthlyDeficit, worstFactor
  if(source){
   const usable=sourceUsable(source)
   for(const window of source.windows||[]){
@@ -1917,6 +1918,18 @@ function providerClock(source){
    // (resetEstimated) still sets the pace but never feeds the risk factor.
    if(percent>=0&&percent<=100){
     if(!freshPace||value<freshPace.value)freshPace={value,label:window.label,percent,resetsAt}
+    // Headroom is the remaining percentage points of the tightest window; window
+    // length is deliberately excluded so a short window gets no extra weight.
+    const remaining=100-percent
+    if(!freshHeadroom||remaining<freshHeadroom.value)freshHeadroom={value:remaining,label:window.label,percent,resetsAt}
+    // The router boosts a provider behind its monthly reserve line: a monthly
+    // allowance is about twice a weekly one, so 50% must be spent with a week to
+    // go, ramping to 100% at the reset. Missing or past-reset months add nothing.
+    if(/^monthly$/i.test(String(window.label??''))){
+     const required=Math.min(100,50+Math.max(0,168-minutes/60)*(50/168))
+     const behind=Math.max(0,required-percent)
+     if(monthlyDeficit===undefined||behind>monthlyDeficit)monthlyDeficit=behind
+    }
     if(window.resetEstimated!==true){
      const rate=forecastRate(window)
      if(rate!==undefined){
@@ -1927,7 +1940,7 @@ function providerClock(source){
    }
   }
  }
- return {soonest,pace,freshPace,factor:freshPace?worstFactor??1:undefined,stale:source?source.stale===true:false,known:!!source}
+ return {soonest,pace,freshPace,freshHeadroom,monthlyDeficit,factor:freshPace?worstFactor??1:undefined,stale:source?source.stale===true:false,known:!!source}
 }
 function routingOrder(category){
  const pick=categoryPickOf(category), path=Array.isArray(pick.path)?pick.path:[], sources=routingSources()
@@ -1953,17 +1966,21 @@ function routingStrategyRows(){
  const desc=(left,right)=>{if(left===undefined&&right===undefined)return 0;if(left===undefined)return 1;if(right===undefined)return -1;return right-left}
  const pace=[...rows].sort((left,right)=>desc(left.clock.pace?.value,right.clock.pace?.value)||left.providerID.localeCompare(right.providerID))
  const reset=[...rows].sort((left,right)=>asc(left.clock.soonest?.resetsAt,right.clock.soonest?.resetsAt)||desc(left.clock.soonest?.percent,right.clock.soonest?.percent)||left.providerID.localeCompare(right.providerID))
- const fresh=[...rows].sort((left,right)=>desc(left.clock.freshPace?.value,right.clock.freshPace?.value)||left.providerID.localeCompare(right.providerID))
+ const fresh=[...rows].sort((left,right)=>desc(left.clock.freshHeadroom?.value,right.clock.freshHeadroom?.value)||left.providerID.localeCompare(right.providerID))
  const protection=[...rows].sort((left,right)=>desc(protectionScore(left.clock),protectionScore(right.clock))||left.providerID.localeCompare(right.providerID))
  return {pace,reset,fresh,protection}
 }
 function routingStrategyCard(title,description,badge,rows,basis){
  // basis 'pace' = balanced pace capacity shares; 'fresh' = weighted pace allocation shares
- // over providers with fresh pace; null = reset soonest, no share column math.
- const paceOf=row=>basis==='fresh'?row.clock.freshPace:row.clock.pace
- // Weighted shares only count positive weights: a 0 or negative pace is an unknown fallback,
+ // over providers with fresh headroom; null = reset soonest, no share column math.
+ const paceOf=row=>basis==='fresh'?row.clock.freshHeadroom:row.clock.pace
+ // Weighted shares only count positive weights: a 0 or negative weight is an unknown fallback,
  // never a zero-or-negative slice of traffic. The balanced card keeps its old share math.
- const positiveWeight=row=>{const value=paceOf(row)?.value;return known(value)&&value>0?value:undefined}
+ // The router softens headroom with a square root, so the share uses sqrt while the
+ // Headroom % column still shows the raw percentage points. A provider behind its
+ // monthly reserve line gets 1 + monthlyDeficit / 25 times that weight.
+ const boostOf=row=>1+(row.clock.monthlyDeficit??0)/25
+ const positiveWeight=row=>{const value=paceOf(row)?.value;return known(value)&&value>0?Math.sqrt(value)*boostOf(row):undefined}
  const total=basis?rows.reduce((sum,row)=>{const value=paceOf(row)?.value;return sum+(basis==='fresh'?(positiveWeight(row)??0):value||0)},0):0
  const shareOf=row=>{
   if(!basis||total<=0||!paceOf(row))return undefined
@@ -1974,20 +1991,21 @@ function routingStrategyCard(title,description,badge,rows,basis){
  if(!rows.length){card.append(empty('No provider quota yet.','Open this page through the local gateway, or refresh.'));return card}
  const body=rows.map((row,position)=>{
   const window=basis?paceOf(row):row.clock.soonest
+  const rate=basis==='fresh'?row.clock.freshHeadroom:row.clock.pace
   const share=shareOf(row)
   const notes=[]
   if(row.clock.stale)notes.push('stale quota')
   if(known(row.clock.soonest?.percent)&&row.clock.soonest.percent>=100)notes.push('quota fully used')
-  if(basis==='fresh'&&!paceOf(row)&&row.clock.known)notes.push('no fresh pace')
+  if(basis==='fresh'&&!paceOf(row)&&row.clock.known)notes.push('no fresh headroom')
   const line=[window?.label||'',known(window?.percent)?`${number(window.percent)}% used`:'',...notes].filter(Boolean).join(' · ')
   return h('tr',{},
    h('td',{class:'num',text:String(position+1)}),
    h('td',{},h('div',{},h('span',{class:'mono',text:row.providerID})),h('div',{class:'hint',text:line||'no window'})),
    h('td',{class:'num',text:row.clock.soonest?routingTime(row.clock.soonest.resetsAt):'—',title:row.clock.soonest?timeText(row.clock.soonest.resetsAt):''}),
-   h('td',{class:'num mono',text:known(row.clock.pace?.value)?row.clock.pace.value.toFixed(3):'—'}),
+   h('td',{class:'num mono',text:known(rate?.value)?(basis==='fresh'?number(rate.value):rate.value.toFixed(3)):'—'}),...(basis==='fresh'?[h('td',{class:'num mono',text:known(row.clock.monthlyDeficit)?number(row.clock.monthlyDeficit):'—'})]:[]),
    h('td',{class:'num',text:share===undefined?'—':`${share}%`}))
  })
- card.append(h('div',{class:'ledger-wrap'},h('table',{class:'ledger'},h('thead',{},h('tr',{},h('th',{scope:'col',class:'num',text:'#'}),h('th',{scope:'col',text:'Provider'}),h('th',{scope:'col',class:'num',text:'Resets in'}),h('th',{scope:'col',class:'num',text:'Pace %/min'}),h('th',{scope:'col',class:'num',text:'Share'}))),h('tbody',{},...body))))
+ card.append(h('div',{class:'ledger-wrap'},h('table',{class:'ledger'},h('thead',{},h('tr',{},h('th',{scope:'col',class:'num',text:'#'}),h('th',{scope:'col',text:'Provider'}),h('th',{scope:'col',class:'num',text:'Earliest reset'}),h('th',{scope:'col',class:'num',text:basis==='fresh'?'Headroom %':'Pace %/min'}),...(basis==='fresh'?[h('th',{scope:'col',class:'num',text:'Behind monthly %'})]:[]),h('th',{scope:'col',class:'num',text:'Share'}))),h('tbody',{},...body))))
  return card
 }
 function routingProtectionCard(rows){
@@ -2028,27 +2046,44 @@ function routingCategoryCard(name,category){
  const head=h('div',{class:'panel-head'},h('div',{},h('h2',{text:`@${name}`}),h('p',{class:'mono',text:Array.isArray(pick.path)&&pick.path.length?`path · ${pick.path.join(' → ')}`:'no provider path'})),h('span',{class:'badge neutral',text:policy}))
  const card=h('section',{class:'panel'},head)
  if(!rows.length){card.append(empty('No models in this category.','Add one on the Plans page.'));return card}
- // Weighted pace previews each provider's slice of the fresh pace; one provider's weight
+ // Weighted pace previews each provider's slice of the fresh headroom; one provider's weight
  // is counted once no matter how many of its models or variants the category lists.
- const weights=new Map(), weighted=pick.by==='weighted-pace'||pick.by==='weighted-priority'
- if(weighted)for(const [index,row] of rows.entries()){const value=row.clock.freshPace?.value;if(known(value)&&value>0){const priority=pick.by==='weighted-priority'?(pick.weights?pick.weights[row.id]??1:0.5**index):1;weights.set(row.providerID,Math.max(weights.get(row.providerID)||0,value*priority))}}
+ const weighted=pick.by==='weighted-pace'||pick.by==='weighted-priority'
+ const weightProducts=[]
+ if(weighted)for(const [index,row] of rows.entries()){
+  const value=row.clock.freshHeadroom?.value
+  if(!known(value)||value<=0)continue
+  const priority=pick.by==='weighted-priority'?(pick.weights?pick.weights[row.id]??1:0.5**index):1
+  // The router weighs sqrt(headroom), boosted by 1 + monthlyDeficit / 25 while the
+  // provider is behind its monthly reserve line, so one provider's lead does not dominate.
+  const product=Math.sqrt(value)*priority*(1+(row.clock.monthlyDeficit??0)/25)
+  // The router drops non-finite products; the preview must not invent a slice from them.
+  if(!known(product)||product<=0)continue
+  weightProducts.push([row.providerID,product])
+ }
+ // Scale by the largest weight before summing: a huge but finite priority weight must not
+ // overflow the total and turn every share into 0% or NaN%.
+ const largestWeight=weightProducts.reduce((max,[,value])=>Math.max(max,value),0)
+ const weights=new Map()
+ for(const [providerID,value] of weightProducts)weights.set(providerID,Math.max(weights.get(providerID)||0,largestWeight>0?value/largestWeight:0))
  const weightTotal=weighted?[...weights.values()].reduce((sum,value)=>sum+value,0):0
  const shareOfProvider=id=>{const weight=weights.get(id);return weight!==undefined&&weightTotal>0?Math.round(weight/weightTotal*100):undefined}
- const cols=[['#','num'],['Model',''],['Resets in','num'],['Pace %/min','num']]
+ const cols=[['#','num'],['Model',''],['Earliest reset','num'],[weighted?'Headroom %':'Pace %/min','num']]
  if(weighted)cols.push(['Share','num'])
  if(pick.by==='window-protection')cols.push(['Risk','num'],['Adjusted %/min','num'])
  const body=rows.map((row,position)=>{
-  const window=row.clock.pace||row.clock.soonest
+   const window=weighted?row.clock.freshHeadroom||row.clock.soonest:row.clock.pace||row.clock.soonest
   const notes=[]
   if(!row.clock.known)notes.push('no quota source')
   else if(row.clock.stale)notes.push('stale quota')
   if(known(window?.percent)&&window.percent>=100)notes.push('quota fully used')
-   if((weighted||pick.by==='window-protection')&&row.clock.known&&!row.clock.freshPace)notes.push('no fresh pace')
+    if(pick.by==='window-protection'&&row.clock.known&&!row.clock.freshPace)notes.push('no fresh pace')
+    if(weighted&&row.clock.known&&!row.clock.freshHeadroom)notes.push('no fresh headroom')
    if(position===0&&!weighted&&pick.by!=='window-protection')notes.unshift('next pick')
   const line=[window?.label||'',known(window?.percent)?`${number(window.percent)}% used`:'',...notes].filter(Boolean).join(' · ')
   const label=row.variant?`${row.id} · ${row.variant}`:row.id
-   const shownPace=weighted||pick.by==='window-protection'?row.clock.freshPace||row.clock.pace:row.clock.pace
-  const cells=[h('td',{class:'num',text:String(position+1)}),h('td',{},h('div',{},h('span',{class:'mono',text:label})),h('div',{class:'hint',text:line||'no window'})),h('td',{class:'num',text:row.clock.soonest?routingTime(row.clock.soonest.resetsAt):'—',title:row.clock.soonest?timeText(row.clock.soonest.resetsAt):''}),h('td',{class:'num mono',text:known(shownPace?.value)?shownPace.value.toFixed(3):'—'})]
+    const shownPace=weighted?row.clock.freshHeadroom:pick.by==='window-protection'?row.clock.freshPace||row.clock.pace:row.clock.pace
+   const cells=[h('td',{class:'num',text:String(position+1)}),h('td',{},h('div',{},h('span',{class:'mono',text:label})),h('div',{class:'hint',text:line||'no window'})),h('td',{class:'num',text:row.clock.soonest?routingTime(row.clock.soonest.resetsAt):'—',title:row.clock.soonest?timeText(row.clock.soonest.resetsAt):''}),h('td',{class:'num mono',text:known(shownPace?.value)?(weighted?number(shownPace.value):shownPace.value.toFixed(3)):'—'})]
    if(weighted){const share=shareOfProvider(row.providerID);cells.push(h('td',{class:'num',text:share===undefined?'—':`${share}%`}))}
   if(pick.by==='window-protection'){
    const risk=row.clock.freshPace?row.clock.factor:undefined, score=protectionScore(row.clock)
@@ -2056,7 +2091,7 @@ function routingCategoryCard(name,category){
   }
   return h('tr',{},...cells)
  })
-  card.append(h('div',{class:'ledger-wrap'},h('table',{class:'ledger'},h('caption',{class:'hint',text:pick.by==='pace'?'Ordered by remaining room per minute of the tightest window, most first. Pace is percent of a window per minute.':pick.by==='reset-soonest'?'Ordered by the window that resets first. Ties fall to used quota, then the provider path, then file order.':pick.by==='weighted-priority'?'Share is each provider’s fresh pace multiplied by its strongest model’s priority weight. Without explicit weights, each position halves the weight; with any explicit weights, unlisted models use 1. The gateway draws the winner.':pick.by==='weighted-pace'?'Weighted pace reproducibly draws each new assignment per session, agent, plan and hour in proportion to providers\' fresh sustainable pace — not a new lottery every call — and a session idle under an hour keeps its provider; the drawn winner is the gateway\'s, not shown here. Share is each provider\'s slice of that pace — one provider counts once, however many of its models are listed, and within a provider the declared order stands.':pick.by==='window-protection'?'Ranks by sustainable pace times a risk factor from usable fresh forecasts; missing or unusable forecasts keep the neutral ×1, and rows without fresh pace sort last. Full evidence is on the Window protection card above.':'Ordered as listed. Nothing is reordered by quota, so models on one provider stay in the order you wrote.'}),h('thead',{},h('tr',{},...cols.map(([label,cls])=>h('th',{scope:'col',class:cls,text:label})))),h('tbody',{},...body))))
+  card.append(h('div',{class:'ledger-wrap'},h('table',{class:'ledger'},h('caption',{class:'hint',text:pick.by==='pace'?'Ordered by remaining room per minute of the tightest window, most first. Pace is percent of a window per minute.':pick.by==='reset-soonest'?'Ordered by the window that resets first. Ties fall to used quota, then the provider path, then file order.':pick.by==='weighted-priority'?'Assignments are drawn in proportion to the square root of each provider’s remaining headroom (100 minus the most-used window’s percentage) multiplied by its strongest model’s priority weight, which pulls the split toward equal. One provider counts once; short windows get no extra weight. A provider behind its monthly allowance — about twice a weekly one, so 50% must be spent with a week to go — gets extra share. Without explicit weights, each position halves the weight; with any explicit weights, unlisted models use 1. The gateway draws the winner.':pick.by==='weighted-pace'?'Assignments are drawn in proportion to the square root of each provider’s remaining headroom (100 minus the most-used window’s percentage), which pulls the split toward equal. One provider counts once; short windows get no extra weight. A provider behind its monthly allowance — about twice a weekly one, so 50% must be spent with a week to go — gets extra share. The reproducible draw is per session, agent, plan and hour, and a session idle under an hour keeps its provider; the drawn winner is the gateway’s, not shown here. Within a provider the declared order stands.':pick.by==='window-protection'?'Ranks by sustainable pace times a risk factor from usable fresh forecasts; missing or unusable forecasts keep the neutral ×1, and rows without fresh pace sort last. Full evidence is on the Window protection card above.':'Ordered as listed. Nothing is reordered by quota, so models on one provider stay in the order you wrote.'}),h('thead',{},h('tr',{},...cols.map(([label,cls])=>h('th',{scope:'col',class:cls,text:label})))),h('tbody',{},...body))))
  return card
 }
 function paintRouting(){
@@ -2066,7 +2101,7 @@ function paintRouting(){
  mount('#routing-strategies',
   routingStrategyCard('Reset soonest','Whichever provider window resets first goes first, then the one with more quota used.','reset soonest',rows.reset,false),
   routingStrategyCard('Balanced pace','Whichever provider has the most room left per minute of its tightest window goes first. Share is the theoretical capacity share, not how traffic actually splits.','balanced pace',rows.pace,'pace'),
-  routingStrategyCard('Weighted pace','New assignments are drawn across providers in proportion to their fresh sustainable pace — the Share column — with a reproducible draw per session, agent, plan and hour, not a new lottery on every call. A session idle for under an hour stays on its provider, two models on one provider never multiply its weight, and within a provider the declared order stands. Actual eligibility is decided when the request runs.','weighted pace',rows.fresh,'fresh'),
+  routingStrategyCard('Weighted pace','New assignments are drawn in proportion to the square root of each provider’s remaining headroom (100 minus the most-used window’s percentage), which pulls the split toward equal; one provider counts once and short windows get no extra weight. A provider behind its monthly allowance — about twice a weekly one, so 50% must be spent with a week to go — gets 1 + deficit/25 times the weight. The draw repeats per session, agent, plan and hour. A session idle for under an hour stays on its provider, and within a provider the declared order stands. Actual eligibility is decided when the request runs.','weighted pace',rows.fresh,'fresh'),
   routingProtectionCard(rows.protection),
   routingInOrderCard())
  const cards=Object.entries(categories).map(([name,category])=>routingCategoryCard(name,category))
@@ -2184,13 +2219,13 @@ function usageWindows(windows){
 function usageEntry(providerID, source){
   const cooldowns=Array.isArray(source?.cooldowns)?source.cooldowns.flatMap(item=>{const until=epoch(item?.until);return until===undefined?[]:[{modelID:typeof item?.modelID==='string'?item.modelID:typeof item?.id==='string'?item.id:providerID||'Provider',until}]}):undefined
   const observedAt=epoch(source?.observedAt)??epoch(source?.checkedAt)
-  return {providerID,status:typeof source?.status==='string'?source.status:typeof source?.availability==='string'?source.availability:'unknown',stale:source?.stale===true,...(observedAt===undefined?{}:{observedAt}),...(typeof source?.reason==='string'?{reason:source.reason}:typeof source?.error==='string'?{reason:source.error}:{}),...(source?.error===null||typeof source?.error==='string'?{error:source.error}:{}),...(typeof source?.sourceID==='string'?{sourceID:source.sourceID}:{}),...(typeof source?.authenticated==='boolean'?{authenticated:source.authenticated}:{}),windows:usageWindows(source?.windows),...(cooldowns?{cooldownsKnown:true,cooldowns}:{})}
+  return {providerID,status:typeof source?.status==='string'?source.status:typeof source?.availability==='string'?source.availability:'unknown',stale:source?.stale===true,...(source?.cached===true?{cached:true}:{}),...(observedAt===undefined?{}:{observedAt}),...(typeof source?.reason==='string'?{reason:source.reason}:typeof source?.error==='string'?{reason:source.error}:{}),...(source?.error===null||typeof source?.error==='string'?{error:source.error}:{}),...(typeof source?.sourceID==='string'?{sourceID:source.sourceID}:{}),...(typeof source?.authenticated==='boolean'?{authenticated:source.authenticated}:{}),windows:usageWindows(source?.windows),...(cooldowns?{cooldownsKnown:true,cooldowns}:{})}
 }
 function usageFromSources(sources, fallback){
   if(!sources||typeof sources!=='object'||Array.isArray(sources))return null
   return Object.entries(sources).map(([providerID, source])=>{
     const entry=source&&typeof source==='object'?source:{}
-    return usageEntry(providerID,{...entry,status:entry.status||entry.availability||fallback?.status,reason:entry.reason||(typeof entry.error==='string'?entry.error:undefined)||(typeof fallback?.reason==='string'?fallback.reason:undefined)})
+    return usageEntry(providerID,{...entry,cached:fallback?.cached===true,status:entry.status||entry.availability||fallback?.status,reason:entry.reason||(typeof entry.error==='string'?entry.error:undefined)||(typeof fallback?.reason==='string'?fallback.reason:undefined)})
   })
 }
 function attachCooldowns(entries, cooldowns){
@@ -2858,7 +2893,7 @@ function renderCategories(){
       h('option',{value:'reset-soonest',text:'Reset soonest'}),
       h('option',{value:'pace',text:'Balanced pace'}),
       h('option',{value:'weighted-pace',text:'Weighted pace'}),
-      h('option',{value:'weighted-priority',text:'Weighted by pace and priority'}),
+      h('option',{value:'weighted-priority',text:'Weighted by headroom and priority'}),
       h('option',{value:'window-protection',text:'Window protection'}))
     pickSelect.value=pick.by||'in-order'
     const pathInput=h('input',{type:'text','aria-label':`${name} provider path`,placeholder:'Provider tie-break, comma separated',value:(pick.path||[]).join(', '),onInput:()=>{

@@ -107,34 +107,45 @@ export function providerDraw(seed: string, providerID: string): number {
   return draw === 0 ? 2 ** -48 : draw
 }
 
-/** Rendezvous score: lower wins, and the chance a provider wins is pace / total pace. */
-export function weightedProviderScore(seed: string, providerID: string, pace: number | undefined): number {
-  if (typeof pace !== "number" || !Number.isFinite(pace) || pace <= 0) return Number.POSITIVE_INFINITY
-  return -Math.log(providerDraw(seed, providerID)) / pace
+/**
+ * Rendezvous score: lower wins, and the chance a provider wins is weight / total
+ * weight. Weight here is the softened headroom (the square root of the remaining
+ * percentage points), boosted while the provider is behind its monthly reserve
+ * line, not the raw percentage.
+ */
+export function weightedProviderScore(seed: string, providerID: string, weight: number | undefined): number {
+  if (typeof weight !== "number" || !Number.isFinite(weight) || weight <= 0) return Number.POSITIVE_INFINITY
+  return -Math.log(providerDraw(seed, providerID)) / weight
 }
 
 /**
  * Weighted provider allocation for one request. Providers race once each, with
- * a weight equal to their sustainable pace, so over many independent seeds the
- * first provider picked appears in proportion to that pace -- true weighted
- * rendezvous, not a sort that would always name the same winner. Unknown,
- * zero, negative and non-finite weights always rank last; ties fall to
- * `pick.path`, then to the file's order, and models on the winning provider keep
- * the order the category declares.
+ * a weight equal to their remaining headroom -- the percentage points left in
+ * their tightest window -- softened with a square root, so over many independent
+ * seeds the first provider picked appears in proportion to that softened
+ * headroom, closer to an even split than raw headroom would give. A provider
+ * behind its monthly reserve line (50% spent with a week to go, ramping to 100%
+ * at the reset) gets `1 + monthlyDeficit / 25` times that weight. Window length
+ * is not part of the weight: a per-minute rate would let a freshly reset 5-hour
+ * block outbid a monthly allowance by roughly a hundredfold. True weighted
+ * rendezvous, not a sort that would always name the same winner. Unknown, zero,
+ * negative and non-finite weights always rank last; ties fall to `pick.path`,
+ * then to the file's order, and models on the winning provider keep the order
+ * the category declares.
  */
 export function orderCategoryByWeightedPace(
   category: CategoryDef,
-  pace: QuotaPace,
+  weight: (model: Pick<ModelRef, "providerID" | "modelID">) => number | undefined,
   seed: string,
 ): readonly ModelRef[] {
-  return orderCategoryByProviderWeight(category, "weighted-pace", (model) => pace(model), seed)
+  return orderCategoryByProviderWeight(category, "weighted-pace", (model) => weight(model), seed)
 }
 
 /** Each step down the list keeps half the weight of the one above it. */
 const PRIORITY_STEP = 0.5
 
 /**
- * A model's `weighted-priority` weight before pace is applied: its `pick.weights`
+ * A model's `weighted-priority` weight before headroom is applied: its `pick.weights`
  * number when the category sets them (an unlisted model keeps 1), otherwise half
  * the weight of the entry above it, so the first model races twice as hard as
  * the second and four times as hard as the third.
@@ -148,22 +159,23 @@ export function priorityWeight(category: CategoryDef, model: Pick<ModelRef, "pro
 }
 
 /**
- * `weighted-priority`: the same weighted race, with the draw weight multiplied by
- * the model's place in the category. Usage still moves the pick -- a preferred
- * provider whose quota is nearly gone loses -- but a later entry needs a clearly
- * better pace to overtake the ones written above it.
+ * `weighted-priority`: the same weighted race, with the headroom draw weight
+ * (softened, and boosted by any monthly deficit) multiplied by the model's place
+ * in the category. Usage still moves the pick -- a preferred provider whose
+ * headroom is nearly gone loses -- but a later entry needs a clearly larger
+ * headroom to overtake the ones written above it.
  */
 export function orderCategoryByWeightedPriority(
   category: CategoryDef,
-  pace: QuotaPace,
+  weight: (model: Pick<ModelRef, "providerID" | "modelID">) => number | undefined,
   seed: string,
 ): readonly ModelRef[] {
   return orderCategoryByProviderWeight(
     category,
     "weighted-priority",
     (model) => {
-      const rate = pace(model)
-      return rate === undefined ? undefined : rate * priorityWeight(category, model)
+      const room = weight(model)
+      return room === undefined ? undefined : room * priorityWeight(category, model)
     },
     seed,
   )

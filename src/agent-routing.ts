@@ -9,7 +9,9 @@ import {
   orderCategory, orderCategoryByPace, orderCategoryByProtectedPace, orderCategoryByWeightedPace,
   orderCategoryByWeightedPriority,
 } from "./decision.ts"
-import { buildQuotaEligibility, quotaClocks, quotaFreshPaces, quotaPaces, quotaProtectedPaces } from "./eligibility.ts"
+import {
+  buildQuotaEligibility, quotaClocks, quotaFreshHeadroom, quotaMonthlyDeficit, quotaPaces, quotaProtectedPaces,
+} from "./eligibility.ts"
 import { classifyRetryFailure, FailureCooldowns, type FailureReport, type SuccessReport } from "./failures.ts"
 import { applyLocalHealth, LocalHealth } from "./local-health.ts"
 import { laterDeadline, parseRateLimitHeaders, RateLimitObservations, statedResetFromError } from "./rate-limit.ts"
@@ -31,6 +33,12 @@ const COOLDOWN_STORAGE_KEY = "availability/cooldowns-v1"
 const AVAILABILITY_REFRESH_MS = 60_000
 const AGENT_RELOAD_DEBOUNCE_MS = 25
 const PLUGIN_VERSION: string = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version
+// ponytail: sqrt softens the split toward equal (70 vs 30 headroom -> 60/40). Raise
+// the exponent toward 1 if headroom should dominate again.
+const WEIGHTED_HEADROOM_EXPONENT = 0.5
+// ponytail: a 25-point monthly deficit doubles the weight. Raise it if a provider
+// behind its monthly schedule should be pushed harder, lower it to be gentler.
+const MONTHLY_DEFICIT_FULL_BOOST = 25
 
 type AgentModel = NonNullable<Agent.Info["model"]>
 type MutableAgentEditor = Pick<AgentEditor, "get" | "update">
@@ -40,6 +48,23 @@ function modelRef(model: { providerID: string; id: string; variant?: string }): 
     providerID: model.providerID,
     modelID: model.id,
     ...(model.variant === undefined ? {} : { variant: model.variant }),
+  }
+}
+
+/**
+ * Weighted-strategy weight: softened headroom, boosted while the provider is
+ * behind the monthly reserve line (`quotaMonthlyDeficit`). A missing deficit
+ * lookup adds nothing, so a provider with no monthly window keeps its share.
+ */
+function weightedHeadroom(
+  headroom: (model: Pick<ModelRef, "providerID" | "modelID">) => number | undefined,
+  deficit: (model: Pick<ModelRef, "providerID" | "modelID">) => number | undefined,
+): (model: Pick<ModelRef, "providerID" | "modelID">) => number | undefined {
+  return (model) => {
+    const room = headroom(model)
+    if (room === undefined) return undefined
+    const behind = deficit(model) ?? 0
+    return room ** WEIGHTED_HEADROOM_EXPONENT * (1 + behind / MONTHLY_DEFICIT_FULL_BOOST)
   }
 }
 
@@ -211,7 +236,7 @@ export async function registerAgentRouting(
   // decision plan should follow the fresh clock rather than the startup one.
   // The seed is the routing context plus the current one-hour bucket, so the same
   // session/agent/plan repeats an identical weighted draw while independent
-  // sessions split by pace; it is derived on every call, never stored.
+  // sessions split by headroom; it is derived on every call, never stored.
   const planOrderFor = (
     context: { sessionID?: string; agentID?: string; planID?: string },
     now = Date.now(),
@@ -219,11 +244,17 @@ export async function registerAgentRouting(
     const bucket = Math.floor(now / STICKY_IDLE_MS)
     const seed = [context.sessionID ?? "", context.agentID ?? "", context.planID ?? "", String(bucket)].join("|")
     return (category) => {
+      // Weight = sqrt(headroom) × (1 + monthlyDeficit / 25): the softened split
+      // plus a push toward a provider behind its monthly reserve line.
+      const weight = weightedHeadroom(
+        quotaFreshHeadroom(config.usageSources, usage, now),
+        quotaMonthlyDeficit(config.usageSources, usage, now),
+      )
       switch (category.pick?.by) {
         case "weighted-pace":
-          return orderCategoryByWeightedPace(category, quotaFreshPaces(config.usageSources, usage, now), seed)
+          return orderCategoryByWeightedPace(category, weight, seed)
         case "weighted-priority":
-          return orderCategoryByWeightedPriority(category, quotaFreshPaces(config.usageSources, usage, now), seed)
+          return orderCategoryByWeightedPriority(category, weight, seed)
         case "window-protection":
           return orderCategoryByProtectedPace(category, quotaProtectedPaces(config.usageSources, usage, estimates, now))
         case "pace":

@@ -48,10 +48,14 @@ export interface CategoryPick {
    * keep the file's order: with no reordering by quota, models on the same
    * provider stay in the sequence you wrote. `reset-soonest` drains the window
    * about to expire; `pace` ranks the tightest remaining budget per minute;
-   * `weighted-pace` races providers in proportion to that pace for independent
-   * session assignments, with a reproducible context/hour draw; `weighted-priority`
-   * is the same draw with each model's place (or its `weights` number) multiplying
-   * its weight, so the list states a preference usage can still overturn;
+   * `weighted-pace` races providers in proportion to their remaining headroom
+   * (100 minus the most-used window's percentage), softened with a square root
+   * so one provider does not dominate, and boosted while a provider is behind
+   * its monthly schedule (50% spent with a week to go), for independent session
+   * assignments, with a reproducible context/hour draw; `weighted-priority` is
+   * the same draw
+   * with each model's place (or its `weights` number) multiplying its weight, so
+   * the list states a preference usage can still overturn;
    * `window-protection` is `pace` with providers held back when a fresh forecast
    * exhausts before reset.
    */

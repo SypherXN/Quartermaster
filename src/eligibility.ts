@@ -134,6 +134,71 @@ function strictPace(source: UsageSource, now: number): number | undefined {
 }
 
 /**
+ * The remaining headroom of a provider's tightest window, in percentage points.
+ * Window length is deliberately excluded: a per-minute rate lets a freshly reset
+ * 5-hour block outbid a monthly allowance by roughly a hundredfold. Malformed
+ * windows are dropped instead of propagating NaN or an out-of-range percentage.
+ */
+function strictHeadroom(source: UsageSource, now: number): number | undefined {
+  let headroom: number | undefined
+  for (const window of source.windows) {
+    const percent = window.usedPercent
+    const resetsAt = window.resetsAt
+    if (typeof percent !== "number" || !Number.isFinite(percent)) continue
+    if (percent < 0 || percent > QUOTA_BLOCK_PERCENT) continue
+    if (typeof resetsAt !== "number" || !Number.isFinite(resetsAt)) continue
+    // A reset in the past means the percentage is stale and constrains nothing.
+    if (!(resetsAt > now)) continue
+    const remaining = QUOTA_BLOCK_PERCENT - percent
+    if (!Number.isFinite(remaining) || remaining < 0) continue
+    if (headroom === undefined || remaining < headroom) headroom = remaining
+  }
+  return headroom
+}
+
+/**
+ * A monthly allowance is about twice a weekly one, so the last week can only
+ * consume half of it: the monthly must already be at 50% when a week remains,
+ * then ramp to 100% as its reset approaches, or the remainder is wasted.
+ */
+const MONTHLY_RESERVE_HOURS = 168
+const MONTHLY_RESERVE_PERCENT = 50
+const MONTHLY_WINDOW_NAME = /^monthly$/i
+
+/** Monthly percentage that should already be spent at this many hours to reset. */
+function requiredMonthlyPercent(remainingHours: number): number {
+  const ramp = Math.max(0, MONTHLY_RESERVE_HOURS - remainingHours) *
+    (MONTHLY_RESERVE_PERCENT / MONTHLY_RESERVE_HOURS)
+  return Math.min(QUOTA_BLOCK_PERCENT, Math.max(0, MONTHLY_RESERVE_PERCENT + ramp))
+}
+
+/**
+ * How many percentage points a provider's monthly window is behind the reserve
+ * line, 0 when it is on schedule, `undefined` when it has no usable monthly
+ * window. Malformed and already-reset windows are skipped like `strictHeadroom`.
+ */
+function strictMonthlyDeficit(source: UsageSource, now: number): number | undefined {
+  let seen = false
+  let deficit = 0
+  for (const window of source.windows) {
+    if (typeof window.name !== "string" || !MONTHLY_WINDOW_NAME.test(window.name)) continue
+    const percent = window.usedPercent
+    const resetsAt = window.resetsAt
+    if (typeof percent !== "number" || !Number.isFinite(percent)) continue
+    if (percent < 0 || percent > QUOTA_BLOCK_PERCENT) continue
+    if (typeof resetsAt !== "number" || !Number.isFinite(resetsAt)) continue
+    // A reset in the past means the percentage is stale and constrains nothing.
+    if (!(resetsAt > now)) continue
+    const required = requiredMonthlyPercent((resetsAt - now) / 3_600_000)
+    const behind = Math.max(0, required - percent)
+    if (!Number.isFinite(behind)) continue
+    seen = true
+    if (behind > deficit) deficit = behind
+  }
+  return seen ? deficit : undefined
+}
+
+/**
  * How hard each provider can be used right now, in percent of a window per
  * minute: the tightest of its windows, because one request is charged to all of
  * them at once. A rate answers the per-block question too -- how much of the
@@ -156,11 +221,11 @@ export function quotaPaces(
 }
 
 /**
- * Pace with the evidence rules the two new strategies share: the source must be
- * authenticated, error-free and observed within the last five minutes. Older
- * snapshots report nothing, exactly like an untracked provider.
+ * Headroom with the evidence rules the two weighted strategies share: the source
+ * must be authenticated, error-free and observed within the last five minutes.
+ * Older snapshots report nothing, exactly like an untracked provider.
  */
-export function quotaFreshPaces(
+export function quotaFreshHeadroom(
   usageSources: QuartermasterConfig["usageSources"],
   usage: UsageReadResult | undefined,
   now = Date.now(),
@@ -169,7 +234,27 @@ export function quotaFreshPaces(
     if (!Object.hasOwn(usageSources, model.providerID) || usage?.status !== "ok") return undefined
     const source = usage.snapshot.sources[usageSources[model.providerID] as UsageSourceID]
     if (!source || freshObservationAt(source, now) === undefined) return undefined
-    return strictPace(source, now)
+    return strictHeadroom(source, now)
+  }
+}
+
+/**
+ * The monthly reserve deficit with the same evidence rules as
+ * `quotaFreshHeadroom`: authenticated, error-free and observed within five
+ * minutes. `0` means the provider is on schedule or has no usable monthly
+ * window, so it gets no boost; `undefined` means there is no usable evidence at
+ * all.
+ */
+export function quotaMonthlyDeficit(
+  usageSources: QuartermasterConfig["usageSources"],
+  usage: UsageReadResult | undefined,
+  now = Date.now(),
+): (model: Pick<ModelRef, "providerID" | "modelID">) => number | undefined {
+  return (model) => {
+    if (!Object.hasOwn(usageSources, model.providerID) || usage?.status !== "ok") return undefined
+    const source = usage.snapshot.sources[usageSources[model.providerID] as UsageSourceID]
+    if (!source || freshObservationAt(source, now) === undefined) return undefined
+    return strictMonthlyDeficit(source, now) ?? 0
   }
 }
 

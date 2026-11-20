@@ -75,7 +75,7 @@ test("strategy selects expose all six pick-by values and round-trip a choice", a
   })()`))
   assert.deepEqual(result.options, [
     "in-order|In order", "reset-soonest|Reset soonest", "pace|Balanced pace",
-    "weighted-pace|Weighted pace", "weighted-priority|Weighted by pace and priority", "window-protection|Window protection",
+    "weighted-pace|Weighted pace", "weighted-priority|Weighted by headroom and priority", "window-protection|Window protection",
   ])
   assert.equal(result.weighted, "weighted-pace")
   assert.equal(result.protection, "window-protection")
@@ -124,9 +124,10 @@ test("Routing shows five strategy cards; weighted preview explains shares and ne
   `)
   const text = h.text("#routing-strategies")
   for (const title of ["Reset soonest", "Balanced pace", "Weighted pace", "Window protection", "In order"]) assert.match(text, new RegExp(title))
-  assert.match(text, /79%/, "alpha holds ~79% of the pace-proportional share")
-  assert.match(text, /21%/, "beta holds ~21% of the pace-proportional share")
-  assert.match(text, /in proportion to their fresh sustainable pace/, "weighted card explains the spread")
+  assert.match(text, /46%/, "alpha holds sqrt(60) of the softened headroom share")
+  assert.match(text, /54%/, "beta holds sqrt(80) of the softened headroom share")
+  assert.match(text, /in proportion to the square root of each provider’s remaining headroom/, "weighted card explains the spread")
+  assert.match(text, /Headroom %/)
   assert.doesNotMatch(text, /next pick/, "no card pretends to know the weighted winner")
   assert.match(text, /theoretical capacity share, not how traffic actually splits/, "balanced pace copy no longer claims observed allocation")
   assert.doesNotMatch(text, /Share is how the traffic splits/)
@@ -134,6 +135,41 @@ test("Routing shows five strategy cards; weighted preview explains shares and ne
   assert.match(text, /0\.006/, "alpha adjusted pace = 0.25 × 0.025")
   const order = JSON.parse(h.run(`JSON.stringify(routingStrategyRows().protection.map(row=>row.providerID))`))
   assert.deepEqual(order, ["beta", "alpha"], "window protection ranks by adjusted pace: neutral beta outranks penalized alpha")
+})
+
+test("weighted share boosts a provider behind its monthly schedule, and no monthly window changes nothing", async () => {
+  const h = await routingHarness()
+  h.run(`
+    saved={categories:{mix:{models:['alpha/m1','beta/m1'],pick:{by:'weighted-pace'}}}}
+    usageData=[
+      fixtureSource('alpha',[{label:'5h',percent:40,resetsAt:Date.now()+4*3600000},{label:'monthly',percent:36,resetsAt:Date.now()+140*3600000}]),
+      fixtureSource('beta',[{label:'daily',percent:20,resetsAt:Date.now()+20*3600000}]),
+    ]
+    paintRouting()
+  `)
+  const text = h.text("#routing-strategies")
+  assert.match(text, /Behind monthly %/, "the weighted card names the monthly column")
+  // alpha: sqrt(60) × (1 + 22.33/25) vs beta sqrt(80) -> ~62% / ~38%, up from 46/54.
+  assert.match(text, /62%/, "the monthly deficit raises alpha's share")
+  assert.match(text, /38%/, "beta keeps the remaining share")
+  assert.match(text, /22[.,]33/, "the column shows the raw deficit, not the boosted weight")
+  assert.match(text, /Headroom %/, "the headroom column stays raw")
+  const groups = h.text("#routing-groups")
+  assert.match(groups, /62%/, "the category preview mirrors the boosted share")
+  assert.match(groups, /38%/)
+
+  // The same providers without a monthly window keep their previous 46/54 split.
+  h.run(`
+    saved={categories:{}}
+    usageData=[
+      fixtureSource('alpha',[{label:'5h',percent:40,resetsAt:Date.now()+4*3600000}]),
+      fixtureSource('beta',[{label:'daily',percent:20,resetsAt:Date.now()+20*3600000}]),
+    ]
+    paintRouting()
+  `)
+  const plain = h.text("#routing-strategies")
+  assert.match(plain, /46%/, "no monthly window keeps the unboosted share")
+  assert.match(plain, /54%/)
 })
 
 test("risk factor gates: usable forecast lowers the factor; missing/invalid keeps neutral ×1; unusable sources have no fresh pace", async () => {
@@ -168,6 +204,7 @@ test("risk factor gates: usable forecast lowers the factor; missing/invalid keep
   // providerClock re-reads the clock, so numeric comparisons allow a millisecond of drift.
   assert.ok(Math.abs(clocks.fresh.factor - 0.125) < 1e-6, "factor = room per minute / forecast rate")
   assert.ok(Math.abs(clocks.fresh.freshPace.value - 0.25) < 1e-6)
+  assert.equal(clocks.fresh.freshHeadroom.value, 60)
   for (const name of ["noEstimate", "flatRate", "negativeRate", "shortSpan", "oneSample", "staleStatus", "cutoffOnly", "guessedReset"]) {
     assert.equal(clocks[name].factor, 1, `${name} keeps the neutral factor 1`)
     assert.ok(Math.abs(clocks[name].freshPace.value - 0.25) < 1e-6, `${name} still has fresh pace`)
@@ -176,6 +213,7 @@ test("risk factor gates: usable forecast lowers the factor; missing/invalid keep
   assert.ok(Math.abs(clocks.errorNull.factor - 0.125) < 1e-6, "error:null is not an error — the forecast still counts")
   for (const name of ["highPercent", "negativePercent"]) {
     assert.ok(!("freshPace" in clocks[name]), `${name} has no fresh pace: percent must sit in 0..100`)
+    assert.ok(!("freshHeadroom" in clocks[name]))
     assert.ok("pace" in clocks[name], `${name} keeps its ordinary pace for the balanced card`)
   }
   assert.equal(h.run(`usageEntry('p',{error:'boom'}).error`), "boom", "usageEntry preserves the source's own error")
@@ -183,6 +221,7 @@ test("risk factor gates: usable forecast lowers the factor; missing/invalid keep
   for (const name of ["staleSource", "unauthenticated", "errorSource", "errorNormalized", "unknownAuth", "oldClock"]) {
     assert.ok(!("factor" in clocks[name]), `${name} has no factor`)
     assert.ok(!("freshPace" in clocks[name]), `${name} has no fresh pace`)
+    assert.ok(!("freshHeadroom" in clocks[name]))
   }
   assert.ok(!("pace" in clocks.staleSource), "a stale source has no pace at all")
   assert.ok("pace" in clocks.oldClock, "an out-of-date clock keeps its ordinary pace for the balanced card")
@@ -253,8 +292,9 @@ test("same-provider model variants do not inflate the weighted share", async () 
     paintRouting()
   `)
   const groups = h.text("#routing-groups")
-  assert.equal(groups.split("79%").length - 1, 2, "both alpha rows show the same provider share — the weight is counted once")
-  assert.equal(groups.split("21%").length - 1, 1, "beta keeps its share")
+  assert.equal(groups.split("46%").length - 1, 2, "both alpha rows show the same provider share — the weight is counted once")
+  assert.equal(groups.split("54%").length - 1, 1, "beta keeps its share")
+  assert.match(groups, /Headroom %/)
   assert.match(groups, /m2 · v2/, "the variant row still renders its variant label")
 })
 
@@ -292,13 +332,77 @@ test("zero-weight providers drop out of the weighted shares without changing the
     "the category preview also filters the zero weight: full shows — (never matched here), room shows 100%")
 })
 
+test("cached availability keeps ordinary pace but gives no fresh pace, forecast or weighted share", async () => {
+  const h = await routingHarness()
+  const probe = JSON.parse(h.run(`(()=>{
+    const now=Date.now()
+    const sources={
+      alpha:{authenticated:true,stale:false,checkedAt:now-60000,availability:'available',windows:[{label:'5h',usedPercent:40,resetsAt:now+4*3600000}]},
+      beta:{authenticated:true,stale:false,checkedAt:now-60000,availability:'available',windows:[{label:'daily',usedPercent:20,resetsAt:now+20*3600000}]},
+    }
+    const cached=usageFromSources(sources,{status:'ok',cached:true})
+    const live=usageFromSources(sources,{status:'ok',cached:false})
+    const absent=usageFromSources(sources,{status:'ok'})
+    const clock=entry=>{const c=providerClock(entry);return {fresh:c.freshHeadroom!==undefined,freshPace:c.freshPace!==undefined,pace:c.pace!==undefined}}
+    return JSON.stringify({
+      cachedFlags:cached.map(entry=>entry.cached===true),
+      liveFlags:live.map(entry=>'cached' in entry),
+      cached:cached.map(clock),live:live.map(clock),absent:absent.map(clock),
+    })
+  })()`))
+  assert.deepEqual(probe.cachedFlags, [true, true], "the cached flag lands on every entry")
+  assert.deepEqual(probe.liveFlags, [false, false], "fresh availability carries no flag")
+  for (const clock of probe.cached) assert.deepEqual(clock, { fresh: false, freshPace: false, pace: true }, "cached keeps ordinary pace only")
+  for (const clock of [...probe.live, ...probe.absent]) assert.deepEqual(clock, { fresh: true, freshPace: true, pace: true })
+
+  h.run(`
+    saved={categories:{mix:{models:['alpha/m1','beta/m1'],pick:{by:'weighted-pace'}}}}
+    usageData=usageFromSources({
+      alpha:{authenticated:true,stale:false,checkedAt:Date.now()-60000,availability:'available',windows:[{label:'5h',usedPercent:40,resetsAt:Date.now()+4*3600000}]},
+      beta:{authenticated:true,stale:false,checkedAt:Date.now()-60000,availability:'available',windows:[{label:'daily',usedPercent:20,resetsAt:Date.now()+20*3600000}]},
+    },{status:'ok',cached:true})
+    paintRouting()
+  `)
+  const cells = (host) => collect(h.nodes.get(host))
+    .filter(n => n.attributes?.class === "num" && /^(\d+%|—)$/.test(n.textContent ?? ""))
+    .map(n => n.textContent)
+  assert.deepEqual(cells("#routing-groups"), ["—", "—"], "category weighted preview shows no headroom or share for cached sources")
+  assert.match(h.text("#routing-groups"), /no fresh headroom/)
+  const rows = JSON.parse(h.run(`JSON.stringify({
+    fresh:routingStrategyRows().fresh.map(row=>row.clock.freshHeadroom!==undefined),
+    pace:routingStrategyRows().pace.map(row=>row.clock.pace!==undefined),
+  })`))
+  assert.deepEqual(rows.fresh, [false, false], "the weighted card has no fresh headroom to weigh")
+  assert.deepEqual(rows.pace, [true, true], "the balanced pace card keeps its ordinary pace")
+  assert.match(h.text("#routing-strategies"), /no fresh headroom/)
+})
+
+test("weighted-priority preview survives huge finite weights without overflowing the share", async () => {
+  const h = await routingHarness()
+  h.run(`
+    saved={categories:{mix:{models:['alpha/m1','beta/m1'],pick:{by:'weighted-priority',weights:{'alpha/m1':2e306,'beta/m1':2e306}}}}}
+    usageData=['alpha','beta'].map(id=>fixtureSource(id,[{label:'5h',percent:40,resetsAt:Date.now()+4*3600000}]))
+    paintRouting()
+  `)
+  const shareCells = (host) => collect(h.nodes.get(host))
+    .filter(n => n.attributes?.class === "num" && /^(\d+%|—)$/.test(n.textContent ?? ""))
+    .map(n => n.textContent)
+  // Each product (60 × 2e306) is finite but their sum overflows; unscaled math would give 0%.
+  assert.deepEqual(shareCells("#routing-groups"), ["50%", "50%"], "equal huge weights split evenly, no NaN% or 0%")
+  assert.doesNotMatch(h.text("#routing-groups"), /NaN/)
+  h.run(`saved.categories.mix.pick.weights={'alpha/m1':2e306,'beta/m1':1e300};paintRouting()`)
+  assert.deepEqual(shareCells("#routing-groups"), ["100%", "0%"], "a vastly larger weight takes the share; the other stays numeric")
+  h.run(`saved.categories.mix.pick.weights={'alpha/m1':Infinity,'beta/m1':2};paintRouting()`)
+  assert.deepEqual(shareCells("#routing-groups"), ["—", "100%"], "an infinite product is dropped, as the router does")
+})
+
 test("static wiring: both strategy selects and the page note carry the strategies; no network calls", async () => {
   const page = await readPage()
   assert.equal(page.split("value:'weighted-pace',text:'Weighted pace'").length - 1, 2, "slot control and plan pick select both list it")
-  assert.equal(page.split("value:'weighted-priority',text:'Weighted by pace and priority'").length - 1, 2)
+  assert.equal(page.split("value:'weighted-priority',text:'Weighted by headroom and priority'").length - 1, 2)
   assert.equal(page.split("value:'window-protection',text:'Window protection'").length - 1, 2)
-  assert.match(page, /Weighted pace spreads new assignments across providers in proportion to their fresh pace/)
-  assert.match(page, /window protection ranks by that pace times a risk factor/i)
+  assert.match(page, /Weighted pace draws assignments in proportion to the square root of remaining headroom/)
+  assert.match(page, /window protection ranks by sustainable pace times a risk factor/i)
   assert.doesNotMatch(page, /Share is how the traffic splits/)
   const h = await routingHarness()
   h.run(`saved={categories:{}};usageData=[];paintRouting()`)

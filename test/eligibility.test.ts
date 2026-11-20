@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import test from "node:test"
 import type { ModelRef } from "../src/config.ts"
 import {
-  buildQuotaEligibility, moduleUsageDecision, quotaFreshPaces, quotaPaces, quotaProtectedPaces,
+  buildQuotaEligibility, moduleUsageDecision, quotaFreshHeadroom, quotaMonthlyDeficit, quotaPaces, quotaProtectedPaces,
 } from "../src/eligibility.ts"
 import { QuotaEstimates } from "../src/quota-estimates.ts"
 import { modelKey, selectModel } from "../src/select.ts"
@@ -82,26 +82,96 @@ test("pace is limited by the tightest window, and finished ones stop constrainin
   assert.equal(pace({ providerID: "ollama", modelID: "local-model" }), undefined)
 })
 
-test("a window longer than a week is scored over a week, so a monthly window cannot pin a provider", () => {
+test("headroom ignores window length and skips past resets", () => {
   const minute = 60_000
   const at = 1_000 * minute
   const week = 7 * 24 * 60
   const sources = { "opencode-go": "go" }
   const model = { providerID: "opencode-go", modelID: "paid-one" }
-  const paceOf = (resetsAt: number, name: string) => quotaFreshPaces(
+  const headroomOf = (resetsAt: number, name: string) => quotaFreshHeadroom(
     sources,
     readingAt(at, { go: freshSourceAt(at, [{ name, usedPercent: 24, state: "ok", resetsAt }]) }),
     at,
   )(model)
 
-  // 76% left with 30 days to go: a month is a week's horizon, not a month's.
-  const monthly = paceOf(at + 30 * 24 * 60 * minute, "monthly")
-  assert.ok(Math.abs((monthly as number) - 76 / week) < 1e-9)
+  assert.equal(headroomOf(at + 30 * 24 * 60 * minute, "monthly"), 76)
+  assert.equal(headroomOf(at + week * minute, "weekly"), 76)
+  const windows: UsageWindow[] = [
+    { name: "5h", usedPercent: 70, state: "ok", resetsAt: at + 4 * 60 * minute },
+    { name: "7d", usedPercent: 40, state: "ok", resetsAt: at + 5 * 24 * 60 * minute },
+    { name: "past", usedPercent: 99, state: "ok", resetsAt: at - minute },
+  ]
+  assert.equal(quotaFreshHeadroom(sources, readingAt(at, { go: freshSourceAt(at, windows) }), at)(model), 30)
+  assert.equal(quotaFreshHeadroom(sources, readingAt(at, { go: freshSourceAt(at, [windows[2]]) }), at)(model), undefined)
+  assert.equal(quotaFreshHeadroom(sources, readingAt(at, { go: freshSourceAt(at, windows, { stale: true }) }), at)(model), undefined)
+})
 
-  // The same headroom on a weekly window scores no worse, so a provider whose
-  // only wide window is monthly can still win a pace race.
-  const weekly = paceOf(at + week * minute, "weekly")
-  assert.ok((weekly as number) >= (monthly as number))
+test("the monthly reserve line ramps from 50% at a week to 100% at the reset", () => {
+  const hour = 60 * 60_000
+  const at = 1_000 * hour
+  const sources = { "opencode-go": "go" }
+  const model = { providerID: "opencode-go", modelID: "paid-one" }
+  const deficitAt = (hours: number, usedPercent: number) => quotaMonthlyDeficit(
+    sources,
+    readingAt(at, { go: freshSourceAt(at, [{ name: "monthly", usedPercent, state: "ok", resetsAt: at + hours * hour }]) }),
+    at,
+  )(model)
+
+  // Spent nothing: the deficit is the whole required line.
+  assert.equal(deficitAt(500, 0), 50, "well before the last week the monthly must already be at 50%")
+  assert.equal(deficitAt(168, 0), 50, "a week to go still requires 50%")
+  assert.ok(Math.abs((deficitAt(84, 0) as number) - 75) < 1e-9, "halfway through the last week requires 75%")
+  assert.ok((deficitAt(1 / 60, 0) as number) > 99.9, "at the reset the whole allowance is required")
+  // At or above the line is on schedule, not unknown.
+  assert.equal(deficitAt(500, 60), 0)
+  assert.equal(deficitAt(84, 90), 0)
+})
+
+test("the monthly deficit shares the headroom evidence rules and skips other windows", () => {
+  const hour = 60 * 60_000
+  const at = 1_000 * hour
+  const sources = { "opencode-go": "go" }
+  const model = { providerID: "opencode-go", modelID: "paid-one" }
+  const readingOf = (windows: UsageWindow[], over: Partial<UsageSource> = {}) =>
+    readingAt(at, { go: freshSourceAt(at, windows, over) })
+  const behind: UsageWindow = { name: "monthly", usedPercent: 30, state: "ok", resetsAt: at + 500 * hour }
+
+  assert.equal(quotaMonthlyDeficit(sources, readingOf([behind]), at)(model), 20)
+  // A past reset or another window name is skipped, so it adds no boost (a counted
+  // window at 30% would owe ~50 points). The source itself still has fresh evidence.
+  assert.equal(quotaMonthlyDeficit(sources, readingOf([{ ...behind, resetsAt: at - hour }]), at)(model), 0)
+  assert.equal(quotaMonthlyDeficit(sources, readingOf([{ ...behind, name: "weekly" }]), at)(model), 0)
+  // Malformed percentages are dropped, not ranked as NaN.
+  for (const usedPercent of [Number.NaN, Number.POSITIVE_INFINITY, -1, 101]) {
+    assert.equal(
+      quotaMonthlyDeficit(sources, readingOf([{ ...behind, usedPercent }]), at)(model),
+      0,
+      String(usedPercent),
+    )
+  }
+  // No monthly window at all means no boost, but the provider still has evidence.
+  assert.equal(
+    quotaMonthlyDeficit(sources, readingOf([{ name: "weekly", usedPercent: 10, state: "ok", resetsAt: at + hour }]), at)(model),
+    0,
+  )
+  // Freshness and staleness gates mirror quotaFreshHeadroom.
+  for (const over of [
+    { stale: true },
+    { authenticated: false },
+    { error: "authentication failed" },
+    { checkedAt: at - 6 * 60_000 },
+    { checkedAt: at + 60_000 },
+  ]) {
+    const reading = readingAt(at, { go: freshSourceAt(at, [behind], over) })
+    assert.equal(quotaMonthlyDeficit(sources, reading, at)(model), undefined, JSON.stringify(over))
+    assert.equal(quotaFreshHeadroom(sources, reading, at)(model), undefined, JSON.stringify(over))
+  }
+  // An untracked provider and a failed read report nothing.
+  assert.equal(quotaMonthlyDeficit({ openai: "codex" }, readingOf([behind]), at)(model), undefined)
+  assert.equal(
+    quotaMonthlyDeficit(sources, { status: "unavailable", reason: "timeout" }, at)(model),
+    undefined,
+  )
 })
 
 test("a usable window keeps its headroom; only a full window or a reported limit blocks", () => {
@@ -346,12 +416,13 @@ test("window protection only trusts fresh authenticated observations", () => {  
   ]) {
     const reading = readingAt(at, { go: freshSourceAt(at, [window], over) })
     assert.equal(quotaProtectedPaces(sources, reading, estimates, at)(model), undefined, JSON.stringify(over))
+    assert.equal(quotaFreshHeadroom(sources, reading, at)(model), undefined, JSON.stringify(over))
   }
 
   // The new strategies demand a fresh clock; the older pace strategy keeps its
   // previous stale-flag-only rule.
   const old = readingAt(at, { go: freshSourceAt(at - 6 * MINUTE, [window]) })
-  assert.equal(quotaFreshPaces(sources, old, at)(model), undefined)
+  assert.equal(quotaFreshHeadroom(sources, old, at)(model), undefined)
   assert.equal(quotaPaces(sources, old, at)(model), (100 - 80) / 60)
 })
 
@@ -368,7 +439,7 @@ test("the evidence strategies drop malformed numeric windows instead of ranking 
     { name: "infinite-reset", usedPercent: 40, state: "ok", resetsAt: Number.POSITIVE_INFINITY },
   ]
   const onlyBroken = readingAt(at, { go: freshSourceAt(at, broken) })
-  assert.equal(quotaFreshPaces(sources, onlyBroken, at)(model), undefined)
+  assert.equal(quotaFreshHeadroom(sources, onlyBroken, at)(model), undefined)
   assert.equal(quotaProtectedPaces(sources, onlyBroken, new QuotaEstimates(), at)(model), undefined)
 
   // One valid window contributes on its own; the malformed ones never drag it
@@ -376,6 +447,6 @@ test("the evidence strategies drop malformed numeric windows instead of ranking 
   const mixed = readingAt(at, {
     go: freshSourceAt(at, [...broken, { name: "valid", usedPercent: 20, state: "ok", resetsAt: at + 60 * MINUTE }]),
   })
-  assert.equal(quotaFreshPaces(sources, mixed, at)(model), 80 / 60)
+  assert.equal(quotaFreshHeadroom(sources, mixed, at)(model), 80)
   assert.equal(quotaProtectedPaces(sources, mixed, new QuotaEstimates(), at)(model), 80 / 60)
 })

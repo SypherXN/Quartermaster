@@ -3,6 +3,7 @@ import test from "node:test"
 import { registerAgentRouting } from "../src/agent-routing.ts"
 import { parseConfig } from "../src/config.ts"
 import { orderCategoryByWeightedPace } from "../src/decision.ts"
+import { quotaFreshHeadroom } from "../src/eligibility.ts"
 import { QuotaEstimates, QUOTA_ESTIMATE_STORAGE_KEY } from "../src/quota-estimates.ts"
 import { modelKey, selectAgentModel, type ModelEligibility } from "../src/select.ts"
 import type { UsageReadResult, UsageSource, UsageSourceID, UsageWindow } from "../src/usage.ts"
@@ -152,6 +153,138 @@ const third = { providerID: "provider-c", modelID: "m" }
 const selectedProvider = (result: unknown) =>
   (result as { selected?: { providerID: string } }).selected?.providerID
 
+test("weighted-pace favors roomy opencode go over recently reset codex", (t) => {
+  const at = 1_000 * MIN
+  const config = parseConfig({
+    categories: { fast: { models: ["go/m", "codex/m"], pick: { by: "weighted-pace" } } },
+  })
+  const usage = reading(at, {
+    go: providerSource(at, [
+      { name: "weekly", usedPercent: 30, state: "ok", resetsAt: at + 64 * 60 * MIN },
+      { name: "30d", usedPercent: 20, state: "ok", resetsAt: at + 10 * 24 * 60 * MIN },
+    ]),
+    codex: providerSource(at, [
+      { name: "5h", usedPercent: 70, state: "ok", resetsAt: at + 4 * 60 * MIN },
+      { name: "7d", usedPercent: 40, state: "ok", resetsAt: at + 5 * 24 * 60 * MIN },
+    ]),
+  })
+  const weight = quotaFreshHeadroom({ go: "go", codex: "codex" }, usage, at)
+  let wins = 0
+  for (let seed = 0; seed < 200; seed++) {
+    if (orderCategoryByWeightedPace(config.categories.fast, weight, String(seed))[0].providerID === "go") wins++
+  }
+  t.diagnostic(`go share: ${wins}/200`)
+  assert.ok(wins / 200 > 0.6 && wins / 200 < 0.8, `go share: ${wins}/200`)
+  assert.ok(wins / 200 < 70 / 100, "softening pulls the split closer to equal than raw headroom")
+  assert.ok(wins < 200, "codex still wins some draws")
+})
+
+/**
+ * Unequal window lengths: go has the roomier tightest window (70% headroom) but a
+ * 30-day allowance that paces at ~0.006 %/min; codex has 50% headroom but a 5-hour
+ * block that would pace at ~0.208 %/min. An already-reset codex window at 99% must
+ * not count. Pace would hand codex ~96% of sessions; headroom splits 70:50.
+ */
+const unequalUsage = (at: number) => reading(at, {
+  go: providerSource(at, [
+    { name: "weekly", usedPercent: 30, state: "ok", resetsAt: at + 64 * 60 * MIN },
+    { name: "30d", usedPercent: 20, state: "ok", resetsAt: at + 10 * 24 * 60 * MIN },
+  ]),
+  codex: providerSource(at, [
+    { name: "5h", usedPercent: 50, state: "ok", resetsAt: at + 4 * 60 * MIN },
+    { name: "7d", usedPercent: 40, state: "ok", resetsAt: at + 5 * 24 * 60 * MIN },
+    { name: "5h-old", usedPercent: 99, state: "ok", resetsAt: at - MIN },
+  ]),
+})
+
+async function goShare(
+  pick: Record<string, unknown>,
+  sessions = 200,
+  usageAt: (at: number) => UsageReadResult = unequalUsage,
+) {
+  const at = 5_000 * MIN
+  const realNow = Date.now
+  Date.now = () => at
+  try {
+    const config = parseConfig({
+      categories: { fast: { models: ["provider-slow/m", "provider-fast/m"], pick } },
+      plans: { review: ["@fast"] },
+      agents: { reviewer: "review" },
+      usageSources: { "provider-slow": "go", "provider-fast": "codex" },
+    })
+    const h = await harness(config, [slow, quick], { usage: usageAt(at) })
+    let wins = 0
+    for (let index = 0; index < sessions; index++) {
+      const id = `session-${index}`
+      h.sessions[id] = { agent: "reviewer", model: { providerID: "host", id: "host" } }
+      const diagnostic = await h.routing.diagnoseSession(id)
+      if (selectedProvider(diagnostic?.recommendation) === "provider-slow") wins++
+      else assert.equal(selectedProvider(diagnostic?.recommendation), "provider-fast")
+    }
+    await h.routing.dispose()
+    return wins / sessions
+  } finally {
+    Date.now = realNow
+  }
+}
+
+test("weighted-pace splits sessions by headroom, not by window length, through the router", async (t) => {
+  const share = await goShare({ by: "weighted-pace" })
+  t.diagnostic(`go share over 200 sessions: ${share} (sqrt(70) vs sqrt(50) expects ~0.542; raw headroom 0.583; pace would give ~0.04)`)
+  assert.ok(share >= 0.45 && share <= 0.62, `go share ${share}`)
+  assert.ok(share > 0.5, "the roomier provider still wins more sessions")
+  assert.ok(share < 70 / 120, "softening pulls the split closer to equal than raw headroom")
+  assert.ok(share < 1, "codex still wins some sessions")
+})
+
+test("weighted-pace pushes sessions toward a provider behind its monthly schedule", async (t) => {
+  // The same 70-headroom fixture plus a monthly at 36% with 140 hours to go. The
+  // required line there is ~58.3%, so the deficit is ~22.3 points and the weight is
+  // multiplied by 1 + 22.3/25 ≈ 1.89: sqrt(64) × 1.89 against sqrt(50).
+  const monthlyBehind = (at: number) => reading(at, {
+    go: providerSource(at, [
+      { name: "weekly", usedPercent: 30, state: "ok", resetsAt: at + 64 * 60 * MIN },
+      { name: "monthly", usedPercent: 36, state: "ok", resetsAt: at + 140 * 60 * MIN },
+    ]),
+    codex: providerSource(at, [
+      { name: "5h", usedPercent: 50, state: "ok", resetsAt: at + 4 * 60 * MIN },
+      { name: "7d", usedPercent: 40, state: "ok", resetsAt: at + 5 * 24 * 60 * MIN },
+    ]),
+  })
+  const boosted = await goShare({ by: "weighted-pace" }, 200, monthlyBehind)
+
+  // Unboosted comparison from the same file: the same fresh headroom, sqrt only.
+  const at = 5_000 * MIN
+  const config = parseConfig({
+    categories: { fast: { models: ["provider-slow/m", "provider-fast/m"], pick: { by: "weighted-pace" } } },
+  })
+  const headroom = quotaFreshHeadroom({ "provider-slow": "go", "provider-fast": "codex" }, monthlyBehind(at), at)
+  let plainWins = 0
+  for (let seed = 0; seed < 200; seed++) {
+    const order = orderCategoryByWeightedPace(config.categories.fast, (model) => {
+      const room = headroom(model)
+      return room === undefined ? undefined : Math.sqrt(room)
+    }, String(seed))
+    if (order[0].providerID === "provider-slow") plainWins++
+  }
+  const plain = plainWins / 200
+  t.diagnostic(`monthly-boosted share ${boosted} vs unboosted ${plain} (expects ~0.68 vs ~0.53)`)
+  assert.ok(boosted > plain + 0.08, `the monthly boost moves sessions toward the provider: ${boosted} vs ${plain}`)
+  assert.ok(boosted >= 0.6 && boosted <= 0.78, `boosted share ${boosted}`)
+  assert.ok(plain >= 0.45 && plain <= 0.6, `unboosted share ${plain}`)
+})
+
+test("weighted-priority moves the split toward the provider given a larger explicit weight", async (t) => {
+  const base = await goShare({ by: "weighted-priority", weights: { "provider-slow/m": 1, "provider-fast/m": 1 } })
+  const heavy = await goShare({ by: "weighted-priority", weights: { "provider-slow/m": 1, "provider-fast/m": 4 } })
+  const carried = await goShare({ by: "weighted-priority", weights: { "provider-slow/m": 400 } })
+  t.diagnostic(`go share: equal weights ${base}, codex x4 ${heavy}, go x400 ${carried} (expects ~0.542, ~0.228, ~1)`)
+  assert.ok(base >= 0.45 && base <= 0.62, `equal weights match weighted-pace: ${base}`)
+  assert.ok(heavy < base - 0.2, `weighting codex x4 moves sessions to codex: ${heavy} vs ${base}`)
+  assert.ok(heavy >= 0.1 && heavy <= 0.4, `go share with codex x4 (70 vs 200): ${heavy}`)
+  assert.ok(carried > 0.95, `a large explicit weight carries the slower provider: ${carried}`)
+})
+
 test("weighted-pace picks by provider share through selection, diagnostics and admission", async () => {
   const at = 1_000 * MIN
   const realNow = Date.now
@@ -189,7 +322,7 @@ test("weighted-pace picks by provider share through selection, diagnostics and a
   }
 })
 
-test("weighted-priority lets an explicit weight carry a slower provider", async () => {
+test("an explicit weight must be large enough to outweigh headroom", async () => {
   const at = 1_500 * MIN
   const realNow = Date.now
   Date.now = () => at
@@ -198,15 +331,16 @@ test("weighted-priority lets an explicit weight carry a slower provider", async 
       categories: {
         fast: {
           models: ["provider-slow/m", "provider-fast/m"],
-          pick: { by: "weighted-priority", weights: { "provider-slow/m": 40 } },
+          pick: { by: "weighted-priority", weights: { "provider-slow/m": 4 } },
         },
       },
       plans: { review: ["@fast"] },
       agents: { reviewer: "review" },
       usageSources: { "provider-slow": "go", "provider-fast": "codex" },
     })
-    // Nearly-spent preferred provider, roomy backup: pace alone would always pick
-    // the backup, but the explicit 40x weight makes the preferred one win.
+    // Nearly-spent preferred provider, roomy backup: the explicit 4x weight is not
+    // enough to overcome sqrt(0.1) against sqrt(99), so the backup still wins here:
+    // the weight has to be large enough to matter, not magic.
     const usage = reading(at, {
       go: providerSource(at, [{ name: "weekly", usedPercent: 99.9, state: "ok", resetsAt: at + 60 * MIN }]),
       codex: providerSource(at, [{ name: "weekly", usedPercent: 1, state: "ok", resetsAt: at + 60 * MIN }]),
@@ -214,8 +348,8 @@ test("weighted-priority lets an explicit weight carry a slower provider", async 
     const h = await harness(config, [slow, quick], { usage })
     h.sessions.s = { agent: "reviewer", model: { providerID: "host", id: "host" } }
 
-    // Slow pace 0.1/60 x 40 = 0.067 against quick's 99/60 = 1.65, so the backup
-    // still wins here: the weight has to be large enough to matter, not magic.
+    // The softened headroom keeps the backup ahead, so the weight has to be large
+    // enough to matter, not magic.
     assert.equal(selectedProvider(await h.routing.select("reviewer")), "provider-fast")
 
     // Same category without the weight follows position at equal pace, so the
@@ -416,5 +550,3 @@ test("an earlier plan slot still beats a weighted sticky recovery", () => {
     { model: second, lastActiveAt: 0 })
   assert.equal(chosen(selected), "provider-a", "the earlier category outranks the sticky fallback")
 })
-
-

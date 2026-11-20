@@ -617,11 +617,15 @@ export function createLocalUiServer({ openCodeURL, token, resolveEndpoint, proje
           ...(Number.isFinite(plans.availability?.quotaUpdatedAt) ? { updatedAt: plans.availability.quotaUpdatedAt } :
             Number.isFinite(plans.updatedAt) ? { updatedAt: plans.updatedAt } : {}),
           ...(typeof plans.reason === "string" ? { reason: plans.reason } : {}),
+          cached: false,
           sources: Object.fromEntries(status.map(({ providerID, ...source }) => [providerID, source])) }
         // The host reports an empty source list while it refreshes quota; keep the last
-        // good snapshot so a poll does not blank the page.
+        // good snapshot so a poll does not blank the page. Mark it cached: the router
+        // requires usage.status === "ok", so these observations must not feed fresh
+        // pace, forecasts or weighted shares.
         if (!status.length && lastAvailability?.sources && Object.keys(lastAvailability.sources).length) {
           availability.sources = lastAvailability.sources
+          availability.cached = true
           if (lastAvailability.updatedAt !== undefined) availability.updatedAt = lastAvailability.updatedAt
           if (lastAvailability.status !== "unknown") availability.status = lastAvailability.status
         } else if (status.length) lastAvailability = availability

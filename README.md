@@ -144,9 +144,15 @@ All settings belong in `quartermaster.jsonc` next to the OpenCode config that re
   instead by remaining room per minute of the tightest window, highest first;
   it is a ranking, not a traffic split or a guarantee against exhaustion.
   `pick.by: "weighted-pace"` distributes independent session assignments in
-  proportion to that pace, counting each provider once. Its draw is reproducible
-  per session, agent, plan and hour; calls without a session share that context's
-  draw rather than taking a new draw per call. `pick.by: "window-protection"`
+  proportion to the square root of remaining headroom — 100 minus the most-used
+  window's percentage — counting each provider once. The square root pulls the
+  split toward equal, so one provider's lead does not dominate. Window length is
+  excluded, so a freshly reset 5-hour block does not outbid a monthly allowance.
+  A provider behind its monthly allowance — about twice a weekly one, so 50% must
+  be spent with a week to go — gets `1 + deficit/25` times the weight.
+  Its draw is reproducible per session, agent, plan and hour; calls without a
+  session share that context's draw rather than taking a new draw per call.
+  `pick.by: "window-protection"`
   reduces pace when fresh observed consumption would exhaust a window before
   its reported reset. `pick.by: "weighted-priority"` is the same draw with the
   model's place in the category multiplying its weight, so the list states a
